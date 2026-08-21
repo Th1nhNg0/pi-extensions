@@ -1,0 +1,20 @@
+{
+  "name": "pi-extensions",
+  "version": "1.0.0",
+  "description": "Collection of extensions for Pi Coding Agent",
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "pi-extension"
+  ],
+  "main": "extensions/subscription-usage.ts",
+  "pi": {
+    "extensions": [
+      "extensions/*.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "license": "MIT"
+}
