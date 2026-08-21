@@ -1,7 +1,16 @@
 {
   "name": "pi-extensions",
   "version": "1.0.0",
-  "description": "Collection of extensions for Pi Coding Agent",
+  "description": "Personal collection of custom extensions for Pi Coding Agent by Th1nhNg0",
+  "author": "Thinh Ngo",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Th1nhNg0/pi-extensions.git"
+  },
+  "homepage": "https://github.com/Th1nhNg0/pi-extensions#readme",
+  "bugs": {
+    "url": "https://github.com/Th1nhNg0/pi-extensions/issues"
+  },
   "keywords": [
     "pi-package",
     "pi-coding-agent",
