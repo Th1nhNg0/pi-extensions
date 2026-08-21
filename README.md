@@ -20,10 +20,10 @@ Adds a live status footer line in Pi displaying subscription usage bars, percent
 
 | Provider | Live Footer Output |
 |:---|:---|
-| **Antigravity Pro (Gemini)** | `Antigravity Pro (Gemini)   5h: ░░░░░░  0% ↻4h   W: █████░ 79% ↻4d` |
-| **Antigravity Pro (Claude/GPT)** | `Antigravity Pro (Claude)   5h: ░░░░░░  0% ↻4h   W: ████░░ 61% ↻6d` |
-| **OpenAI Codex** | `OpenAI Codex Plus          W: ███░░░ 51% ↻3d` |
-| **OpenCode Go** | `OpenCode Go (Peak ↻2h)     R: ░░░░░░  2% ↻3h   W: ██░░░░ 44% ↻3d   M: ██████ 98% ↻14d` |
+| **Antigravity Pro (Gemini)** | `Antigravity Pro (Gemini)   5h: [□□□□□□]  0% ↻4h   W: [■■■■■□] 79% ↻4d` |
+| **Antigravity Pro (Claude/GPT)** | `Antigravity Pro (Claude)   5h: [□□□□□□]  0% ↻4h   W: [■■■■□□] 61% ↻6d` |
+| **OpenAI Codex** | `OpenAI Codex Plus          W: [■■■□□□] 51% ↻3d` |
+| **OpenCode Go** | `OpenCode Go (Peak ↻2h)     R: [□□□□□□]  2% ↻3h   W: [■■□□□□] 44% ↻3d   M: [■■■■■■] 98% ↻14d` |
 
 #### Legend:
 * `5h` / `R` : 5-Hour rolling window
