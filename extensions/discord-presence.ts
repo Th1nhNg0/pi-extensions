@@ -115,6 +115,8 @@ export interface DiscordPresenceTransport {
 	onDisconnected?(handler: () => void): () => void;
 }
 
+type AssertLockOwnership = () => Promise<void>;
+
 export interface PresenceStateStore {
 	upsert(record: SessionRecord): Promise<PresenceState>;
 	remove(sessionId: string): Promise<PresenceState>;
@@ -122,7 +124,7 @@ export interface PresenceStateStore {
 	withPublisherLock<T>(
 		sessionId: string,
 		publisherGeneration: number,
-		operation: () => Promise<T>,
+		operation: (assertOwnership: AssertLockOwnership) => Promise<T>,
 	): Promise<T | undefined>;
 }
 
@@ -335,6 +337,10 @@ export function formatModelLabel(provider?: string, modelId?: string): string {
 	return truncateText(label, 96);
 }
 
+function formatPresenceModelLabel(provider?: string, modelId?: string): string {
+	return truncateText(modelId ?? provider ?? "Pi", 48);
+}
+
 export function formatPhase(phase: PresencePhase): string {
 	switch (phase) {
 		case "thinking":
@@ -395,6 +401,10 @@ function orderedSessions(state: PresenceState): SessionRecord[] {
 	});
 }
 
+function projectCount(records: readonly SessionRecord[]): number {
+	return new Set(records.map((record) => record.projectName)).size;
+}
+
 export function buildAggregateActivity(state: PresenceState): PresenceActivity {
 	const records = orderedSessions(state);
 	if (records.length === 0) {
@@ -408,9 +418,11 @@ export function buildAggregateActivity(state: PresenceState): PresenceActivity {
 
 	const primary = records[0];
 	const totalUsage = sumUsage(records);
-	const sessionLabel = `${records.length} Pi session${records.length === 1 ? "" : "s"}`;
+	const sessionLabel = `${records.length} session${records.length === 1 ? "" : "s"}`;
 	const details = `${sessionLabel} · ${formatTokenCount(totalUsage.total)} tok · ${formatCost(totalUsage)}`;
-	const activityState = `${primary.projectName} · ${formatModelLabel(primary.provider, primary.modelId)} · ${formatPhase(primary.phase)}`;
+	const projects = projectCount(records);
+	const projectLabel = `${projects} project${projects === 1 ? "" : "s"}`;
+	const activityState = `${formatPhase(primary.phase)} · ${formatPresenceModelLabel(primary.provider, primary.modelId)} · ${projectLabel}`;
 	const startTimestamp = Math.min(...records.map((record) => record.startedAt));
 
 	return {
@@ -660,29 +672,39 @@ async function awaitWithTimeout<T>(
 	}
 }
 
-function isProcessAlive(pid: number): boolean {
-	if (!Number.isInteger(pid) || pid <= 0) return false;
+interface FileLockOptions {
+	ownerToken?: string;
+}
+
+async function readLockOwner(markerPath: string): Promise<string | undefined> {
 	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
+		return await readFile(markerPath, "utf8");
+	} catch {
+		return undefined;
 	}
 }
 
-interface FileLockOptions {
-	ownerToken?: string;
-	canBreak?: (ownerToken: string) => Promise<boolean>;
-}
-
-async function reclaimFileLock(lockPath: string): Promise<boolean> {
+async function reclaimFileLock(
+	lockPath: string,
+	expectedOwnerToken: string | undefined,
+): Promise<boolean> {
 	const tombstone = `${lockPath}.reclaim.${randomUUID()}`;
 	try {
-		// Renaming the whole lock directory is the fencing operation. A
-		// concurrent contender can create a fresh lock only after this rename;
-		// it cannot be affected by cleanup of the tombstone.
+		// Renaming the whole lock directory is the fencing operation. Verify
+		// the owner token after the rename so a contender cannot clean up a
+		// replacement lock that won the race while this one was stale.
 		await rename(lockPath, tombstone);
 	} catch {
+		return false;
+	}
+	const actualOwnerToken = await readLockOwner(join(tombstone, "owner"));
+	if (actualOwnerToken !== expectedOwnerToken) {
+		try {
+			await rename(tombstone, lockPath);
+		} catch {
+			// A replacement owner may have acquired the path already. Leave
+			// the mismatched tombstone untouched rather than deleting it.
+		}
 		return false;
 	}
 	try {
@@ -695,20 +717,14 @@ async function reclaimFileLock(lockPath: string): Promise<boolean> {
 
 async function releaseFileLock(
 	lockPath: string,
-	markerPath: string,
 	ownerToken: string,
 ): Promise<void> {
-	try {
-		if ((await readFile(markerPath, "utf8")) !== ownerToken) return;
-	} catch {
-		return;
-	}
-	await reclaimFileLock(lockPath);
+	await reclaimFileLock(lockPath, ownerToken);
 }
 
 async function withFileLock<T>(
 	lockPath: string,
-	operation: () => Promise<T>,
+	operation: (assertOwnership: AssertLockOwnership) => Promise<T>,
 	options: FileLockOptions = {},
 ): Promise<T> {
 	await mkdir(dirname(lockPath), { recursive: true });
@@ -733,31 +749,30 @@ async function withFileLock<T>(
 			let shouldBreak = false;
 			try {
 				const lockStats = await stat(lockPath);
-				const lockContents = await readFile(markerPath, "utf8").catch(() => "");
-				if (options.canBreak && lockContents) {
-					shouldBreak = await options.canBreak(lockContents);
-				}
-				if (!shouldBreak && Date.now() - lockStats.mtimeMs > LOCK_STALE_MS) {
-					const ownerPid = Number.parseInt(lockContents.split(":", 1)[0] ?? "", 10);
-					// A live owner is never forcibly removed. This prevents a
-					// paused process from deleting a replacement lock later.
-					shouldBreak = !isProcessAlive(ownerPid);
-				}
+				// Do not rely on PID liveness here: Windows can reuse a PID after
+				// the process that created this lock has exited.
+				shouldBreak = Date.now() - lockStats.mtimeMs > LOCK_STALE_MS;
 			} catch {
 				// A concurrent owner may have released the lock.
 			}
 			if (shouldBreak) {
-				await reclaimFileLock(lockPath);
+				await reclaimFileLock(lockPath, await readLockOwner(markerPath));
 				continue;
 			}
 			if (Date.now() >= deadline) throw new Error("presence state lock timeout");
 			await wait(LOCK_RETRY_MS);
 		}
 	}
+	const assertOwnership: AssertLockOwnership = async () => {
+		if ((await readLockOwner(markerPath)) !== ownerToken) {
+			throw new Error("presence lock ownership lost");
+		}
+	};
 	try {
-		return await operation();
+		await assertOwnership();
+		return await operation(assertOwnership);
 	} finally {
-		await releaseFileLock(lockPath, markerPath, ownerToken);
+		await releaseFileLock(lockPath, ownerToken);
 	}
 }
 
@@ -808,12 +823,12 @@ export class FilePresenceStateStore implements PresenceStateStore {
 	async withPublisherLock<T>(
 		sessionId: string,
 		publisherGeneration: number,
-		operation: () => Promise<T>,
+		operation: (assertOwnership: AssertLockOwnership) => Promise<T>,
 	): Promise<T | undefined> {
 		const ownerToken = `${process.pid}:${randomUUID()}:${sessionId}:${publisherGeneration}`;
 		return withFileLock(
 			this.publisherLockPath,
-			async () => {
+			async (assertOwnership) => {
 				const state = await this.read();
 				if (
 					state.publisherId !== sessionId ||
@@ -821,7 +836,7 @@ export class FilePresenceStateStore implements PresenceStateStore {
 				) {
 					return undefined;
 				}
-				return operation();
+				return operation(assertOwnership);
 			},
 			{ ownerToken },
 		);
@@ -830,7 +845,7 @@ export class FilePresenceStateStore implements PresenceStateStore {
 	private async mutate(
 		mutation: (state: PresenceState, now: number) => void,
 	): Promise<PresenceState> {
-		return withFileLock(this.lockPath, async () => {
+		return withFileLock(this.lockPath, async (assertStateLock) => {
 			const now = this.now();
 			const state = pruneState(
 				await readStateFile(this.filePath, now, this.staleAfterMs),
@@ -842,7 +857,11 @@ export class FilePresenceStateStore implements PresenceStateStore {
 			mutation(state, now);
 			pruneState(state, now, this.staleAfterMs);
 
-			const persist = async (): Promise<PresenceState> => {
+			const persist = async (
+				assertPublisherLock?: AssertLockOwnership,
+			): Promise<PresenceState> => {
+				await assertStateLock();
+				await assertPublisherLock?.();
 				state.updatedAt = now;
 				await writeStateFile(this.filePath, state);
 				return cloneState(state);
@@ -854,9 +873,11 @@ export class FilePresenceStateStore implements PresenceStateStore {
 
 			// Publisher changes and Discord writes share this second lock. A
 			// publisher cannot be elected away while its RPC write is in flight.
-			return withFileLock(this.publisherLockPath, persist, {
-				ownerToken: `${process.pid}:${randomUUID()}:registry:${now}`,
-			});
+			return withFileLock(
+				this.publisherLockPath,
+				(assertPublisherLock) => persist(assertPublisherLock),
+				{ ownerToken: `${process.pid}:${randomUUID()}:registry:${now}` },
+			);
 		});
 	}
 }
@@ -1047,6 +1068,7 @@ export class DiscordPresenceManager {
 		this.heartbeatTimer = undefined;
 		this.clearRetryTimer();
 		await this.registryQueue.catch(() => undefined);
+		await this.presenceQueue.catch(() => undefined);
 
 		const wasPublisher = this.publisher;
 		if (wasPublisher && this.transport) {
@@ -1054,13 +1076,14 @@ export class DiscordPresenceManager {
 				await this.stateStore.withPublisherLock(
 					this.sessionId,
 					this.publisherGeneration,
-					async () => {
+					async (assertOwnership) => {
 						const current = await this.stateStore.read();
 						if (
 							current.publisherId === this.sessionId &&
 							Object.keys(current.sessions).length === 1
 						) {
 							try {
+								await assertOwnership();
 								if (this.transport) {
 									await awaitWithTimeout(
 										this.transport.clearActivity(),
@@ -1165,7 +1188,7 @@ export class DiscordPresenceManager {
 			const didPublish = await this.stateStore.withPublisherLock(
 				this.sessionId,
 				state.publisherGeneration,
-				async () => {
+				async (assertOwnership) => {
 					if (
 						!this.started ||
 						this.disposed ||
@@ -1176,6 +1199,7 @@ export class DiscordPresenceManager {
 					) {
 						return false;
 					}
+					await assertOwnership();
 					await awaitWithTimeout(
 						transport.setActivity(buildAggregateActivity(state)),
 						RPC_WRITE_TIMEOUT_MS,

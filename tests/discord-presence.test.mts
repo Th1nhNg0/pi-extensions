@@ -12,6 +12,7 @@ import {
 	type PresenceStateStore,
 	type SessionRecord,
 	buildActivity,
+	buildAggregateActivity,
 	collectUsageFromEntries,
 	emptyUsageTotals,
 	extractUsage,
@@ -64,7 +65,7 @@ class MemoryStateStore implements PresenceStateStore {
 	async withPublisherLock<T>(
 		sessionId: string,
 		publisherGeneration: number,
-		operation: () => Promise<T>,
+		operation: (assertOwnership: () => Promise<void>) => Promise<T>,
 	): Promise<T | undefined> {
 		if (
 			this.state.publisherId !== sessionId ||
@@ -72,7 +73,7 @@ class MemoryStateStore implements PresenceStateStore {
 		) {
 			return undefined;
 		}
-		return operation();
+		return operation(async () => undefined);
 	}
 }
 
@@ -127,12 +128,50 @@ test("buildActivity formats a privacy-safe aggregate", () => {
 			startedAt: 1_700_000_000_000,
 		}),
 		{
-			details: "1 Pi session · 0 tok · cost n/a",
-			state: "pi-extensions · openai-codex/gpt-5 · Thinking",
+			details: "1 session · 0 tok · cost n/a",
+			state: "Thinking · gpt-5 · 1 project",
 			startTimestamp: 1_700_000_000_000,
 			instance: true,
 		},
 	);
+});
+
+test("aggregate presence summarizes sessions and projects", () => {
+	const base = {
+		version: 1 as const,
+		publisherId: "a",
+		publisherGeneration: 1,
+		updatedAt: 100,
+	};
+	const state: PresenceState = {
+		...base,
+		sessions: {
+			a: {
+				...makeRecord("a", 100),
+				projectName: "project-a",
+				provider: "provider",
+				modelId: "model-a",
+				phase: "thinking",
+			},
+			b: {
+				...makeRecord("b", 100),
+				projectName: "project-b",
+				provider: "provider",
+				modelId: "model-b",
+				phase: "tools",
+			},
+			c: {
+				...makeRecord("c", 100),
+				projectName: "project-c",
+				provider: "provider",
+				modelId: "model-c",
+				phase: "idle",
+			},
+		},
+	};
+	const activity = buildAggregateActivity(state);
+	assert.equal(activity.details, "3 sessions · 0 tok · cost n/a");
+	assert.equal(activity.state, "Thinking · model-a · 3 projects");
 });
 
 test("parseClientId accepts Discord snowflakes and rejects unsafe values", () => {
@@ -228,7 +267,7 @@ test("file registry recovers a dead stale lock directory", async () => {
 	const lockPath = `${path}.lock`;
 	try {
 		await mkdir(lockPath);
-		await writeFile(join(lockPath, "owner"), "99999999:dead", "utf8");
+		await writeFile(join(lockPath, "owner"), `${process.pid}:stale`, "utf8");
 		await utimes(lockPath, new Date(0), new Date(0));
 		const store = new FilePresenceStateStore(path);
 		const state = await store.upsert(makeRecord("recovered", Date.now()));
@@ -280,7 +319,7 @@ test("manager publishes metrics and clears the final session", async () => {
 	await manager.setPhase("tools");
 	await manager.refresh();
 	const activity = transport.activities.at(-1);
-	assert.equal(activity?.details, "1 Pi session · 1.2k tok · $0.42");
+	assert.equal(activity?.details, "1 session · 1.2k tok · $0.42");
 	assert.match(activity?.state ?? "", /Using tools/);
 
 	const diagnostics = await manager.getDiagnosticText();
@@ -321,7 +360,7 @@ test("multiple sessions share one publisher and fail over safely", async () => {
 	assert.equal(secondTransport.connectCount, 0);
 
 	await first.refresh();
-	assert.match(firstTransport.activities.at(-1)?.details ?? "", /2 Pi sessions/);
+	assert.match(firstTransport.activities.at(-1)?.details ?? "", /2 sessions/);
 
 	await first.stop();
 	assert.equal(firstTransport.clearCount, 0);
