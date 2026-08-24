@@ -52,7 +52,7 @@ The activity aggregates all active Pi sessions:
 
 ```text
 Details: 3 Pi sessions · 82k tok · $1.24
-State: 1 active · pi-extensions +2 · openai-codex/gpt-5 · Thinking · ctx 42%
+State: pi-extensions · openai-codex/gpt-5 · Thinking
 ```
 
 It updates between `Thinking`, `Using tools`, and `Idle`, includes the earliest active session timer, tracks tokens/cost/context usage, and never sends prompts, paths, filenames, commands, or tool arguments. Providers without pricing show `cost n/a`. Discord must be running in the background; if it is unavailable, the extension logs one warning and retries without interrupting Pi.

@@ -128,7 +128,7 @@ test("buildActivity formats a privacy-safe aggregate", () => {
 		}),
 		{
 			details: "1 Pi session · 0 tok · cost n/a",
-			state: "1 active · pi-extensions · openai-codex/gpt-5 · Thinking",
+			state: "pi-extensions · openai-codex/gpt-5 · Thinking",
 			startTimestamp: 1_700_000_000_000,
 			instance: true,
 		},

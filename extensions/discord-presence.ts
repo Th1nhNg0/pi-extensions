@@ -395,15 +395,6 @@ function orderedSessions(state: PresenceState): SessionRecord[] {
 	});
 }
 
-function activeSessionCount(records: readonly SessionRecord[]): number {
-	return records.filter((record) => record.phase !== "idle").length;
-}
-
-function contextLabel(context: ContextSnapshot | undefined): string {
-	if (!context || context.percent === null) return "";
-	return ` · ctx ${Math.round(context.percent)}%`;
-}
-
 export function buildAggregateActivity(state: PresenceState): PresenceActivity {
 	const records = orderedSessions(state);
 	if (records.length === 0) {
@@ -417,14 +408,9 @@ export function buildAggregateActivity(state: PresenceState): PresenceActivity {
 
 	const primary = records[0];
 	const totalUsage = sumUsage(records);
-	const activeCount = activeSessionCount(records);
 	const sessionLabel = `${records.length} Pi session${records.length === 1 ? "" : "s"}`;
 	const details = `${sessionLabel} · ${formatTokenCount(totalUsage.total)} tok · ${formatCost(totalUsage)}`;
-	const projectLabel =
-		records.length > 1
-			? `${primary.projectName} +${records.length - 1}`
-			: primary.projectName;
-	const activityState = `${activeCount > 0 ? `${activeCount} active · ` : ""}${projectLabel} · ${formatModelLabel(primary.provider, primary.modelId)} · ${formatPhase(primary.phase)}${contextLabel(primary.context)}`;
+	const activityState = `${primary.projectName} · ${formatModelLabel(primary.provider, primary.modelId)} · ${formatPhase(primary.phase)}`;
 	const startTimestamp = Math.min(...records.map((record) => record.startedAt));
 
 	return {
