@@ -8,7 +8,7 @@ Personal collection of custom extensions, utilities, and tools for the [Pi Codin
 
 ### 1. `subscription-usage` (`extensions/subscription-usage.ts`)
 
-Adds a live status footer line in Pi displaying subscription usage bars, percentages, and reset countdown timers for subscription-backed LLM providers.
+Adds a live widget line below the editor in Pi displaying subscription usage bars, percentages, and reset countdown timers for subscription-backed LLM providers.
 
 #### Supported Providers
 
@@ -20,7 +20,7 @@ Adds a live status footer line in Pi displaying subscription usage bars, percent
 
 ### 🖥️ Status Bar Examples
 
-| Provider | Live Footer Output |
+| Provider | Live Widget Output |
 | :--- | :--- |
 | **Antigravity Pro (Gemini)** | `Antigravity Pro (Gemini)   5h: [□□□□□□]  0% ↻4h   W: [■■■■■□] 79% ↻4d` |
 | **Antigravity Pro (Claude/GPT)** | `Antigravity Pro (Claude)   5h: [□□□□□□]  0% ↻4h   W: [■■■■□□] 61% ↻6d` |

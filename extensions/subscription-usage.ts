@@ -1,8 +1,8 @@
 /**
- * Subscription usage footer extension.
+ * Subscription usage widget extension.
  *
- * Shows a third footer line with usage bars for subscription-backed
- * providers:
+ * Shows usage bars for subscription-backed providers in a dedicated
+ * widget line below the editor:
  *
  *   opencode-go : OpenCode Go  R: ░░░░░░  4% ↻4h  W: ██████  97% ↻8h  M: █████░░░  62% ↻20d
  *                 OpenCode Go (Peak ↻2h)  R: ░░░░░░  4% ↻4h  W: ██████  97% ↻8h  M: █████░░░  62% ↻20d
@@ -113,7 +113,12 @@ interface ProviderCfg {
 interface StatusCtx {
 	model?: { provider?: string; id?: string };
 	ui: {
-		setStatus(key: string, text: string | undefined): void;
+		setWidget(
+			key: string,
+			content: string[] | undefined,
+			options?: { placement?: "aboveEditor" | "belowEditor" },
+		): void;
+		setStatus?(key: string, text: string | undefined): void;
 		theme: { fg(color: string, text: string): string };
 	};
 }
@@ -631,10 +636,24 @@ export const antigravityCfg: ProviderCfg = {
 	},
 };
 
+export const WIDGET_KEY = "subscription-usage";
+
 export default function (pi: ExtensionAPI) {
 	const cache = new Map<string, ProviderState>();
 	let currentCtx: StatusCtx | undefined;
 	const cfgs = [opencodeCfg, codexCfg, antigravityCfg];
+
+	function renderUi(
+		ui: StatusCtx["ui"] | undefined,
+		providerId: string,
+		text: string | undefined,
+	) {
+		if (!ui) return;
+		ui.setStatus?.(providerId, undefined);
+		ui.setWidget(WIDGET_KEY, text ? [text] : undefined, {
+			placement: "belowEditor",
+		});
+	}
 
 	function freshState(): ProviderState {
 		return {
@@ -666,7 +685,7 @@ export default function (pi: ExtensionAPI) {
 			state.lastText =
 				cfg.render(disk.data, ui.theme, currentCtx.model?.id) ||
 				`${cfg.id}: no data`;
-			ui.setStatus(cfg.id, state.lastText);
+			renderUi(ui, cfg.id, state.lastText);
 			arm(
 				cfg,
 				currentCtx,
@@ -773,7 +792,7 @@ export default function (pi: ExtensionAPI) {
 					cfg.render(state.lastData, ui.theme, ctx.model?.id) ||
 					`${cfg.id}: no data`;
 			}
-			ui?.setStatus(cfg.id, state.lastText);
+			renderUi(ui, cfg.id, state.lastText);
 			return "cached";
 		}
 
@@ -785,7 +804,7 @@ export default function (pi: ExtensionAPI) {
 				state.lastText =
 					cfg.render(state.lastData, ui.theme, ctx.model?.id) ||
 					`${cfg.id}: no data`;
-				ui.setStatus(cfg.id, state.lastText);
+				renderUi(ui, cfg.id, state.lastText);
 			}
 			return "cached";
 		}
@@ -802,7 +821,7 @@ export default function (pi: ExtensionAPI) {
 			state.lastData = data;
 			state.lastText =
 				cfg.render(data, ui.theme, ctx.model?.id) || `${cfg.id}: no data`;
-			ui.setStatus(cfg.id, state.lastText);
+			renderUi(ui, cfg.id, state.lastText);
 			saveDiskCache(cfg.id, data);
 			return "fetched";
 		} catch (err) {
@@ -817,10 +836,10 @@ export default function (pi: ExtensionAPI) {
 			if (state.lastText !== undefined && !state.lastText.includes("err")) {
 				// Keep the last known numbers, tinted so staleness is visible.
 				state.lastText = ui.theme.fg("warning", state.lastText + " ⚠");
-				ui.setStatus(cfg.id, state.lastText);
+				renderUi(ui, cfg.id, state.lastText);
 			} else {
 				state.lastText = ui.theme.fg("error", `${cfg.id}: err`);
-				ui.setStatus(cfg.id, state.lastText);
+				renderUi(ui, cfg.id, state.lastText);
 			}
 			return "cached";
 		}
@@ -869,7 +888,11 @@ export default function (pi: ExtensionAPI) {
 		const state = cache.get(key);
 		if (state?.timer) clearTimeout(state.timer);
 		cache.delete(key);
-		safeUi(ctx)?.setStatus(key, undefined);
+		const ui = safeUi(ctx);
+		if (ui) {
+			ui.setStatus?.(key, undefined);
+			ui.setWidget(WIDGET_KEY, undefined);
+		}
 	}
 
 	/** Route to the right provider config for the active model. */
