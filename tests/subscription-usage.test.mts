@@ -4,6 +4,7 @@ import {
 	bar,
 	cap,
 	codexCfg,
+	normalizeUsageData,
 	codexWindowKey,
 	earliestReset,
 	parseCodexUsage,
@@ -25,6 +26,26 @@ test("cap capitalizes strings", () => {
 	assert.equal(cap(""), "");
 });
 
+test("usage payload normalization clamps percentages and drops malformed data", () => {
+	assert.deepEqual(
+		normalizeUsageData({
+			windows: { high: 150, low: -10, okay: 42.5, invalid: Number.NaN },
+			plan: "  plus  ",
+			resets: { okay: 1_000, invalid: Number.NaN },
+		}),
+		{
+			windows: { high: 100, low: 0, okay: 42.5 },
+			plan: "plus",
+			resets: { okay: 1_000 },
+		},
+	);
+	assert.equal(
+		normalizeUsageData({ windows: { invalid: Number.NaN } }),
+		undefined,
+	);
+	assert.equal(normalizeUsageData([]), undefined);
+});
+
 test("resetLabel formats countdowns correctly", () => {
 	const now = 1_000_000;
 	assert.equal(resetLabel(now + 30_000, now), "↻<1m");
@@ -34,6 +55,7 @@ test("resetLabel formats countdowns correctly", () => {
 	assert.equal(resetLabel(now + 3 * 86400_000, now), "↻3d");
 	assert.equal(resetLabel(now + 14 * 86400_000, now), "↻14d");
 	assert.equal(resetLabel(now + 35 * 86400_000, now), "↻5w");
+	assert.equal(resetLabel(Number.NaN, now), "↻?");
 });
 
 test("codexWindowKey classifies window durations", () => {
@@ -182,4 +204,7 @@ test("bar renders proper cell count and color bands", () => {
 	assert.equal(bar(0, undefined, "key", mockTheme), "░░░░░░  0%");
 	assert.equal(bar(50, undefined, "key", mockTheme), "███░░░  50%");
 	assert.equal(bar(100, undefined, "key", mockTheme), "██████  100%");
+	assert.equal(bar(150, undefined, "key", mockTheme), "██████  100%");
+	assert.equal(bar(-10, undefined, "key", mockTheme), "░░░░░░  0%");
+	assert.equal(bar(Number.NaN, undefined, "key", mockTheme), "░░░░░░  0%");
 });

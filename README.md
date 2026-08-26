@@ -40,7 +40,9 @@ Adds a live widget line below the editor in Pi displaying subscription usage bar
 
 * **Adaptive Fetching:** Refreshes on session start, model switch, and agent turn settlement with intelligent cooldowns.
 * **Smart Scheduling:** Reset-aware wake timers that automatically refresh immediately when a usage bucket flips.
-* **Shared Cache:** Persists data across multiple Pi sessions via `~/.pi/agent/subscription-usage-cache.json`.
+* **Shared Cache:** Persists validated data across multiple Pi sessions via `~/.pi/agent/subscription-usage-cache.json`, using asynchronous atomic writes so cache I/O does not block Pi.
+* **Safe Rendering:** Malformed provider values are ignored and percentages are bounded to `0–100%` before they reach the widget.
+* **Stale-Request Protection:** Overlapping refreshes are coalesced, and results from a replaced session/model are discarded.
 
 ---
 
@@ -59,21 +61,21 @@ It updates between `Thinking`, `Using tools`, and `Idle`, includes the earliest 
 
 #### Setup
 
-The extension includes the public application ID `1541350417143955466`, so no environment variable is required. Start or reload Pi while Discord Desktop is running, then use `/discord-status` to check the connection.
+The extension includes a public Discord application ID, so no environment variable is required. Start or reload Pi while Discord Desktop is running, then use `/discord-status` to check the connection.
 
 To use your own Discord application instead, set `PI_DISCORD_CLIENT_ID` before starting Pi:
 
 ```powershell
-$env:PI_DISCORD_CLIENT_ID = "123456789012345678"
+$env:PI_DISCORD_CLIENT_ID = "<your-discord-application-id>"
 ```
 
 On macOS/Linux:
 
 ```bash
-export PI_DISCORD_CLIENT_ID="123456789012345678"
+export PI_DISCORD_CLIENT_ID="<your-discord-application-id>"
 ```
 
-Multiple Pi sessions share a registry at `~/.pi/agent/discord-presence-state.json`. One session publishes the aggregate activity while the others send heartbeats. If the publisher exits, another active session takes over; stale sessions are removed automatically. Usage totals include assistant/tool results plus compaction and branch-summary calls. The registry contains only project/model/state/metrics metadata. `/discord-status` shows the per-session project, model, phase, tokens, cost, context, and duration.
+Multiple Pi sessions share a registry at `~/.pi/agent/discord-presence-state.json`. One session publishes the aggregate activity while the others send heartbeats. If the publisher exits, another active session takes over; stale sessions are removed automatically. Usage totals include assistant/tool results plus compaction and branch-summary calls. The registry contains only project/model/state/metrics metadata. `/discord-status` shows the per-session project, model, phase, tokens, cost, context, and duration. Registry locks renew their lease during long operations, and only the newest pending Discord activity is published, keeping rapid tool/phase updates responsive without replaying stale states.
 
 ---
 

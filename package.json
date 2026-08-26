@@ -2,6 +2,7 @@
   "name": "pi-extensions",
   "version": "1.0.0",
   "description": "Personal collection of custom extensions for Pi Coding Agent by Th1nhNg0",
+  "type": "module",
   "author": "Thinh Ngo",
   "repository": {
     "type": "git",

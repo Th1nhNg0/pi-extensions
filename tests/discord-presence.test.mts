@@ -17,6 +17,7 @@ import {
 	emptyUsageTotals,
 	extractUsage,
 	mergeUsageTotals,
+	normalizeContextUsage,
 	parseClientId,
 	resolveProjectName,
 } from "../extensions/discord-presence.ts";
@@ -107,6 +108,35 @@ class MockTransport implements DiscordPresenceTransport {
 	}
 }
 
+class BlockingTransport extends MockTransport {
+	private readonly releasePromise: Promise<void>;
+	private releaseFirst!: () => void;
+	private markStarted!: () => void;
+	readonly firstActivityStarted: Promise<void>;
+
+	constructor() {
+		super();
+		this.releasePromise = new Promise((resolve) => {
+			this.releaseFirst = resolve;
+		});
+		this.firstActivityStarted = new Promise((resolve) => {
+			this.markStarted = resolve;
+		});
+	}
+
+	release(): void {
+		this.releaseFirst();
+	}
+
+	async setActivity(activity: SetActivity): Promise<void> {
+		this.activities.push(activity);
+		if (this.activities.length === 1) {
+			this.markStarted();
+			await this.releasePromise;
+		}
+	}
+}
+
 function makeRecord(sessionId: string, startedAt: number): SessionRecord {
 	return {
 		sessionId,
@@ -117,6 +147,18 @@ function makeRecord(sessionId: string, startedAt: number): SessionRecord {
 		usage: emptyUsageTotals(),
 	};
 }
+
+test("context usage normalization clamps unsafe percentages", () => {
+	assert.deepEqual(
+		normalizeContextUsage({ tokens: 120, contextWindow: 1000, percent: 150 }),
+		{ tokens: 120, contextWindow: 1000, percent: 100 },
+	);
+	assert.deepEqual(
+		normalizeContextUsage({ tokens: 120, contextWindow: 1000, percent: -5 }),
+		{ tokens: 120, contextWindow: 1000, percent: 0 },
+	);
+	assert.equal(normalizeContextUsage([]), undefined);
+});
 
 test("buildActivity formats a privacy-safe aggregate", () => {
 	assert.deepEqual(
@@ -134,6 +176,18 @@ test("buildActivity formats a privacy-safe aggregate", () => {
 			instance: true,
 		},
 	);
+});
+
+test("presence text strips control characters before publishing", () => {
+	const activity = buildActivity({
+		projectName: "project\nname",
+		provider: "provider\tname",
+		modelId: "model\rname",
+		phase: "idle",
+		startedAt: 1_700_000_000_000,
+	});
+	assert.doesNotMatch(activity.details, /[\u0000-\u001f\u007f]/);
+	assert.doesNotMatch(activity.state, /[\u0000-\u001f\u007f]/);
 });
 
 test("aggregate presence summarizes sessions and projects", () => {
@@ -329,6 +383,29 @@ test("manager publishes metrics and clears the final session", async () => {
 	await manager.stop();
 	assert.equal(transport.clearCount, 1);
 	assert.equal(transport.closeCount, 1);
+});
+
+test("manager coalesces presence updates while Discord is busy", async () => {
+	const stateStore = new MemoryStateStore();
+	const transport = new BlockingTransport();
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID,
+		projectName: "pi-extensions",
+		startedAt: 1_700_000_000_000,
+		stateStore,
+		createTransport: () => transport,
+		logger: () => undefined,
+	});
+
+	const startPromise = manager.start();
+	await transport.firstActivityStarted;
+	await manager.setPhase("thinking");
+	transport.release();
+	await startPromise;
+
+	assert.equal(transport.activities.length, 2);
+	assert.match(transport.activities.at(-1)?.state ?? "", /Thinking/);
+	await manager.stop();
 });
 
 test("multiple sessions share one publisher and fail over safely", async () => {

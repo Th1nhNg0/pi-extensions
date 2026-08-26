@@ -62,41 +62,126 @@ interface DiskCacheRecord {
 
 type DiskCache = Record<string, DiskCacheRecord>;
 
-function loadDiskCache(): DiskCache {
-	try {
-		if (fs.existsSync(CACHE_PATH)) {
-			const raw = fs.readFileSync(CACHE_PATH, "utf8");
-			return JSON.parse(raw) as DiskCache;
-		}
-	} catch {
-		// Ignore partial read or parse collision
-	}
-	return {};
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value !== null && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
 }
 
-function saveDiskCache(providerId: string, data: UsageData) {
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizePercent(value: unknown): number | undefined {
+	const percent = finiteNumber(value);
+	return percent === undefined ? undefined : Math.min(100, Math.max(0, percent));
+}
+
+function normalizeResets(value: unknown): Record<string, number> | undefined {
+	const record = asRecord(value);
+	if (!record) return undefined;
+	const entries = Object.entries(record).flatMap(([key, reset]) => {
+		const value = finiteNumber(reset);
+		return value !== undefined && value >= 0 ? [[key, value] as const] : [];
+	});
+	return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+/** Decode provider or disk-cache data before it reaches rendering or scheduling. */
+export function normalizeUsageData(value: unknown): UsageData | undefined {
+	const record = asRecord(value);
+	const windowsRecord = asRecord(record?.windows);
+	if (!windowsRecord) return undefined;
+
+	const windows = Object.fromEntries(
+		Object.entries(windowsRecord).flatMap(([key, percent]) => {
+			const normalized = normalizePercent(percent);
+			return normalized === undefined ? [] : [[key, normalized] as const];
+		}),
+	) as Record<string, number>;
+	if (Object.keys(windows).length === 0) return undefined;
+
+	const plan = typeof record?.plan === "string" ? record.plan.trim() : undefined;
+	const resets = normalizeResets(record?.resets);
+	return {
+		windows,
+		...(plan ? { plan } : {}),
+		...(resets ? { resets } : {}),
+	};
+}
+
+function normalizeDiskCache(value: unknown): DiskCache {
+	const record = asRecord(value);
+	if (!record) return {};
+	const entries = Object.entries(record).flatMap(([providerId, candidate]) => {
+		const cacheRecord = asRecord(candidate);
+		const data = normalizeUsageData(cacheRecord?.data);
+		const fetchedAt = finiteNumber(cacheRecord?.fetchedAt);
+		return data && fetchedAt !== undefined && fetchedAt >= 0
+			? [[providerId, { data, fetchedAt }] as const]
+			: [];
+	});
+	return Object.fromEntries(entries);
+}
+
+let diskCacheSnapshot: DiskCache = {};
+let diskCacheWriteQueue: Promise<void> = Promise.resolve();
+
+async function loadDiskCache(): Promise<DiskCache> {
 	try {
-		const existing = loadDiskCache();
+		const raw = await fs.promises.readFile(CACHE_PATH, "utf8");
+		diskCacheSnapshot = normalizeDiskCache(JSON.parse(raw) as unknown);
+	} catch {
+		// Keep the last valid snapshot during a partial read or file collision.
+	}
+	return diskCacheSnapshot;
+}
+
+async function persistDiskCache(cache: DiskCache): Promise<void> {
+	const dir = path.dirname(CACHE_PATH);
+	await fs.promises.mkdir(dir, { recursive: true });
+	const contents = JSON.stringify(cache, null, 2);
+	const tmp = CACHE_PATH + `.${process.pid}.${Date.now()}.tmp`;
+	try {
+		await fs.promises.writeFile(tmp, contents, "utf8");
+		try {
+			await fs.promises.rename(tmp, CACHE_PATH);
+		} catch {
+			// Windows cannot always replace an existing file with rename().
+			await fs.promises.writeFile(CACHE_PATH, contents, "utf8");
+		}
+	} finally {
+		await fs.promises.unlink(tmp).catch(() => undefined);
+	}
+}
+
+async function saveDiskCache(
+	providerId: string,
+	data: UsageData,
+): Promise<void> {
+	const previous = diskCacheWriteQueue;
+	const operation = (async () => {
+		try {
+			await previous;
+		} catch {
+			// A failed write must not block later cache updates.
+		}
+		const existing = await loadDiskCache();
 		existing[providerId] = {
-			data,
+			data: normalizeUsageData(data) ?? data,
 			fetchedAt: Date.now(),
 		};
-		const dir = path.dirname(CACHE_PATH);
-		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-		const tmp = CACHE_PATH + `.${process.pid}.${Date.now()}.tmp`;
-		fs.writeFileSync(tmp, JSON.stringify(existing, null, 2), "utf8");
-		try {
-			fs.renameSync(tmp, CACHE_PATH);
-		} catch {
-			fs.writeFileSync(CACHE_PATH, JSON.stringify(existing, null, 2), "utf8");
-			try {
-				fs.unlinkSync(tmp);
-			} catch {
-				// Ignore temp file cleanup failure
-			}
-		}
-	} catch (e) {
-		console.warn("[subscription-usage] failed to write disk cache:", e);
+		await persistDiskCache(existing);
+		diskCacheSnapshot = existing;
+	})();
+	diskCacheWriteQueue = operation.then(
+		() => undefined,
+		() => undefined,
+	);
+	try {
+		await operation;
+	} catch (error) {
+		console.error("[subscription-usage] failed to write disk cache:", error);
 	}
 }
 
@@ -130,6 +215,8 @@ interface ProviderState {
 	lastData: UsageData | undefined; // last successful payload (reset times)
 	failStreak: number; // consecutive failures → exponential backoff
 	timer: ReturnType<typeof setTimeout> | undefined;
+	inFlight: Promise<"fetched" | "cached"> | undefined;
+	requestId: number;
 }
 
 export function cap(s: string): string {
@@ -141,6 +228,7 @@ export function cap(s: string): string {
  * "↻<1m" once the window is about to flip. Never shows negative times.
  */
 export function resetLabel(resetMs: number, now = Date.now()): string {
+	if (!Number.isFinite(resetMs) || !Number.isFinite(now)) return "↻?";
 	const remain = resetMs - now;
 	if (remain <= 60_000) return "↻<1m";
 	const m = Math.floor(remain / 60_000);
@@ -160,14 +248,15 @@ export function bar(
 	theme: { fg(color: string, text: string): string },
 	now = Date.now(),
 ): string {
-	const filled = Math.round(
-		(Math.min(100, Math.max(0, percent)) / 100) * BAR_CELLS,
-	);
+	const safePercent = normalizePercent(percent) ?? 0;
+	const filled = Math.round((safePercent / 100) * BAR_CELLS);
 	const cells = "█".repeat(filled) + "░".repeat(BAR_CELLS - filled);
-	const color = percent > 90 ? "error" : percent > 70 ? "warning" : "dim";
-	let out = theme.fg(color, cells) + `  ${percent}%`;
+	const color =
+		safePercent > 90 ? "error" : safePercent > 70 ? "warning" : "dim";
+	let out = theme.fg(color, cells) + `  ${safePercent}%`;
 	const r = resets?.[key];
-	if (typeof r === "number") out += " " + theme.fg("dim", resetLabel(r, now));
+	if (typeof r === "number" && Number.isFinite(r))
+		out += " " + theme.fg("dim", resetLabel(r, now));
 	return out;
 }
 
@@ -219,10 +308,13 @@ export function earliestReset(
 	data: UsageData | undefined,
 	modelId?: string,
 	providerId?: string,
+	now = Date.now(),
 ): number | undefined {
-	const times = data?.resets ? Object.values(data.resets) : [];
+	const times = data?.resets
+		? Object.values(data.resets).filter((value) => Number.isFinite(value))
+		: [];
 	if (providerId === "opencode-go" && modelId && /deepseek/i.test(modelId)) {
-		times.push(getDeepSeekPeakInfo().nextFlipMs);
+		times.push(getDeepSeekPeakInfo(now).nextFlipMs);
 	}
 	return times.length ? Math.min(...times) : undefined;
 }
@@ -260,13 +352,8 @@ export const opencodeCfg: ProviderCfg = {
 			if (!w) continue;
 			// Real API reports `percent`; tolerate `usagePercent` on other
 			// backend shapes.
-			const p =
-				typeof w.percent === "number"
-					? w.percent
-					: typeof w.usagePercent === "number"
-						? w.usagePercent
-						: undefined;
-			if (typeof p !== "number") continue;
+			const p = normalizePercent(w.percent) ?? normalizePercent(w.usagePercent);
+			if (p === undefined) continue;
 			windows[k] = p;
 			const r = w.resetsAt ? Date.parse(w.resetsAt) : NaN;
 			if (!Number.isNaN(r)) resets[k] = r;
@@ -319,7 +406,8 @@ export function codexWindowKey(
 	fallback = "primary",
 ): string {
 	const sec = w.limit_window_seconds;
-	if (typeof sec !== "number" || sec <= 0) return fallback;
+	if (typeof sec !== "number" || !Number.isFinite(sec) || sec <= 0)
+		return fallback;
 	if (sec >= 14_400 && sec <= 21_600) return "5h"; // ~5h (18000s)
 	if (sec >= 72_000 && sec <= 100_000) return "daily"; // ~24h (86400s)
 	if (sec >= 500_000 && sec <= 700_000) return "weekly"; // ~7d (604800s)
@@ -331,39 +419,33 @@ export function codexWindowKey(
 export function parseCodexUsage(json: CodexUsageResponse): UsageData {
 	const windows: Record<string, number> = {};
 	const resets: Record<string, number> = {};
+	const addWindow = (
+		window: RateLimitWindowSnapshot | null | undefined,
+		fallback: string,
+	): void => {
+		if (!window) return;
+		const percent = normalizePercent(window.used_percent);
+		if (percent === undefined) return;
+		let key = codexWindowKey(window, fallback);
+		if (key in windows) key = "secondary";
+		windows[key] = percent;
+		if (typeof window.reset_at === "number" && Number.isFinite(window.reset_at)) {
+			resets[key] = Math.max(0, window.reset_at * 1000);
+		}
+	};
 
 	const hasSecondary = Boolean(json.rate_limit?.secondary_window);
-	const primaryRaw = json.rate_limit?.primary_window;
-	const secondaryRaw = json.rate_limit?.secondary_window;
+	addWindow(json.rate_limit?.primary_window, hasSecondary ? "5h" : "weekly");
+	addWindow(json.rate_limit?.secondary_window, "weekly");
 
-	if (primaryRaw && typeof primaryRaw.used_percent === "number") {
-		const key = codexWindowKey(primaryRaw, hasSecondary ? "5h" : "weekly");
-		windows[key] = primaryRaw.used_percent;
-		if (typeof primaryRaw.reset_at === "number") {
-			resets[key] = primaryRaw.reset_at * 1000;
-		}
-	}
-
-	if (secondaryRaw && typeof secondaryRaw.used_percent === "number") {
-		let key = codexWindowKey(secondaryRaw, "weekly");
-		if (key in windows) {
-			key = "secondary";
-		}
-		windows[key] = secondaryRaw.used_percent;
-		if (typeof secondaryRaw.reset_at === "number") {
-			resets[key] = secondaryRaw.reset_at * 1000;
-		}
-	}
-
-	if (Object.keys(windows).length === 0) {
-		throw new Error("no usage data");
-	}
-
-	return {
+	if (Object.keys(windows).length === 0) throw new Error("no usage data");
+	const normalized = normalizeUsageData({
 		windows,
 		plan: json.plan_type,
 		resets,
-	};
+	});
+	if (!normalized) throw new Error("no usage data");
+	return normalized;
 }
 
 /** OpenAI Codex (ChatGPT subscription): 5h rolling & weekly primary/secondary windows + plan type. */
@@ -452,7 +534,10 @@ async function refreshAntigravityToken(refreshToken: string): Promise<string> {
 		signal: AbortSignal.timeout(10_000),
 	});
 	if (!res.ok) throw new Error(`token refresh HTTP ${res.status}`);
-	const data = (await res.json()) as { access_token: string };
+	const data = (await res.json()) as { access_token?: unknown };
+	if (typeof data.access_token !== "string" || !data.access_token) {
+		throw new Error("token refresh response did not include an access token");
+	}
 	return data.access_token;
 }
 
@@ -488,6 +573,7 @@ export const antigravityCfg: ProviderCfg = {
 				if (!access) throw e;
 			}
 		}
+		if (!access) throw new Error("antigravity access token is unavailable");
 
 		const baseUrl =
 			process.env.ANTIGRAVITY_BASE_URL?.trim() ||
@@ -515,7 +601,7 @@ export const antigravityCfg: ProviderCfg = {
 			});
 		}
 
-		let resQuota = await queryQuota(access!);
+		let resQuota = await queryQuota(access);
 		if (resQuota.status === 401 && refreshToken) {
 			access = await refreshAntigravityToken(refreshToken);
 			resQuota = await queryQuota(access);
@@ -541,11 +627,12 @@ export const antigravityCfg: ProviderCfg = {
 			for (const b of group.buckets || []) {
 				const k = b.bucketId || b.window;
 				if (!k) continue;
-				if (typeof b.remainingFraction === "number") {
-					windows[k] = Math.max(
-						0,
-						Math.min(100, Math.round((1 - b.remainingFraction) * 100)),
-					);
+				if (
+					typeof b.remainingFraction === "number" &&
+					Number.isFinite(b.remainingFraction)
+				) {
+					const remaining = Math.min(1, Math.max(0, b.remainingFraction));
+					windows[k] = Math.round((1 - remaining) * 100);
 				}
 				if (b.resetTime) {
 					const r = Date.parse(b.resetTime);
@@ -647,12 +734,16 @@ export default function (pi: ExtensionAPI) {
 		ui: StatusCtx["ui"] | undefined,
 		providerId: string,
 		text: string | undefined,
-	) {
+	): void {
 		if (!ui) return;
-		ui.setStatus?.(providerId, undefined);
-		ui.setWidget(WIDGET_KEY, text ? [text] : undefined, {
-			placement: "belowEditor",
-		});
+		try {
+			ui.setStatus?.(providerId, undefined);
+			ui.setWidget(WIDGET_KEY, text ? [text] : undefined, {
+				placement: "belowEditor",
+			});
+		} catch {
+			// The session can be replaced between safeUi() and this write.
+		}
 	}
 
 	function freshState(): ProviderState {
@@ -662,20 +753,27 @@ export default function (pi: ExtensionAPI) {
 			lastData: undefined,
 			failStreak: 0,
 			timer: undefined,
+			inFlight: undefined,
+			requestId: 0,
 		};
 	}
 
-	function syncFromDisk() {
-		if (!currentCtx) return;
-		const ui = safeUi(currentCtx);
+	let cacheSyncTimer: ReturnType<typeof setTimeout> | undefined;
+	let cacheWatcherActive = false;
+
+	async function syncFromDisk(): Promise<void> {
+		const ctx = currentCtx;
+		if (!ctx) return;
+		const ui = safeUi(ctx);
 		if (!ui) return;
-		const activeProvider = currentCtx.model?.provider;
+		const model = safeModel(ctx);
+		const activeProvider = model?.provider;
 		if (!activeProvider) return;
 		const cfg = cfgs.find((c) => c.id === activeProvider);
 		if (!cfg) return;
 
-		const disk = loadDiskCache()[cfg.id];
-		if (!disk?.data || typeof disk.fetchedAt !== "number") return;
+		const disk = (await loadDiskCache())[cfg.id];
+		if (!disk?.data || !Number.isFinite(disk.fetchedAt)) return;
 		const state = cache.get(cfg.id) ?? freshState();
 		if (disk.fetchedAt > state.lastFetch) {
 			state.lastFetch = disk.fetchedAt;
@@ -683,27 +781,48 @@ export default function (pi: ExtensionAPI) {
 			state.failStreak = 0;
 			cache.set(cfg.id, state);
 			state.lastText =
-				cfg.render(disk.data, ui.theme, currentCtx.model?.id) ||
-				`${cfg.id}: no data`;
+				cfg.render(disk.data, ui.theme, model?.id) || `${cfg.id}: no data`;
 			renderUi(ui, cfg.id, state.lastText);
-			arm(
-				cfg,
-				currentCtx,
-				nextDelay(state, Date.now(), currentCtx.model?.id, cfg.id),
-			);
+			arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
 		}
 	}
 
-	// Watch shared disk cache for updates from other Pi sessions
-	try {
-		fs.watchFile(CACHE_PATH, { interval: 1000 }, (curr, prev) => {
-			if (curr.mtimeMs !== prev.mtimeMs) {
-				syncFromDisk();
-			}
-		});
-	} catch {
-		// Ignore watch error if file/directory is not yet accessible
+	function scheduleDiskSync(): void {
+		if (cacheSyncTimer) return;
+		cacheSyncTimer = setTimeout(() => {
+			cacheSyncTimer = undefined;
+			void syncFromDisk().catch((error) => {
+				console.error("[subscription-usage] cache sync failed:", error);
+			});
+		}, 100);
+		cacheSyncTimer.unref?.();
 	}
+
+	function startDiskCacheWatcher(): void {
+		if (cacheWatcherActive) return;
+		try {
+			fs.watchFile(CACHE_PATH, { interval: 1000 }, (curr, prev) => {
+				if (curr.mtimeMs !== prev.mtimeMs) scheduleDiskSync();
+			});
+			cacheWatcherActive = true;
+		} catch {
+			// Ignore watch error if the cache path is not accessible yet.
+		}
+	}
+
+	function stopDiskCacheWatcher(): void {
+		if (!cacheWatcherActive) return;
+		try {
+			fs.unwatchFile(CACHE_PATH);
+		} catch {
+			// Ignore unwatch failure during shutdown.
+		}
+		cacheWatcherActive = false;
+		if (cacheSyncTimer) clearTimeout(cacheSyncTimer);
+		cacheSyncTimer = undefined;
+	}
+
+	startDiskCacheWatcher();
 
 	/**
 	 * Return ctx.ui, or undefined when the session ctx is stale — i.e. the
@@ -714,7 +833,22 @@ export default function (pi: ExtensionAPI) {
 	 */
 	function safeUi(ctx: StatusCtx): StatusCtx["ui"] | undefined {
 		try {
-			return ctx.ui;
+			const ui = ctx.ui;
+			void ui.theme;
+			return ui;
+		} catch {
+			return undefined;
+		}
+	}
+
+	function safeModel(ctx: StatusCtx): StatusCtx["model"] | undefined {
+		try {
+			const model = ctx.model;
+			if (model) {
+				void model.provider;
+				void model.id;
+			}
+			return model;
 		} catch {
 			return undefined;
 		}
@@ -738,8 +872,8 @@ export default function (pi: ExtensionAPI) {
 			);
 			return jitter(backoff);
 		}
-		const reset = earliestReset(state.lastData, modelId, providerId);
-		if (reset) {
+		const reset = earliestReset(state.lastData, modelId, providerId, now);
+		if (reset !== undefined) {
 			const dt = reset - now;
 			if (dt <= 0) {
 				// A window flipped while we weren't looking — catch up soon.
@@ -762,86 +896,99 @@ export default function (pi: ExtensionAPI) {
 	): Promise<"fetched" | "cached"> {
 		const state = cache.get(cfg.id) ?? freshState();
 		cache.set(cfg.id, state);
-		const now = Date.now();
+		if (state.inFlight && !force) return state.inFlight;
+		const requestId = state.requestId + 1;
+		state.requestId = requestId;
+		const isCurrentRequest = (): boolean =>
+			cache.get(cfg.id) === state && state.requestId === requestId;
 
-		// Sync with disk cache if another session fetched newer data
-		const disk = loadDiskCache()[cfg.id];
-		if (
-			disk?.data &&
-			typeof disk.fetchedAt === "number" &&
-			disk.fetchedAt > state.lastFetch
-		) {
-			state.lastFetch = disk.fetchedAt;
-			state.lastData = disk.data;
-			state.failStreak = 0;
-		}
+		const request = (async (): Promise<"fetched" | "cached"> => {
+			const now = Date.now();
+			const model = safeModel(ctx);
 
-		// Event pokes (agent_settled) skip when we fetched moments ago, or
-		// while the API is failing and no reset is about to flip. Forced
-		// refetches (session start, model switch) always hit the API.
-		const reset = earliestReset(state.lastData, ctx.model?.id, cfg.id);
-		const resetSoon = reset !== undefined && reset - now < COOLDOWN_MS;
-		if (
-			!force &&
-			state.lastText !== undefined &&
-			(now - state.lastFetch < COOLDOWN_MS || (state.failStreak > 0 && !resetSoon))
-		) {
-			const ui = safeUi(ctx);
-			if (ui && state.lastData) {
-				state.lastText =
-					cfg.render(state.lastData, ui.theme, ctx.model?.id) ||
-					`${cfg.id}: no data`;
+			// Sync with disk cache if another session fetched newer data.
+			const disk = (await loadDiskCache())[cfg.id];
+			if (!isCurrentRequest()) return "cached";
+			if (!disk?.data || !Number.isFinite(disk.fetchedAt)) {
+				// No usable shared data; continue to the provider request.
+			} else if (disk.fetchedAt > state.lastFetch) {
+				state.lastFetch = disk.fetchedAt;
+				state.lastData = disk.data;
+				state.failStreak = 0;
 			}
-			renderUi(ui, cfg.id, state.lastText);
-			return "cached";
-		}
 
-		// Even on forced poke, if disk was updated within MIN_FETCH_GAP_MS (e.g. another session just fetched 2s ago),
-		// reuse disk data to avoid duplicate burst requests
-		if (now - state.lastFetch < MIN_FETCH_GAP_MS && state.lastData) {
-			const ui = safeUi(ctx);
-			if (ui) {
-				state.lastText =
-					cfg.render(state.lastData, ui.theme, ctx.model?.id) ||
-					`${cfg.id}: no data`;
+			// Event pokes (agent_settled) skip when we fetched moments ago, or
+			// while the API is failing and no reset is about to flip. Forced
+			// refetches (session start, model switch) always hit the API.
+			const reset = earliestReset(state.lastData, model?.id, cfg.id, now);
+			const resetSoon = reset !== undefined && reset - now < COOLDOWN_MS;
+			if (
+				!force &&
+				state.lastText !== undefined &&
+				(now - state.lastFetch < COOLDOWN_MS ||
+					(state.failStreak > 0 && !resetSoon))
+			) {
+				const ui = safeUi(ctx);
+				if (ui && state.lastData) {
+					state.lastText =
+						cfg.render(state.lastData, ui.theme, model?.id) || `${cfg.id}: no data`;
+				}
 				renderUi(ui, cfg.id, state.lastText);
+				return "cached";
 			}
-			return "cached";
-		}
 
-		state.lastFetch = now;
+			// Even on forced poke, if disk was updated within MIN_FETCH_GAP_MS
+			// (e.g. another session just fetched 2s ago), reuse it to avoid a
+			// duplicate burst request.
+			if (now - state.lastFetch < MIN_FETCH_GAP_MS && state.lastData) {
+				const ui = safeUi(ctx);
+				if (ui) {
+					state.lastText =
+						cfg.render(state.lastData, ui.theme, model?.id) || `${cfg.id}: no data`;
+					renderUi(ui, cfg.id, state.lastText);
+				}
+				return "cached";
+			}
+
+			state.lastFetch = now;
+			try {
+				const data = normalizeUsageData(await cfg.fetchUsage());
+				if (!data) throw new Error("provider returned no valid usage data");
+				// The session or model may have changed while awaiting the fetch.
+				const ui = safeUi(ctx);
+				if (!ui || !isCurrentRequest()) return "cached";
+				state.failStreak = 0;
+				state.lastData = data;
+				state.lastText =
+					cfg.render(data, ui.theme, model?.id) || `${cfg.id}: no data`;
+				renderUi(ui, cfg.id, state.lastText);
+				await saveDiskCache(cfg.id, data);
+				return "fetched";
+			} catch (err) {
+				// Stale ctx after session replacement: drop quietly, don't crash.
+				const ui = safeUi(ctx);
+				if (!ui || !isCurrentRequest()) return "cached";
+				state.failStreak += 1;
+				console.error(
+					`[${cfg.id}-usage] fetch failed (${state.failStreak}×): ` +
+						(err instanceof Error ? err.message : String(err)),
+				);
+				if (state.lastText !== undefined && !state.lastText.includes("err")) {
+					// Keep the last known numbers, tinted so staleness is visible.
+					state.lastText = ui.theme.fg("warning", state.lastText + " ⚠");
+					renderUi(ui, cfg.id, state.lastText);
+				} else {
+					state.lastText = ui.theme.fg("error", `${cfg.id}: err`);
+					renderUi(ui, cfg.id, state.lastText);
+				}
+				return "cached";
+			}
+		})();
+		state.inFlight = request;
 		try {
-			const data = await cfg.fetchUsage();
-			// The session may have been replaced while we were awaiting the
-			// fetch — re-resolve ui afterwards so staleness is detected, and
-			// bail if this provider was cleared mid-flight.
-			const ui = safeUi(ctx);
-			if (!ui || !cache.has(cfg.id)) return "cached";
-			state.failStreak = 0;
-			state.lastData = data;
-			state.lastText =
-				cfg.render(data, ui.theme, ctx.model?.id) || `${cfg.id}: no data`;
-			renderUi(ui, cfg.id, state.lastText);
-			saveDiskCache(cfg.id, data);
-			return "fetched";
-		} catch (err) {
-			// Stale ctx after session replacement: drop quietly, don't crash.
-			const ui = safeUi(ctx);
-			if (!ui || !cache.has(cfg.id)) return "cached";
-			state.failStreak += 1;
-			console.warn(
-				`[${cfg.id}-usage] fetch failed (${state.failStreak}×): ` +
-					(err instanceof Error ? err.message : String(err)),
-			);
-			if (state.lastText !== undefined && !state.lastText.includes("err")) {
-				// Keep the last known numbers, tinted so staleness is visible.
-				state.lastText = ui.theme.fg("warning", state.lastText + " ⚠");
-				renderUi(ui, cfg.id, state.lastText);
-			} else {
-				state.lastText = ui.theme.fg("error", `${cfg.id}: err`);
-				renderUi(ui, cfg.id, state.lastText);
-			}
-			return "cached";
+			return await request;
+		} finally {
+			if (state.inFlight === request) state.inFlight = undefined;
 		}
 	}
 
@@ -853,12 +1000,13 @@ export default function (pi: ExtensionAPI) {
 		state.timer = setTimeout(() => {
 			state.timer = undefined;
 			void (async () => {
-				// Bail if the session is gone or this provider was cleared
-				// (e.g. model switched away) while the timer was pending.
-				if (!safeUi(ctx) || !cache.has(cfg.id)) return;
+				// Bail if the session is gone or this exact provider state was
+				// cleared (e.g. the model switched away and back).
+				if (!safeUi(ctx) || cache.get(cfg.id) !== state) return;
 				await refresh(cfg, ctx, false);
-				if (!safeUi(ctx) || !cache.has(cfg.id)) return;
-				arm(cfg, ctx, nextDelay(state, Date.now(), ctx.model?.id, cfg.id));
+				if (!safeUi(ctx) || cache.get(cfg.id) !== state) return;
+				const model = safeModel(ctx);
+				arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
 			})();
 		}, delayMs);
 		// Don't keep the process alive on the timer alone (unref is a no-op
@@ -879,8 +1027,9 @@ export default function (pi: ExtensionAPI) {
 			// Rearm from the result, unless the session was replaced or this
 			// provider got cleared while we were awaiting.
 			const s = cache.get(cfg.id);
+			const model = safeModel(ctx);
 			if (s && safeUi(ctx))
-				arm(cfg, ctx, nextDelay(s, Date.now(), ctx.model?.id, cfg.id));
+				arm(cfg, ctx, nextDelay(s, Date.now(), model?.id, cfg.id));
 		})();
 	}
 
@@ -888,17 +1037,13 @@ export default function (pi: ExtensionAPI) {
 		const state = cache.get(key);
 		if (state?.timer) clearTimeout(state.timer);
 		cache.delete(key);
-		const ui = safeUi(ctx);
-		if (ui) {
-			ui.setStatus?.(key, undefined);
-			ui.setWidget(WIDGET_KEY, undefined);
-		}
+		renderUi(safeUi(ctx), key, undefined);
 	}
 
 	/** Route to the right provider config for the active model. */
 	function route(ctx: StatusCtx, force: boolean) {
 		currentCtx = ctx;
-		const provider = ctx.model?.provider;
+		const provider = safeModel(ctx)?.provider;
 		const active = cfgs.find((c) => c.id === provider);
 		// Clear statuses+timers for all non-matching providers first, then
 		// poke the active one (which re-arms with its own adaptive timer).
@@ -909,6 +1054,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		startDiskCacheWatcher();
 		route(ctx, true);
 	});
 
@@ -923,11 +1069,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		try {
-			fs.unwatchFile(CACHE_PATH);
-		} catch {
-			// Ignore unwatch failure on shutdown
-		}
+		stopDiskCacheWatcher();
 		clear(ctx, "opencode-go");
 		clear(ctx, "openai-codex");
 		clear(ctx, "antigravity");

@@ -12,7 +12,15 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	readFile,
+	rename,
+	rm,
+	stat,
+	utimes,
+	writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import { dirname, join } from "node:path";
 import { Client, type SetActivity } from "@xhayper/discord-rpc";
@@ -31,6 +39,7 @@ const HEARTBEAT_INTERVAL_MS = 5_000;
 const STALE_SESSION_MS = 30_000;
 const LOCK_TIMEOUT_MS = 2_000;
 const LOCK_STALE_MS = 15_000;
+const LOCK_LEASE_REFRESH_MS = Math.max(1_000, Math.floor(LOCK_STALE_MS / 3));
 const LOCK_RETRY_MS = 25;
 const RETRY_BASE_MS = 5_000;
 const RETRY_CAP_MS = 5 * 60_000;
@@ -150,7 +159,7 @@ function defaultLogger(message: string): void {
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
-	return value !== null && typeof value === "object"
+	return value !== null && typeof value === "object" && !Array.isArray(value)
 		? (value as Record<string, unknown>)
 		: undefined;
 }
@@ -256,34 +265,46 @@ export function normalizeContextUsage(
 	if (contextWindow === undefined) return undefined;
 	const tokensValue = record.tokens;
 	const percentValue = record.percent;
+	const percent =
+		percentValue === null ? null : (finiteNumber(percentValue) ?? null);
 	return {
 		tokens:
 			tokensValue === null ? null : (finiteNonNegative(tokensValue) ?? null),
 		contextWindow,
-		percent: percentValue === null ? null : (finiteNumber(percentValue) ?? null),
+		percent: percent === null ? null : Math.min(100, Math.max(0, percent)),
 	};
 }
 
-function sumUsage(records: readonly SessionRecord[]): UsageTotals {
-	let totals = emptyUsageTotals();
+interface AggregateSummary {
+	usage: UsageTotals;
+	projectCount: number;
+	startTimestamp: number;
+}
+
+function summarizeRecords(records: readonly SessionRecord[]): AggregateSummary {
+	const usage = emptyUsageTotals();
+	const projects = new Set<string>();
+	let startTimestamp = Number.POSITIVE_INFINITY;
 	for (const record of records) {
-		totals = {
-			input: totals.input + record.usage.input,
-			output: totals.output + record.usage.output,
-			cacheRead: totals.cacheRead + record.usage.cacheRead,
-			cacheWrite: totals.cacheWrite + record.usage.cacheWrite,
-			total: totals.total + record.usage.total,
-			cost:
-				totals.cost === undefined || record.usage.cost === undefined
-					? (totals.cost ?? record.usage.cost)
-					: totals.cost + record.usage.cost,
-			costComplete:
-				totals.costComplete &&
-				record.usage.costComplete &&
-				record.usage.cost !== undefined,
-		};
+		projects.add(record.projectName);
+		startTimestamp = Math.min(startTimestamp, record.startedAt);
+		usage.input += record.usage.input;
+		usage.output += record.usage.output;
+		usage.cacheRead += record.usage.cacheRead;
+		usage.cacheWrite += record.usage.cacheWrite;
+		usage.total += record.usage.total;
+		if (record.usage.cost !== undefined)
+			usage.cost = (usage.cost ?? 0) + record.usage.cost;
+		usage.costComplete =
+			usage.costComplete &&
+			record.usage.costComplete &&
+			record.usage.cost !== undefined;
 	}
-	return totals;
+	return {
+		usage,
+		projectCount: projects.size,
+		startTimestamp,
+	};
 }
 
 export function formatTokenCount(tokens: number): string {
@@ -309,8 +330,13 @@ function truncateText(
 	value: string,
 	maxLength = MAX_ACTIVITY_TEXT_LENGTH,
 ): string {
-	if (value.length <= maxLength) return value;
-	return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+	const safeValue = value
+		.replace(/[\u0000-\u001f\u007f]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const characters = Array.from(safeValue);
+	if (characters.length <= maxLength) return safeValue;
+	return `${characters.slice(0, Math.max(0, maxLength - 1)).join("")}…`;
 }
 
 /** Return a basename for both POSIX and Windows paths, regardless of host OS. */
@@ -401,10 +427,6 @@ function orderedSessions(state: PresenceState): SessionRecord[] {
 	});
 }
 
-function projectCount(records: readonly SessionRecord[]): number {
-	return new Set(records.map((record) => record.projectName)).size;
-}
-
 export function buildAggregateActivity(state: PresenceState): PresenceActivity {
 	const records = orderedSessions(state);
 	if (records.length === 0) {
@@ -417,18 +439,16 @@ export function buildAggregateActivity(state: PresenceState): PresenceActivity {
 	}
 
 	const primary = records[0];
-	const totalUsage = sumUsage(records);
+	const summary = summarizeRecords(records);
 	const sessionLabel = `${records.length} session${records.length === 1 ? "" : "s"}`;
-	const details = `${sessionLabel} · ${formatTokenCount(totalUsage.total)} tok · ${formatCost(totalUsage)}`;
-	const projects = projectCount(records);
-	const projectLabel = `${projects} project${projects === 1 ? "" : "s"}`;
+	const details = `${sessionLabel} · ${formatTokenCount(summary.usage.total)} tok · ${formatCost(summary.usage)}`;
+	const projectLabel = `${summary.projectCount} project${summary.projectCount === 1 ? "" : "s"}`;
 	const activityState = `${formatPhase(primary.phase)} · ${formatPresenceModelLabel(primary.provider, primary.modelId)} · ${projectLabel}`;
-	const startTimestamp = Math.min(...records.map((record) => record.startedAt));
 
 	return {
 		details: truncateText(details),
 		state: truncateText(activityState),
-		startTimestamp,
+		startTimestamp: summary.startTimestamp,
 		instance: true,
 	};
 }
@@ -768,10 +788,15 @@ async function withFileLock<T>(
 			throw new Error("presence lock ownership lost");
 		}
 	};
+	const leaseTimer = setInterval(() => {
+		void utimes(lockPath, new Date(), new Date()).catch(() => undefined);
+	}, LOCK_LEASE_REFRESH_MS);
+	leaseTimer.unref?.();
 	try {
 		await assertOwnership();
 		return await operation(assertOwnership);
 	} finally {
+		clearInterval(leaseTimer);
 		await releaseFileLock(lockPath, ownerToken);
 	}
 }
@@ -937,6 +962,8 @@ export class DiscordPresenceManager {
 	private connectionPromise: Promise<boolean> | undefined;
 	private registryQueue: Promise<void> = Promise.resolve();
 	private presenceQueue: Promise<void> = Promise.resolve();
+	private presenceDrain: Promise<void> | undefined;
+	private pendingPresenceState: PresenceState | undefined;
 	private outageWarningShown = false;
 	private registryWarningShown = false;
 
@@ -1048,7 +1075,10 @@ export class DiscordPresenceManager {
 		}
 		const records = orderedSessions(state);
 		const publisherLabel = state.publisherId
-			? (state.sessions[state.publisherId]?.projectName ?? "unknown")
+			? truncateText(
+					state.sessions[state.publisherId]?.projectName ?? "unknown",
+					96,
+				)
 			: "none";
 		const lines = [
 			`Discord presence: ${this.getStatusText()}`,
@@ -1159,21 +1189,37 @@ export class DiscordPresenceManager {
 	}
 
 	private enqueuePresencePublish(state: PresenceState): Promise<void> {
-		const previous = this.presenceQueue;
-		const next = (async () => {
-			try {
-				await previous;
-			} catch {
-				// A failed publish must not block later aggregate updates.
-			}
-			try {
-				await this.publish(state);
-			} catch {
-				// Presence failures are deliberately non-fatal to Pi.
+		// Registry heartbeats and phase/usage events can arrive faster than an
+		// RPC round trip. Keep only the newest aggregate instead of replaying a
+		// queue of obsolete activities.
+		this.pendingPresenceState = state;
+		if (this.presenceDrain) return this.presenceDrain;
+
+		const drain = (async () => {
+			while (this.pendingPresenceState) {
+				const nextState = this.pendingPresenceState;
+				this.pendingPresenceState = undefined;
+				try {
+					await this.publish(nextState);
+				} catch {
+					// Presence failures are deliberately non-fatal to Pi.
+				}
 			}
 		})();
-		this.presenceQueue = next;
-		return next;
+		this.presenceDrain = drain;
+		this.presenceQueue = drain;
+		void drain.then(
+			() => {
+				if (this.presenceDrain !== drain) return;
+				this.presenceDrain = undefined;
+				if (this.pendingPresenceState && !this.disposed)
+					this.enqueuePresencePublish(this.pendingPresenceState);
+			},
+			() => {
+				if (this.presenceDrain === drain) this.presenceDrain = undefined;
+			},
+		);
+		return drain;
 	}
 
 	private async publish(state: PresenceState): Promise<void> {
@@ -1214,7 +1260,9 @@ export class DiscordPresenceManager {
 				this.clearRetryTimer();
 			}
 		} catch {
-			await this.handleUnavailable();
+			// A late failure from an old transport must not tear down a newer
+			// connection established by a retry.
+			await this.handleUnavailable(transport);
 		}
 	}
 
@@ -1261,7 +1309,7 @@ export class DiscordPresenceManager {
 		this.transport = transport;
 		this.removeDisconnectedListener = transport.onDisconnected?.(() => {
 			if (this.transport !== transport || this.disposed || !this.publisher) return;
-			void this.handleUnavailable();
+			void this.handleUnavailable(transport);
 		});
 		this.status = "connecting";
 		try {
@@ -1272,18 +1320,26 @@ export class DiscordPresenceManager {
 				this.transport !== transport ||
 				!transport.isConnected()
 			) {
-				await this.closeTransport();
+				await this.closeTransport(transport);
 				return false;
 			}
 			return true;
 		} catch {
-			await this.handleUnavailable();
+			await this.handleUnavailable(transport);
 			return false;
 		}
 	}
 
-	private async handleUnavailable(): Promise<void> {
-		if (this.disposed || !this.started || !this.publisher) return;
+	private async handleUnavailable(
+		expectedTransport?: DiscordPresenceTransport,
+	): Promise<void> {
+		if (
+			this.disposed ||
+			!this.started ||
+			!this.publisher ||
+			(expectedTransport && this.transport !== expectedTransport)
+		)
+			return;
 		this.status = "reconnecting";
 		if (!this.outageWarningShown) {
 			this.logger(
@@ -1291,7 +1347,7 @@ export class DiscordPresenceManager {
 			);
 			this.outageWarningShown = true;
 		}
-		await this.closeTransport();
+		await this.closeTransport(expectedTransport);
 		this.scheduleRetry();
 	}
 
@@ -1316,8 +1372,11 @@ export class DiscordPresenceManager {
 		this.retryTimer = undefined;
 	}
 
-	private async closeTransport(): Promise<void> {
+	private async closeTransport(
+		expectedTransport?: DiscordPresenceTransport,
+	): Promise<void> {
 		const transport = this.transport;
+		if (expectedTransport && transport !== expectedTransport) return;
 		this.transport = undefined;
 		const removeDisconnectedListener = this.removeDisconnectedListener;
 		this.removeDisconnectedListener = undefined;
@@ -1355,7 +1414,8 @@ function formatDiagnosticSession(record: SessionRecord, now: number): string {
 			? "ctx ?"
 			: `ctx ${Math.round(record.context.percent)}%`;
 	const breakdown = `in ${formatTokenCount(record.usage.input)} / out ${formatTokenCount(record.usage.output)}`;
-	return `${record.projectName} · ${model} · ${formatPhase(record.phase)} · ${formatTokenCount(record.usage.total)} tok (${breakdown}) · ${formatCost(record.usage)} · ${context} · ${formatDuration(now - record.startedAt)}`;
+	const project = truncateText(record.projectName, 96) || "project";
+	return `${project} · ${model} · ${formatPhase(record.phase)} · ${formatTokenCount(record.usage.total)} tok (${breakdown}) · ${formatCost(record.usage)} · ${context} · ${formatDuration(now - record.startedAt)}`;
 }
 
 export default function (pi: ExtensionAPI) {
