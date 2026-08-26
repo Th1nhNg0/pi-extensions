@@ -5,10 +5,14 @@ import {
 	cap,
 	codexCfg,
 	normalizeUsageData,
+	normalizePrefs,
+	normalizeUsageMode,
+	normalizeUsageStyle,
 	codexWindowKey,
 	earliestReset,
 	parseCodexUsage,
 	resetLabel,
+	windowSegment,
 	type CodexUsageResponse,
 	type UsageData,
 } from "../extensions/subscription-usage.ts";
@@ -48,14 +52,14 @@ test("usage payload normalization clamps percentages and drops malformed data", 
 
 test("resetLabel formats countdowns correctly", () => {
 	const now = 1_000_000;
-	assert.equal(resetLabel(now + 30_000, now), "↻<1m");
-	assert.equal(resetLabel(now + 60_000, now), "↻<1m");
-	assert.equal(resetLabel(now + 5 * 60_000, now), "↻5m");
-	assert.equal(resetLabel(now + 4 * 3600_000, now), "↻4h");
-	assert.equal(resetLabel(now + 3 * 86400_000, now), "↻3d");
-	assert.equal(resetLabel(now + 14 * 86400_000, now), "↻14d");
-	assert.equal(resetLabel(now + 35 * 86400_000, now), "↻5w");
-	assert.equal(resetLabel(Number.NaN, now), "↻?");
+	assert.equal(resetLabel(now + 30_000, now), "~<1m");
+	assert.equal(resetLabel(now + 60_000, now), "~<1m");
+	assert.equal(resetLabel(now + 5 * 60_000, now), "~5m");
+	assert.equal(resetLabel(now + 4 * 3600_000, now), "~4h");
+	assert.equal(resetLabel(now + 3 * 86400_000, now), "~3d");
+	assert.equal(resetLabel(now + 14 * 86400_000, now), "~14d");
+	assert.equal(resetLabel(now + 35 * 86400_000, now), "~5w");
+	assert.equal(resetLabel(Number.NaN, now), "~?");
 });
 
 test("codexWindowKey classifies window durations", () => {
@@ -153,7 +157,7 @@ test("parseCodexUsage throws on empty response", () => {
 	assert.throws(() => parseCodexUsage({}), /no usage data/);
 });
 
-test("codexCfg.render renders 5h and weekly windows", () => {
+test("codexCfg.render renders windows without a provider prefix", () => {
 	const data: UsageData = {
 		plan: "plus",
 		windows: {
@@ -166,10 +170,16 @@ test("codexCfg.render renders 5h and weekly windows", () => {
 		},
 	};
 
+	// Bars (default): `5h: <bar> · W: <bar>` (resets long past → ~<1m)
 	const rendered = codexCfg.render(data, mockTheme);
-	assert.match(rendered, /^OpenAI Codex Plus\s+5h:\s+.+\s+W:\s+.+/);
-	assert.match(rendered, /5h: ░░░░░░\s+5%/);
-	assert.match(rendered, /W: ███░░░\s+50%/);
+	assert.match(rendered, /^5h:\s+░░░░░░\s+5% ~<1m · W: ███░░░\s+50% ~<1m$/);
+	assert.doesNotMatch(rendered, /Codex|plus/i);
+
+	// Percent style: bare colorized percentages with countdowns.
+	assert.equal(
+		codexCfg.render(data, mockTheme, undefined, "percent"),
+		"5h 5% ~<1m · W 50% ~<1m",
+	);
 });
 
 test("codexCfg.render handles weekly-only window", () => {
@@ -184,8 +194,43 @@ test("codexCfg.render handles weekly-only window", () => {
 	};
 
 	const rendered = codexCfg.render(data, mockTheme);
-	assert.match(rendered, /^OpenAI Codex Team\s+W:\s+█████░\s+75%/);
+	assert.match(rendered, /^W: █████░\s+75%/);
 	assert.doesNotMatch(rendered, /5h:/);
+});
+
+test("windowSegment renders bars and percent styles", () => {
+	const resets = { k: 1_000_000 + 120_000 };
+	const now = 1_000_000;
+	assert.match(
+		windowSegment(50, resets, "k", mockTheme, "bars", now),
+		/███░░░\s+50% ~2m/,
+	);
+	assert.equal(
+		windowSegment(50, resets, "k", mockTheme, "percent", now),
+		"50% ~2m",
+	);
+});
+
+test("normalizeUsageStyle/Mode/Prefs validate input", () => {
+	assert.equal(normalizeUsageStyle("bars"), "bars");
+	assert.equal(normalizeUsageStyle("percent"), "percent");
+	assert.equal(normalizeUsageStyle("fancy"), undefined);
+	assert.equal(normalizeUsageStyle(undefined), undefined);
+
+	assert.equal(normalizeUsageMode("bars"), "bars");
+	assert.equal(normalizeUsageMode("percent"), "percent");
+	assert.equal(normalizeUsageMode("off"), "off");
+	assert.equal(normalizeUsageMode("nope"), undefined);
+
+	assert.deepEqual(normalizePrefs({ mode: "percent" }), { mode: "percent" });
+	assert.deepEqual(normalizePrefs({ mode: "off" }), { mode: "off" });
+	// Legacy pre-toggle pref files carried a bare { style } field.
+	assert.deepEqual(normalizePrefs({ style: "percent" }), { mode: "percent" });
+	assert.deepEqual(normalizePrefs(undefined), { mode: "bars" });
+	assert.deepEqual(normalizePrefs("junk"), { mode: "bars" });
+	assert.deepEqual(normalizePrefs({ mode: "nope", style: 42 }), {
+		mode: "bars",
+	});
 });
 
 test("earliestReset selects the minimum reset timestamp across windows", () => {

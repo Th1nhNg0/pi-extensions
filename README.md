@@ -8,7 +8,7 @@ Personal collection of custom extensions, utilities, and tools for the [Pi Codin
 
 ### 1. `subscription-usage` (`extensions/subscription-usage.ts`)
 
-Adds a live widget line below the editor in Pi displaying subscription usage bars, percentages, and reset countdown timers for subscription-backed LLM providers.
+Adds a minimal usage readout to Pi's footer status line — directly below the model/thinking indicator — showing usage bars (or bare percentages), and reset countdown timers for subscription-backed LLM providers. Since the footer already names the provider, no prefix is repeated.
 
 #### Supported Providers
 
@@ -18,21 +18,24 @@ Adds a live widget line below the editor in Pi displaying subscription usage bar
 
 ---
 
-### 🖥️ Status Bar Examples
+### 🖥️ Footer Status Examples
 
-| Provider | Live Widget Output |
+Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`:
+
+| Provider | Status Line Output |
 | :--- | :--- |
-| **Antigravity Pro (Gemini)** | `Antigravity Pro (Gemini)   5h: [□□□□□□]  0% ↻4h   W: [■■■■■□] 79% ↻4d` |
-| **Antigravity Pro (Claude/GPT)** | `Antigravity Pro (Claude)   5h: [□□□□□□]  0% ↻4h   W: [■■■■□□] 61% ↻6d` |
-| **OpenAI Codex** | `OpenAI Codex Plus          5h: [□□□□□□]  1% ↻4h   W: [■■■□□□] 51% ↻3d` |
-| **OpenCode Go** | `OpenCode Go (Peak ↻2h)     R: [□□□□□□]  2% ↻3h   W: [■■□□□□] 44% ↻3d   M: [■■■■■■] 98% ↻14d` |
+| **Antigravity Pro (Gemini)** | `5h: ░░░░░░ 0% ~4h · W: █████▌░ 79% ~4d` |
+| **Antigravity Pro (Claude/GPT)** | `5h: ░░░░░░ 0% ~4h · W: ████░░░ 61% ~6d` |
+| **OpenAI Codex** | `5h: ░░░░░░ 1% ~4h · W: ███░░░ 51% ~3d` |
+| **OpenCode Go** | `Peak ~2h · R: ░░░░░░ 2% ~3h · W: ██░░░░ 44% ~3d · M: ██████ 98% ~14d` |
+| **Any (percent style)** | `R 2% ~3h · W 44% ~3d · M 98% ~14d` |
 
 #### Legend
 
 * `5h` / `R` : 5-Hour rolling window
 * `W` : Weekly quota window
 * `M` : Monthly quota window
-* `↻` : Countdown until the next quota reset (e.g. `↻4h`, `↻3d`)
+* `~` : Countdown until the next quota reset (e.g. `~4h`, `~3d`)
 
 ---
 
@@ -41,8 +44,12 @@ Adds a live widget line below the editor in Pi displaying subscription usage bar
 * **Adaptive Fetching:** Refreshes on session start, model switch, and agent turn settlement with intelligent cooldowns.
 * **Smart Scheduling:** Reset-aware wake timers that automatically refresh immediately when a usage bucket flips.
 * **Shared Cache:** Persists validated data across multiple Pi sessions via `~/.pi/agent/subscription-usage-cache.json`, using asynchronous atomic writes so cache I/O does not block Pi.
-* **Safe Rendering:** Malformed provider values are ignored and percentages are bounded to `0–100%` before they reach the widget.
+* **Safe Rendering:** Malformed provider values are ignored and percentages are bounded to `0–100%` before they reach the status line.
 * **Stale-Request Protection:** Overlapping refreshes are coalesced, and results from a replaced session/model are discarded.
+
+#### Display Toggle
+
+`/usage-toggle` cycles the status line through three modes: bar cells (`bars`) → bare percentages (`percent`) → hidden (`off`). Pass a mode to jump straight to it, e.g. `/usage-toggle percent`. While hidden, no status is shown and no provider requests are made; toggling back re-renders (or refetches) immediately. The choice persists across sessions in `~/.pi/agent/subscription-usage-prefs.json`.
 
 ---
 

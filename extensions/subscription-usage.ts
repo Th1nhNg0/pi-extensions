@@ -1,16 +1,20 @@
 /**
- * Subscription usage widget extension.
+ * Subscription usage extension.
  *
- * Shows usage bars for subscription-backed providers in a dedicated
- * widget line below the editor:
+ * Shows usage for the active subscription-backed provider as a minimal
+ * footer status line, directly below pi's model/thinking indicator (the
+ * footer already names the provider, so no prefix is repeated):
  *
- *   opencode-go : OpenCode Go  R: ░░░░░░  4% ↻4h  W: ██████  97% ↻8h  M: █████░░░  62% ↻20d
- *                 OpenCode Go (Peak ↻2h)  R: ░░░░░░  4% ↻4h  W: ██████  97% ↻8h  M: █████░░░  62% ↻20d
- *   openai-codex: OpenAI Codex Plus  5h: ░░░░░░  1% ↻4h  W: ░░░░░░  0% ↻6d
- *   antigravity : Antigravity Pro (Gemini)  5h: ░░░░░░  2% ↻4h  W: ░░░░░░  1% ↻6d
- *                 Antigravity Pro (Claude)  5h: ░░░░░░  0% ↻4h  W: ░░░░░░  0% ↻6d
+ *   ↑1k ↓2k $0.123 12.5%/200k (auto)      kimi-k2 • high
+ *   R: ░░░░░░ 4% ~4h · W: ██████ 97% ~8h · M: █████░░░ 62% ~20d
+ *   Peak ~2h · R: ░░░░░░ 4% ~4h                    ← DeepSeek peak hours
+ *   5h: ░░░░░░ 1% ~4h · W: ░░░░░░ 0% ~6d
  *
- * Each window also shows a compact countdown (↻) until it resets. OpenCode
+ * `/usage-toggle [bars|percent|off]` cycles bars → bare percentages →
+ * hidden (or jumps straight to the given mode); the choice persists in
+ * ~/.pi/agent/subscription-usage-prefs.json.
+ *
+ * Each window also shows a compact countdown (~) until it resets. OpenCode
  * reports `resetsAt` (ISO) per window; Codex reports `reset_at` (epoch s);
  * Antigravity reports `resetTime` (ISO) per bucket.
  *
@@ -47,6 +51,69 @@ const CACHE_PATH = path.join(
 	"agent",
 	"subscription-usage-cache.json",
 );
+const PREFS_PATH = path.join(
+	os.homedir(),
+	".pi",
+	"agent",
+	"subscription-usage-prefs.json",
+);
+
+/** Display style for usage windows: bar cells or bare percentages. */
+export type UsageStyle = "bars" | "percent";
+
+export const USAGE_STYLES: readonly UsageStyle[] = ["bars", "percent"];
+
+/** Toggle states: both display styles plus fully hidden ("off"). */
+export type UsageMode = UsageStyle | "off";
+
+export const USAGE_MODES: readonly UsageMode[] = ["bars", "percent", "off"];
+
+export function normalizeUsageStyle(value: unknown): UsageStyle | undefined {
+	return typeof value === "string" && (USAGE_STYLES as string[]).includes(value)
+		? (value as UsageStyle)
+		: undefined;
+}
+
+export function normalizeUsageMode(value: unknown): UsageMode | undefined {
+	return typeof value === "string" && (USAGE_MODES as string[]).includes(value)
+		? (value as UsageMode)
+		: undefined;
+}
+
+export interface UsagePrefs {
+	mode: UsageMode;
+}
+
+/** Validate a parsed prefs file, falling back to defaults on anything odd. */
+export function normalizePrefs(value: unknown): UsagePrefs {
+	const record = asRecord(value);
+	return {
+		mode:
+			normalizeUsageMode(record?.mode) ??
+			// Legacy pref files wrote { style } before the cycle toggle existed.
+			normalizeUsageStyle(record?.style) ??
+			"bars",
+	};
+}
+
+function loadPrefs(): UsagePrefs {
+	try {
+		return normalizePrefs(
+			JSON.parse(fs.readFileSync(PREFS_PATH, "utf8")) as unknown,
+		);
+	} catch {
+		return { mode: "bars" };
+	}
+}
+
+function savePrefs(prefs: UsagePrefs): void {
+	try {
+		fs.mkdirSync(path.dirname(PREFS_PATH), { recursive: true });
+		fs.writeFileSync(PREFS_PATH, `${JSON.stringify(prefs, null, 2)}\n`, "utf8");
+	} catch (error) {
+		console.error("[subscription-usage] failed to save usage prefs:", error);
+	}
+}
 
 /** Percentages per window key, plus optional plan info and reset times (ms epoch). */
 export interface UsageData {
@@ -192,18 +259,14 @@ interface ProviderCfg {
 		data: UsageData,
 		theme: { fg(color: string, text: string): string },
 		modelId?: string,
+		style?: UsageStyle,
 	) => string;
 }
 
 interface StatusCtx {
 	model?: { provider?: string; id?: string };
 	ui: {
-		setWidget(
-			key: string,
-			content: string[] | undefined,
-			options?: { placement?: "aboveEditor" | "belowEditor" },
-		): void;
-		setStatus?(key: string, text: string | undefined): void;
+		setStatus(key: string, text: string | undefined): void;
 		theme: { fg(color: string, text: string): string };
 	};
 }
@@ -224,20 +287,20 @@ export function cap(s: string): string {
 }
 
 /**
- * Compact remaining-time label for a reset deadline, e.g. "↻4h", "↻20d",
- * "↻<1m" once the window is about to flip. Never shows negative times.
+ * Compact remaining-time label for a reset deadline, e.g. "~4h", "~20d",
+ * "~<1m" once the window is about to flip. Never shows negative times.
  */
 export function resetLabel(resetMs: number, now = Date.now()): string {
-	if (!Number.isFinite(resetMs) || !Number.isFinite(now)) return "↻?";
+	if (!Number.isFinite(resetMs) || !Number.isFinite(now)) return "~?";
 	const remain = resetMs - now;
-	if (remain <= 60_000) return "↻<1m";
+	if (remain <= 60_000) return "~<1m";
 	const m = Math.floor(remain / 60_000);
-	if (m < 60) return `↻${m}m`;
+	if (m < 60) return `~${m}m`;
 	const h = Math.floor(m / 60);
-	if (h < 24) return `↻${h}h`;
+	if (h < 24) return `~${h}h`;
 	const d = Math.floor(h / 24);
-	if (d < 30) return `↻${d}d`;
-	return `↻${Math.floor(d / 7)}w`;
+	if (d < 30) return `~${d}d`;
+	return `~${Math.floor(d / 7)}w`;
 }
 
 /** Build a single bar segment: filled/empty cells + percent + reset countdown. */
@@ -258,6 +321,53 @@ export function bar(
 	if (typeof r === "number" && Number.isFinite(r))
 		out += " " + theme.fg("dim", resetLabel(r, now));
 	return out;
+}
+
+/**
+ * One window rendered per style: `bar()` output for "bars", a bare
+ * colorized percentage for "percent" — both with the reset countdown.
+ */
+export function windowSegment(
+	percent: number,
+	resets: Record<string, number> | undefined,
+	key: string,
+	theme: { fg(color: string, text: string): string },
+	style: UsageStyle,
+	now = Date.now(),
+): string {
+	if (style === "percent") {
+		const safePercent = normalizePercent(percent) ?? 0;
+		const color =
+			safePercent > 90 ? "error" : safePercent > 70 ? "warning" : "dim";
+		let out = theme.fg(color, `${safePercent}%`);
+		const r = resets?.[key];
+		if (typeof r === "number" && Number.isFinite(r))
+			out += " " + theme.fg("dim", resetLabel(r, now));
+		return out;
+	}
+	return bar(percent, resets, key, theme, now);
+}
+
+/** Label + separator + segment, e.g. `R: █░░░░░ 42% ~4h` or `R 42% ~4h`. */
+function labeledWindow(
+	label: string,
+	percent: number,
+	resets: Record<string, number> | undefined,
+	key: string,
+	theme: { fg(color: string, text: string): string },
+	style: UsageStyle,
+	now = Date.now(),
+): string {
+	const sep = style === "percent" ? " " : ": ";
+	return `${label}${sep}${windowSegment(percent, resets, key, theme, style, now)}`;
+}
+
+/** Join window segments with a dim middot (footer collapses runs of spaces). */
+function joinParts(
+	parts: string[],
+	theme: { fg(color: string, text: string): string },
+): string {
+	return parts.join(` ${theme.fg("dim", "·")} `);
 }
 
 /** ±JITTER_RATIO randomization so timers don't line up across instances. */
@@ -361,26 +471,30 @@ export const opencodeCfg: ProviderCfg = {
 		if (Object.keys(windows).length === 0) throw new Error("no usage data");
 		return { windows, resets };
 	},
-	render(data, theme, modelId) {
+	render(data, theme, modelId, style = "bars") {
 		const w = data.windows;
 		const parts = (["rolling", "weekly", "monthly"] as const)
 			.filter((k) => typeof w[k] === "number")
-			.map(
-				(k) =>
-					`${k === "rolling" ? "R" : k === "weekly" ? "W" : "M"}: ${bar(w[k], data.resets, k, theme)}`,
+			.map((k) =>
+				labeledWindow(
+					k === "rolling" ? "R" : k === "weekly" ? "W" : "M",
+					w[k],
+					data.resets,
+					k,
+					theme,
+					style,
+				),
 			);
 		if (parts.length === 0) return "";
 
+		// DeepSeek pools flip on peak-hour windows; surface that countdown.
 		const isDeepSeek = modelId ? /deepseek/i.test(modelId) : false;
-		let prefix = "OpenCode Go";
-		if (isDeepSeek) {
-			const peak = getDeepSeekPeakInfo();
-			const tag = peak.isPeak
-				? theme.fg("warning", `Peak ${resetLabel(peak.nextFlipMs)}`)
-				: theme.fg("dim", `Off-Peak ${resetLabel(peak.nextFlipMs)}`);
-			prefix = `OpenCode Go (${tag})`;
-		}
-		return `${prefix}  ${parts.join("  ")}`;
+		if (!isDeepSeek) return joinParts(parts, theme);
+		const peak = getDeepSeekPeakInfo();
+		const tag = peak.isPeak
+			? theme.fg("warning", `Peak ${resetLabel(peak.nextFlipMs)}`)
+			: theme.fg("dim", `Off-Peak ${resetLabel(peak.nextFlipMs)}`);
+		return joinParts([tag, ...parts], theme);
 	},
 };
 
@@ -474,9 +588,8 @@ export const codexCfg: ProviderCfg = {
 		const json = (await res.json()) as CodexUsageResponse;
 		return parseCodexUsage(json);
 	},
-	render(data, theme) {
+	render(data, theme, _modelId, style = "bars") {
 		const w = data.windows;
-		const plan = data.plan ? cap(data.plan) : "Sub";
 		const parts: string[] = [];
 
 		const orderedKeys = ["5h", "daily", "weekly", "monthly"];
@@ -495,18 +608,18 @@ export const codexCfg: ProviderCfg = {
 								: k === "daily"
 									? "1d"
 									: k;
-				parts.push(`${label}: ${bar(w[k], data.resets, k, theme)}`);
+				parts.push(labeledWindow(label, w[k], data.resets, k, theme, style));
 			}
 		}
 
 		for (const [k, v] of Object.entries(w)) {
 			if (!seen.has(k) && typeof v === "number") {
-				parts.push(`${k}: ${bar(v, data.resets, k, theme)}`);
+				parts.push(labeledWindow(k, v, data.resets, k, theme, style));
 			}
 		}
 
 		if (parts.length === 0) return "";
-		return `OpenAI Codex ${plan}  ${parts.join("  ")}`;
+		return joinParts(parts, theme);
 	},
 };
 
@@ -676,24 +789,20 @@ export const antigravityCfg: ProviderCfg = {
 
 		return { windows, plan, resets };
 	},
-	render(data, theme, modelId) {
+	render(data, theme, modelId, style = "bars") {
 		const w = data.windows;
-		const plan = data.plan ? cap(data.plan) : "sub";
 		const isClaude = modelId ? /claude/i.test(modelId) : false;
 		const isGpt = modelId ? /gpt/i.test(modelId) : false;
 		const is3p = isClaude || isGpt || (modelId ? /3p/i.test(modelId) : false);
 
-		let groupLabel: string | undefined;
 		let bucketKeys: Array<[string, string]>;
 
 		if (is3p) {
-			groupLabel = isClaude ? "Claude" : isGpt ? "GPT" : "Claude/GPT";
 			bucketKeys = [
 				["3p-5h", "5h"],
 				["3p-weekly", "W"],
 			];
 		} else {
-			groupLabel = "Gemini";
 			bucketKeys = [
 				["gemini-5h", "5h"],
 				["gemini-weekly", "W"],
@@ -702,33 +811,31 @@ export const antigravityCfg: ProviderCfg = {
 
 		const hasSelectedData = bucketKeys.some(([k]) => typeof w[k] === "number");
 		if (!hasSelectedData) {
+			// Model's pool is unknown — show every bucket with disambiguating labels.
 			bucketKeys = [
 				["gemini-5h", "G-5h"],
 				["gemini-weekly", "G-W"],
 				["3p-5h", "3P-5h"],
 				["3p-weekly", "3P-W"],
 			];
-			groupLabel = undefined;
 		}
 
 		const parts = bucketKeys
 			.filter(([k]) => typeof w[k] === "number")
-			.map(([k, label]) => `${label}: ${bar(w[k], data.resets, k, theme)}`);
+			.map(([k, label]) =>
+				labeledWindow(label, w[k], data.resets, k, theme, style),
+			);
 
 		if (parts.length === 0) return "";
-		const prefix = groupLabel
-			? `Antigravity ${plan} (${groupLabel})`
-			: `Antigravity ${plan}`;
-		return `${prefix}  ${parts.join("  ")}`;
+		return joinParts(parts, theme);
 	},
 };
-
-export const WIDGET_KEY = "subscription-usage";
 
 export default function (pi: ExtensionAPI) {
 	const cache = new Map<string, ProviderState>();
 	let currentCtx: StatusCtx | undefined;
 	const cfgs = [opencodeCfg, codexCfg, antigravityCfg];
+	let mode: UsageMode = loadPrefs().mode;
 
 	function renderUi(
 		ui: StatusCtx["ui"] | undefined,
@@ -737,13 +844,22 @@ export default function (pi: ExtensionAPI) {
 	): void {
 		if (!ui) return;
 		try {
-			ui.setStatus?.(providerId, undefined);
-			ui.setWidget(WIDGET_KEY, text ? [text] : undefined, {
-				placement: "belowEditor",
-			});
+			// Footer status line, directly below the model/thinking indicator.
+			ui.setStatus(providerId, text);
 		} catch {
 			// The session can be replaced between safeUi() and this write.
 		}
+	}
+
+	/** Render `data` for a provider in the current style. */
+	function renderText(
+		cfg: ProviderCfg,
+		data: UsageData,
+		ui: StatusCtx["ui"],
+		modelId?: string,
+	): string {
+		if (mode === "off") return "";
+		return cfg.render(data, ui.theme, modelId, mode) || `${cfg.id}: no data`;
 	}
 
 	function freshState(): ProviderState {
@@ -763,7 +879,7 @@ export default function (pi: ExtensionAPI) {
 
 	async function syncFromDisk(): Promise<void> {
 		const ctx = currentCtx;
-		if (!ctx) return;
+		if (!ctx || mode === "off") return;
 		const ui = safeUi(ctx);
 		if (!ui) return;
 		const model = safeModel(ctx);
@@ -780,8 +896,7 @@ export default function (pi: ExtensionAPI) {
 			state.lastData = disk.data;
 			state.failStreak = 0;
 			cache.set(cfg.id, state);
-			state.lastText =
-				cfg.render(disk.data, ui.theme, model?.id) || `${cfg.id}: no data`;
+			state.lastText = renderText(cfg, disk.data, ui, model?.id);
 			renderUi(ui, cfg.id, state.lastText);
 			arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
 		}
@@ -930,8 +1045,7 @@ export default function (pi: ExtensionAPI) {
 			) {
 				const ui = safeUi(ctx);
 				if (ui && state.lastData) {
-					state.lastText =
-						cfg.render(state.lastData, ui.theme, model?.id) || `${cfg.id}: no data`;
+					state.lastText = renderText(cfg, state.lastData, ui, model?.id);
 				}
 				renderUi(ui, cfg.id, state.lastText);
 				return "cached";
@@ -943,8 +1057,7 @@ export default function (pi: ExtensionAPI) {
 			if (now - state.lastFetch < MIN_FETCH_GAP_MS && state.lastData) {
 				const ui = safeUi(ctx);
 				if (ui) {
-					state.lastText =
-						cfg.render(state.lastData, ui.theme, model?.id) || `${cfg.id}: no data`;
+					state.lastText = renderText(cfg, state.lastData, ui, model?.id);
 					renderUi(ui, cfg.id, state.lastText);
 				}
 				return "cached";
@@ -959,8 +1072,7 @@ export default function (pi: ExtensionAPI) {
 				if (!ui || !isCurrentRequest()) return "cached";
 				state.failStreak = 0;
 				state.lastData = data;
-				state.lastText =
-					cfg.render(data, ui.theme, model?.id) || `${cfg.id}: no data`;
+				state.lastText = renderText(cfg, data, ui, model?.id);
 				renderUi(ui, cfg.id, state.lastText);
 				await saveDiskCache(cfg.id, data);
 				return "fetched";
@@ -1043,6 +1155,8 @@ export default function (pi: ExtensionAPI) {
 	/** Route to the right provider config for the active model. */
 	function route(ctx: StatusCtx, force: boolean) {
 		currentCtx = ctx;
+		// Hidden mode: no statuses, no timers, no fetches at all.
+		if (mode === "off") return;
 		const provider = safeModel(ctx)?.provider;
 		const active = cfgs.find((c) => c.id === provider);
 		// Clear statuses+timers for all non-matching providers first, then
@@ -1052,6 +1166,69 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (active) poke(active, ctx, force);
 	}
+
+	/**
+	 * `/usage-toggle [bars|percent|off]` — cycle bars → percent → off, or
+	 * jump straight to the given mode. The choice persists across sessions.
+	 */
+	pi.registerCommand("usage-toggle", {
+		description:
+			"Cycle subscription usage display: bars → percent → off (or set directly)",
+		getArgumentCompletions: (prefix) => {
+			const filtered = USAGE_MODES.filter((s) => s.startsWith(prefix));
+			return filtered.length > 0
+				? filtered.map((s) => ({ value: s, label: s }))
+				: null;
+		},
+		handler: async (args, ctx) => {
+			let next: UsageMode;
+			const arg = args.trim().toLowerCase();
+			if (arg) {
+				const parsed = normalizeUsageMode(arg);
+				if (!parsed) {
+					ctx.ui.notify(
+						`Unknown mode "${args.trim()}". Options: ${USAGE_MODES.join(", ")}`,
+						"warning",
+					);
+					return;
+				}
+				next = parsed;
+			} else {
+				// Cycle: bars → percent → off → bars
+				next = USAGE_MODES[(USAGE_MODES.indexOf(mode) + 1) % USAGE_MODES.length];
+			}
+
+			mode = next;
+			savePrefs({ mode });
+
+			if (next === "off") {
+				// Hide: drop statuses and stop every timer/fetch for this session.
+				for (const c of cfgs) clear(ctx, c.id);
+				ctx.ui.notify(
+					"Subscription usage hidden (/usage-toggle restores it)",
+					"info",
+				);
+				return;
+			}
+
+			// Re-render from cached data so the footer updates immediately.
+			const model = safeModel(ctx);
+			const cfg = cfgs.find((c) => c.id === model?.provider);
+			const ui = safeUi(ctx);
+			const state = cfg ? cache.get(cfg.id) : undefined;
+			if (cfg && ui && state?.lastData) {
+				state.lastText = renderText(cfg, state.lastData, ui, model?.id);
+				renderUi(ui, cfg.id, state.lastText);
+				// Leaving "off" killed this provider's timer — re-arm it.
+				if (!state.timer)
+					arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
+			} else if (cfg && ui) {
+				// Nothing usable cached (e.g. first reveal after hiding) — fetch now.
+				poke(cfg, ctx, true);
+			}
+			ctx.ui.notify(`Subscription usage style: ${next}`, "info");
+		},
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		startDiskCacheWatcher();
