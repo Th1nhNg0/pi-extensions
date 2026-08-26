@@ -13,7 +13,7 @@ Adds a live status footer line in Pi displaying subscription usage bars, percent
 #### Supported Providers
 
 * **Antigravity Pro** (Gemini & 3rd-party/Claude quotas with 5h rolling & weekly buckets)
-* **OpenAI Codex** (Plus/Team plan weekly primary window & reset countdown)
+* **OpenAI Codex** (Plus/Team/Pro plan 5h rolling & weekly quota windows)
 * **OpenCode Go** (Rolling, Weekly, and Monthly limits, plus DeepSeek peak/off-peak indicator)
 
 ---
@@ -24,7 +24,7 @@ Adds a live status footer line in Pi displaying subscription usage bars, percent
 | :--- | :--- |
 | **Antigravity Pro (Gemini)** | `Antigravity Pro (Gemini)   5h: [□□□□□□]  0% ↻4h   W: [■■■■■□] 79% ↻4d` |
 | **Antigravity Pro (Claude/GPT)** | `Antigravity Pro (Claude)   5h: [□□□□□□]  0% ↻4h   W: [■■■■□□] 61% ↻6d` |
-| **OpenAI Codex** | `OpenAI Codex Plus          W: [■■■□□□] 51% ↻3d` |
+| **OpenAI Codex** | `OpenAI Codex Plus          5h: [□□□□□□]  1% ↻4h   W: [■■■□□□] 51% ↻3d` |
 | **OpenCode Go** | `OpenCode Go (Peak ↻2h)     R: [□□□□□□]  2% ↻3h   W: [■■□□□□] 44% ↻3d   M: [■■■■■■] 98% ↻14d` |
 
 #### Legend

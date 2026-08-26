@@ -6,7 +6,7 @@
  *
  *   opencode-go : OpenCode Go  R: ░░░░░░  4% ↻4h  W: ██████  97% ↻8h  M: █████░░░  62% ↻20d
  *                 OpenCode Go (Peak ↻2h)  R: ░░░░░░  4% ↻4h  W: ██████  97% ↻8h  M: █████░░░  62% ↻20d
- *   openai-codex: OpenAI Codex Plus  W: ██░░░░  25% ↻3d
+ *   openai-codex: OpenAI Codex Plus  5h: ░░░░░░  1% ↻4h  W: ░░░░░░  0% ↻6d
  *   antigravity : Antigravity Pro (Gemini)  5h: ░░░░░░  2% ↻4h  W: ░░░░░░  1% ↻6d
  *                 Antigravity Pro (Claude)  5h: ░░░░░░  0% ↻4h  W: ░░░░░░  0% ↻6d
  *
@@ -41,10 +41,15 @@ const ERROR_BACKOFF_CAP_MS = 30 * 60 * 1000; // …capped at 30 min
 const RESET_CATCH_DELAY_MS = 5_000; // refetch shortly after a window flips
 const JITTER_RATIO = 0.2; // ±20%, avoid lockstep with other instances
 const BAR_CELLS = 6;
-const CACHE_PATH = path.join(os.homedir(), ".pi", "agent", "subscription-usage-cache.json");
+const CACHE_PATH = path.join(
+	os.homedir(),
+	".pi",
+	"agent",
+	"subscription-usage-cache.json",
+);
 
 /** Percentages per window key, plus optional plan info and reset times (ms epoch). */
-interface UsageData {
+export interface UsageData {
 	windows: Record<string, number>;
 	plan?: string;
 	resets?: Record<string, number>;
@@ -86,7 +91,9 @@ function saveDiskCache(providerId: string, data: UsageData) {
 			fs.writeFileSync(CACHE_PATH, JSON.stringify(existing, null, 2), "utf8");
 			try {
 				fs.unlinkSync(tmp);
-			} catch {}
+			} catch {
+				// Ignore temp file cleanup failure
+			}
 		}
 	} catch (e) {
 		console.warn("[subscription-usage] failed to write disk cache:", e);
@@ -96,7 +103,11 @@ function saveDiskCache(providerId: string, data: UsageData) {
 interface ProviderCfg {
 	id: string;
 	fetchUsage: () => Promise<UsageData>;
-	render: (data: UsageData, theme: { fg(color: string, text: string): string }, modelId?: string) => string;
+	render: (
+		data: UsageData,
+		theme: { fg(color: string, text: string): string },
+		modelId?: string,
+	) => string;
 }
 
 interface StatusCtx {
@@ -116,7 +127,7 @@ interface ProviderState {
 	timer: ReturnType<typeof setTimeout> | undefined;
 }
 
-function cap(s: string): string {
+export function cap(s: string): string {
 	return s ? s[0].toUpperCase() + s.slice(1) : s;
 }
 
@@ -124,8 +135,8 @@ function cap(s: string): string {
  * Compact remaining-time label for a reset deadline, e.g. "↻4h", "↻20d",
  * "↻<1m" once the window is about to flip. Never shows negative times.
  */
-function resetLabel(resetMs: number): string {
-	const remain = resetMs - Date.now();
+export function resetLabel(resetMs: number, now = Date.now()): string {
+	const remain = resetMs - now;
 	if (remain <= 60_000) return "↻<1m";
 	const m = Math.floor(remain / 60_000);
 	if (m < 60) return `↻${m}m`;
@@ -137,18 +148,21 @@ function resetLabel(resetMs: number): string {
 }
 
 /** Build a single bar segment: filled/empty cells + percent + reset countdown. */
-function bar(
+export function bar(
 	percent: number,
 	resets: Record<string, number> | undefined,
 	key: string,
-	theme: { fg(color: string, text: string): string }
+	theme: { fg(color: string, text: string): string },
+	now = Date.now(),
 ): string {
-	const filled = Math.round((Math.min(100, Math.max(0, percent)) / 100) * BAR_CELLS);
+	const filled = Math.round(
+		(Math.min(100, Math.max(0, percent)) / 100) * BAR_CELLS,
+	);
 	const cells = "█".repeat(filled) + "░".repeat(BAR_CELLS - filled);
 	const color = percent > 90 ? "error" : percent > 70 ? "warning" : "dim";
 	let out = theme.fg(color, cells) + `  ${percent}%`;
 	const r = resets?.[key];
-	if (typeof r === "number") out += " " + theme.fg("dim", resetLabel(r));
+	if (typeof r === "number") out += " " + theme.fg("dim", resetLabel(r, now));
 	return out;
 }
 
@@ -162,7 +176,10 @@ function jitter(ms: number): number {
  * - 01:00 - 04:00 UTC
  * - 06:00 - 10:00 UTC
  */
-function getDeepSeekPeakInfo(now = Date.now()): { isPeak: boolean; nextFlipMs: number } {
+export function getDeepSeekPeakInfo(now = Date.now()): {
+	isPeak: boolean;
+	nextFlipMs: number;
+} {
 	const d = new Date(now);
 	const utcMins = d.getUTCHours() * 60 + d.getUTCMinutes();
 	const secOffsetMs = d.getUTCSeconds() * 1000 + d.getUTCMilliseconds();
@@ -193,7 +210,11 @@ function getDeepSeekPeakInfo(now = Date.now()): { isPeak: boolean; nextFlipMs: n
 }
 
 /** Earliest reset deadline across all tracked windows (ms epoch), if any. */
-function earliestReset(data: UsageData | undefined, modelId?: string, providerId?: string): number | undefined {
+export function earliestReset(
+	data: UsageData | undefined,
+	modelId?: string,
+	providerId?: string,
+): number | undefined {
 	const times = data?.resets ? Object.values(data.resets) : [];
 	if (providerId === "opencode-go" && modelId && /deepseek/i.test(modelId)) {
 		times.push(getDeepSeekPeakInfo().nextFlipMs);
@@ -202,12 +223,13 @@ function earliestReset(data: UsageData | undefined, modelId?: string, providerId
 }
 
 /** OpenCode Go: rolling / weekly / monthly usage windows. */
-const opencodeCfg: ProviderCfg = {
+export const opencodeCfg: ProviderCfg = {
 	id: "opencode-go",
 	async fetchUsage() {
 		const fromEnv = process.env.OPENCODE_API_KEY;
-		const cred = !fromEnv ? readStoredCredential("opencode-go") : undefined;
-		const key = fromEnv ?? (cred && cred.type === "api_key" ? cred.key : undefined);
+		const cred = fromEnv ? undefined : readStoredCredential("opencode-go");
+		const key =
+			fromEnv ?? (cred && cred.type === "api_key" ? cred.key : undefined);
 		if (!key) throw new Error("no API key (OPENCODE_API_KEY or auth.json)");
 
 		const res = await fetch("https://opencode.ai/zen/go/v1/usage", {
@@ -216,7 +238,15 @@ const opencodeCfg: ProviderCfg = {
 		});
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
 		const json = (await res.json()) as {
-			usage?: Record<string, { status?: string; percent?: number; usagePercent?: number; resetsAt?: string }>;
+			usage?: Record<
+				string,
+				{
+					status?: string;
+					percent?: number;
+					usagePercent?: number;
+					resetsAt?: string;
+				}
+			>;
 		};
 		const windows: Record<string, number> = {};
 		const resets: Record<string, number> = {};
@@ -225,7 +255,12 @@ const opencodeCfg: ProviderCfg = {
 			if (!w) continue;
 			// Real API reports `percent`; tolerate `usagePercent` on other
 			// backend shapes.
-			const p = typeof w.percent === "number" ? w.percent : typeof w.usagePercent === "number" ? w.usagePercent : undefined;
+			const p =
+				typeof w.percent === "number"
+					? w.percent
+					: typeof w.usagePercent === "number"
+						? w.usagePercent
+						: undefined;
 			if (typeof p !== "number") continue;
 			windows[k] = p;
 			const r = w.resetsAt ? Date.parse(w.resetsAt) : NaN;
@@ -238,7 +273,10 @@ const opencodeCfg: ProviderCfg = {
 		const w = data.windows;
 		const parts = (["rolling", "weekly", "monthly"] as const)
 			.filter((k) => typeof w[k] === "number")
-			.map((k) => `${k === "rolling" ? "R" : k === "weekly" ? "W" : "M"}: ${bar(w[k], data.resets, k, theme)}`);
+			.map(
+				(k) =>
+					`${k === "rolling" ? "R" : k === "weekly" ? "W" : "M"}: ${bar(w[k], data.resets, k, theme)}`,
+			);
 		if (parts.length === 0) return "";
 
 		const isDeepSeek = modelId ? /deepseek/i.test(modelId) : false;
@@ -254,12 +292,86 @@ const opencodeCfg: ProviderCfg = {
 	},
 };
 
-/** OpenAI Codex (ChatGPT subscription): weekly primary window + plan type. */
-const codexCfg: ProviderCfg = {
+export interface RateLimitWindowSnapshot {
+	used_percent?: number;
+	limit_window_seconds?: number;
+	reset_after_seconds?: number;
+	reset_at?: number;
+}
+
+export interface CodexUsageResponse {
+	plan_type?: string;
+	rate_limit?: {
+		allowed?: boolean;
+		limit_reached?: boolean;
+		primary_window?: RateLimitWindowSnapshot | null;
+		secondary_window?: RateLimitWindowSnapshot | null;
+	};
+}
+
+export function codexWindowKey(
+	w: { limit_window_seconds?: number },
+	fallback = "primary",
+): string {
+	const sec = w.limit_window_seconds;
+	if (typeof sec !== "number" || sec <= 0) return fallback;
+	if (sec >= 14_400 && sec <= 21_600) return "5h"; // ~5h (18000s)
+	if (sec >= 72_000 && sec <= 100_000) return "daily"; // ~24h (86400s)
+	if (sec >= 500_000 && sec <= 700_000) return "weekly"; // ~7d (604800s)
+	if (sec >= 2_000_000 && sec <= 3_000_000) return "monthly"; // ~30d (2592000s)
+	if (sec >= 3600) return `${Math.round(sec / 3600)}h`;
+	return `${Math.round(sec / 60)}m`;
+}
+
+export function parseCodexUsage(json: CodexUsageResponse): UsageData {
+	const windows: Record<string, number> = {};
+	const resets: Record<string, number> = {};
+
+	const hasSecondary = Boolean(json.rate_limit?.secondary_window);
+	const primaryRaw = json.rate_limit?.primary_window;
+	const secondaryRaw = json.rate_limit?.secondary_window;
+
+	if (primaryRaw && typeof primaryRaw.used_percent === "number") {
+		const key = codexWindowKey(primaryRaw, hasSecondary ? "5h" : "weekly");
+		windows[key] = primaryRaw.used_percent;
+		if (typeof primaryRaw.reset_at === "number") {
+			resets[key] = primaryRaw.reset_at * 1000;
+		}
+	}
+
+	if (secondaryRaw && typeof secondaryRaw.used_percent === "number") {
+		let key = codexWindowKey(secondaryRaw, "weekly");
+		if (key in windows) {
+			key = "secondary";
+		}
+		windows[key] = secondaryRaw.used_percent;
+		if (typeof secondaryRaw.reset_at === "number") {
+			resets[key] = secondaryRaw.reset_at * 1000;
+		}
+	}
+
+	if (Object.keys(windows).length === 0) {
+		throw new Error("no usage data");
+	}
+
+	return {
+		windows,
+		plan: json.plan_type,
+		resets,
+	};
+}
+
+/** OpenAI Codex (ChatGPT subscription): 5h rolling & weekly primary/secondary windows + plan type. */
+export const codexCfg: ProviderCfg = {
 	id: "openai-codex",
 	async fetchUsage() {
-		const cred = readStoredCredential("openai-codex");
-		const access = cred && cred.type === "oauth" ? cred.access : undefined;
+		const fromEnv =
+			process.env.OPENAI_CODEX_TOKEN ||
+			process.env.CODEX_ACCESS_TOKEN ||
+			process.env.CHATGPT_ACCESS_TOKEN;
+		const cred = fromEnv ? undefined : readStoredCredential("openai-codex");
+		const access =
+			fromEnv ?? (cred && cred.type === "oauth" ? cred.access : undefined);
 		if (!access) throw new Error("no OAuth token for openai-codex");
 
 		const res = await fetch("https://chatgpt.com/backend-api/codex/usage", {
@@ -272,35 +384,53 @@ const codexCfg: ProviderCfg = {
 			signal: AbortSignal.timeout(10_000),
 		});
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		const json = (await res.json()) as {
-			plan_type?: string;
-			rate_limit?: {
-				primary_window?: { used_percent?: number; reset_at?: number };
-			};
-		};
-		const percent = json.rate_limit?.primary_window?.used_percent;
-		if (typeof percent !== "number") throw new Error("no usage data");
-		const resets: Record<string, number> = {};
-		const ra = json.rate_limit?.primary_window?.reset_at;
-		if (typeof ra === "number") resets.weekly = ra * 1000; // epoch seconds → ms
-		return { windows: { weekly: percent }, plan: json.plan_type, resets };
+		const json = (await res.json()) as CodexUsageResponse;
+		return parseCodexUsage(json);
 	},
 	render(data, theme) {
-		const percent = data.windows.weekly;
-		if (typeof percent !== "number") return "";
+		const w = data.windows;
 		const plan = data.plan ? cap(data.plan) : "Sub";
-		return `OpenAI Codex ${plan}  W: ${bar(percent, data.resets, "weekly", theme)}`;
+		const parts: string[] = [];
+
+		const orderedKeys = ["5h", "daily", "weekly", "monthly"];
+		const seen = new Set<string>();
+
+		for (const k of orderedKeys) {
+			if (typeof w[k] === "number") {
+				seen.add(k);
+				const label =
+					k === "5h"
+						? "5h"
+						: k === "weekly"
+							? "W"
+							: k === "monthly"
+								? "M"
+								: k === "daily"
+									? "1d"
+									: k;
+				parts.push(`${label}: ${bar(w[k], data.resets, k, theme)}`);
+			}
+		}
+
+		for (const [k, v] of Object.entries(w)) {
+			if (!seen.has(k) && typeof v === "number") {
+				parts.push(`${k}: ${bar(v, data.resets, k, theme)}`);
+			}
+		}
+
+		if (parts.length === 0) return "";
+		return `OpenAI Codex ${plan}  ${parts.join("  ")}`;
 	},
 };
 
 const ANTIGRAVITY_CLIENT_ID = Buffer.from(
 	"MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlc" +
 		"C5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==",
-	"base64"
+	"base64",
 ).toString("utf8");
 const ANTIGRAVITY_CLIENT_SECRET = Buffer.from(
 	"R09DU1BYLUs1OEZXUjQ" + "4NkxkTEoxbUxCOHNYQzR6NnFEQWY=",
-	"base64"
+	"base64",
 ).toString("utf8");
 
 async function refreshAntigravityToken(refreshToken: string): Promise<string> {
@@ -309,7 +439,8 @@ async function refreshAntigravityToken(refreshToken: string): Promise<string> {
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		body: new URLSearchParams({
 			client_id: process.env.ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_CLIENT_ID,
-			client_secret: process.env.ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_CLIENT_SECRET,
+			client_secret:
+				process.env.ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_CLIENT_SECRET,
 			refresh_token: refreshToken,
 			grant_type: "refresh_token",
 		}).toString(),
@@ -321,10 +452,11 @@ async function refreshAntigravityToken(refreshToken: string): Promise<string> {
 }
 
 /** Antigravity (Google Cloud Code Assist): 5h & weekly pools for Gemini and Claude/GPT models. */
-const antigravityCfg: ProviderCfg = {
+export const antigravityCfg: ProviderCfg = {
 	id: "antigravity",
 	async fetchUsage() {
-		const fromEnv = process.env.ANTIGRAVITY_TOKEN || process.env.ANTIGRAVITY_API_KEY;
+		const fromEnv =
+			process.env.ANTIGRAVITY_TOKEN || process.env.ANTIGRAVITY_API_KEY;
 		let access = fromEnv;
 		let refreshToken: string | undefined;
 		let expires = 0;
@@ -338,9 +470,13 @@ const antigravityCfg: ProviderCfg = {
 			}
 		}
 
-		if (!access && !refreshToken) throw new Error("no OAuth token or API key for antigravity");
+		if (!access && !refreshToken)
+			throw new Error("no OAuth token or API key for antigravity");
 
-		if (refreshToken && (!access || (expires > 0 && Date.now() >= expires - 60_000))) {
+		if (
+			refreshToken &&
+			(!access || (expires > 0 && Date.now() >= expires - 60_000))
+		) {
 			try {
 				access = await refreshAntigravityToken(refreshToken);
 			} catch (e) {
@@ -348,12 +484,15 @@ const antigravityCfg: ProviderCfg = {
 			}
 		}
 
-		const baseUrl = process.env.ANTIGRAVITY_BASE_URL?.trim() || "https://cloudcode-pa.googleapis.com";
+		const baseUrl =
+			process.env.ANTIGRAVITY_BASE_URL?.trim() ||
+			"https://cloudcode-pa.googleapis.com";
 		const headers: Record<string, string> = {
 			Authorization: `Bearer ${access}`,
 			"Content-Type": "application/json",
 			Accept: "application/json",
-			"User-Agent": process.env.ANTIGRAVITY_USER_AGENT || "antigravity/1.15.8 windows/amd64",
+			"User-Agent":
+				process.env.ANTIGRAVITY_USER_AGENT || "antigravity/1.15.8 windows/amd64",
 			"X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
 			"Client-Metadata": JSON.stringify({
 				ideType: "ANTIGRAVITY",
@@ -398,7 +537,10 @@ const antigravityCfg: ProviderCfg = {
 				const k = b.bucketId || b.window;
 				if (!k) continue;
 				if (typeof b.remainingFraction === "number") {
-					windows[k] = Math.max(0, Math.min(100, Math.round((1 - b.remainingFraction) * 100)));
+					windows[k] = Math.max(
+						0,
+						Math.min(100, Math.round((1 - b.remainingFraction) * 100)),
+					);
 				}
 				if (b.resetTime) {
 					const r = Date.parse(b.resetTime);
@@ -482,7 +624,9 @@ const antigravityCfg: ProviderCfg = {
 			.map(([k, label]) => `${label}: ${bar(w[k], data.resets, k, theme)}`);
 
 		if (parts.length === 0) return "";
-		const prefix = groupLabel ? `Antigravity ${plan} (${groupLabel})` : `Antigravity ${plan}`;
+		const prefix = groupLabel
+			? `Antigravity ${plan} (${groupLabel})`
+			: `Antigravity ${plan}`;
 		return `${prefix}  ${parts.join("  ")}`;
 	},
 };
@@ -493,7 +637,13 @@ export default function (pi: ExtensionAPI) {
 	const cfgs = [opencodeCfg, codexCfg, antigravityCfg];
 
 	function freshState(): ProviderState {
-		return { lastFetch: 0, lastText: undefined, lastData: undefined, failStreak: 0, timer: undefined };
+		return {
+			lastFetch: 0,
+			lastText: undefined,
+			lastData: undefined,
+			failStreak: 0,
+			timer: undefined,
+		};
 	}
 
 	function syncFromDisk() {
@@ -513,9 +663,15 @@ export default function (pi: ExtensionAPI) {
 			state.lastData = disk.data;
 			state.failStreak = 0;
 			cache.set(cfg.id, state);
-			state.lastText = cfg.render(disk.data, ui.theme, currentCtx.model?.id) || `${cfg.id}: no data`;
+			state.lastText =
+				cfg.render(disk.data, ui.theme, currentCtx.model?.id) ||
+				`${cfg.id}: no data`;
 			ui.setStatus(cfg.id, state.lastText);
-			arm(cfg, currentCtx, nextDelay(state, Date.now(), currentCtx.model?.id, cfg.id));
+			arm(
+				cfg,
+				currentCtx,
+				nextDelay(state, Date.now(), currentCtx.model?.id, cfg.id),
+			);
 		}
 	}
 
@@ -550,11 +706,16 @@ export default function (pi: ExtensionAPI) {
 	 * failing; otherwise wake right after the nearest reset flips, or fall
 	 * back to the idle interval.
 	 */
-	function nextDelay(state: ProviderState, now: number, modelId?: string, providerId?: string): number {
+	function nextDelay(
+		state: ProviderState,
+		now: number,
+		modelId?: string,
+		providerId?: string,
+	): number {
 		if (state.failStreak > 0) {
 			const backoff = Math.min(
 				ERROR_BACKOFF_BASE_MS * 2 ** (state.failStreak - 1),
-				ERROR_BACKOFF_CAP_MS
+				ERROR_BACKOFF_CAP_MS,
 			);
 			return jitter(backoff);
 		}
@@ -575,14 +736,22 @@ export default function (pi: ExtensionAPI) {
 		return jitter(INTERVAL_MS);
 	}
 
-	async function refresh(cfg: ProviderCfg, ctx: StatusCtx, force: boolean): Promise<"fetched" | "cached"> {
+	async function refresh(
+		cfg: ProviderCfg,
+		ctx: StatusCtx,
+		force: boolean,
+	): Promise<"fetched" | "cached"> {
 		const state = cache.get(cfg.id) ?? freshState();
 		cache.set(cfg.id, state);
 		const now = Date.now();
 
 		// Sync with disk cache if another session fetched newer data
 		const disk = loadDiskCache()[cfg.id];
-		if (disk?.data && typeof disk.fetchedAt === "number" && disk.fetchedAt > state.lastFetch) {
+		if (
+			disk?.data &&
+			typeof disk.fetchedAt === "number" &&
+			disk.fetchedAt > state.lastFetch
+		) {
 			state.lastFetch = disk.fetchedAt;
 			state.lastData = disk.data;
 			state.failStreak = 0;
@@ -600,7 +769,9 @@ export default function (pi: ExtensionAPI) {
 		) {
 			const ui = safeUi(ctx);
 			if (ui && state.lastData) {
-				state.lastText = cfg.render(state.lastData, ui.theme, ctx.model?.id) || `${cfg.id}: no data`;
+				state.lastText =
+					cfg.render(state.lastData, ui.theme, ctx.model?.id) ||
+					`${cfg.id}: no data`;
 			}
 			ui?.setStatus(cfg.id, state.lastText);
 			return "cached";
@@ -611,7 +782,9 @@ export default function (pi: ExtensionAPI) {
 		if (now - state.lastFetch < MIN_FETCH_GAP_MS && state.lastData) {
 			const ui = safeUi(ctx);
 			if (ui) {
-				state.lastText = cfg.render(state.lastData, ui.theme, ctx.model?.id) || `${cfg.id}: no data`;
+				state.lastText =
+					cfg.render(state.lastData, ui.theme, ctx.model?.id) ||
+					`${cfg.id}: no data`;
 				ui.setStatus(cfg.id, state.lastText);
 			}
 			return "cached";
@@ -627,7 +800,8 @@ export default function (pi: ExtensionAPI) {
 			if (!ui || !cache.has(cfg.id)) return "cached";
 			state.failStreak = 0;
 			state.lastData = data;
-			state.lastText = cfg.render(data, ui.theme, ctx.model?.id) || `${cfg.id}: no data`;
+			state.lastText =
+				cfg.render(data, ui.theme, ctx.model?.id) || `${cfg.id}: no data`;
 			ui.setStatus(cfg.id, state.lastText);
 			saveDiskCache(cfg.id, data);
 			return "fetched";
@@ -638,7 +812,7 @@ export default function (pi: ExtensionAPI) {
 			state.failStreak += 1;
 			console.warn(
 				`[${cfg.id}-usage] fetch failed (${state.failStreak}×): ` +
-					(err instanceof Error ? err.message : String(err))
+					(err instanceof Error ? err.message : String(err)),
 			);
 			if (state.lastText !== undefined && !state.lastText.includes("err")) {
 				// Keep the last known numbers, tinted so staleness is visible.
@@ -686,7 +860,8 @@ export default function (pi: ExtensionAPI) {
 			// Rearm from the result, unless the session was replaced or this
 			// provider got cleared while we were awaiting.
 			const s = cache.get(cfg.id);
-			if (s && safeUi(ctx)) arm(cfg, ctx, nextDelay(s, Date.now(), ctx.model?.id, cfg.id));
+			if (s && safeUi(ctx))
+				arm(cfg, ctx, nextDelay(s, Date.now(), ctx.model?.id, cfg.id));
 		})();
 	}
 
@@ -714,7 +889,7 @@ export default function (pi: ExtensionAPI) {
 		route(ctx, true);
 	});
 
-	pi.on("model_select", async (event, ctx) => {
+	pi.on("model_select", async (_event, ctx) => {
 		route(ctx, true);
 	});
 
@@ -727,7 +902,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (_event, ctx) => {
 		try {
 			fs.unwatchFile(CACHE_PATH);
-		} catch {}
+		} catch {
+			// Ignore unwatch failure on shutdown
+		}
 		clear(ctx, "opencode-go");
 		clear(ctx, "openai-codex");
 		clear(ctx, "antigravity");
