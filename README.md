@@ -93,42 +93,56 @@ Discord Presence **never** sends:
 
 #### 🛡️ Privacy Modes
 
-Configure how much metadata is visible in Discord via `PI_DISCORD_PRIVACY`:
+Configure how much metadata is visible in Discord via `/discord-privacy [strict|project|developer]` or `PI_DISCORD_PRIVACY`:
 
-* `strict` (**Default**): Hides the project name completely for maximum privacy.
+* `strict` (**Default**): Hides the project name completely for maximum privacy. Price is included by default when pricing is available.
 
   ```text
   Thinking · GPT-5.6
-  42k tok · ctx 38%
+  42k tok · ctx 38% · $0.84
   ```
 
 * `project`: Includes the privacy-safe project directory basename.
 
   ```text
   Thinking · GPT-5.6
-  spring2026 · 42k tok · ctx 38%
+  spring2026 · 42k tok · ctx 38% · $0.84
   ```
 
-* `developer`: Includes the project directory basename and session cost (when pricing is available).
+* `developer`: Explicit developer view including project basename, tokens, context %, and pricing.
 
   ```text
   Thinking · GPT-5.6
   spring2026 · 42k tok · ctx 38% · $0.84
   ```
 
+#### 🎮 Slash Commands
+
+All presence controls are consolidated under a single clean `/discord` command:
+
+| Command | Usage | Description |
+| :--- | :--- | :--- |
+| `/discord status` | `/discord status` | View live connection status, publisher details, active models, token metrics, and per-session diagnostics. |
+| `/discord privacy` | `/discord privacy [strict\|project\|developer]` | Cycle or set privacy mode immediately without restarting Pi. Persists across sessions. |
+| `/discord toggle` | `/discord toggle [on\|off]` | Turn Discord Presence publishing on or off on the fly. Persists in preferences. |
+| `/discord config` | `/discord config` | View an overview of all active settings, client ID, image keys, and preferences. |
+
+*(For backward compatibility, `/discord-status` is also supported as an alias.)*
+
 #### ⚙️ Configuration & Environment Variables
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `PI_DISCORD_CLIENT_ID` | `1541350417143955466` | Custom Discord Application Client ID snowflake. Custom IDs disable built-in assets automatically to prevent missing-asset errors. |
+| `PI_DISCORD_CLIENT_ID` | `1541350417143955466` | Custom Discord Application Client ID snowflake. Custom IDs disable default assets unless explicitly configured. |
 | `PI_DISCORD_PRIVACY` | `strict` | Privacy level: `strict`, `project`, or `developer`. |
 | `PI_DISCORD_BUTTONS` | `on` | Set to `off` to disable the default static Discord profile buttons. |
-| `PI_DISCORD_LARGE_IMAGE` | `pi` | Large Rich Presence asset key. Set to `off` to disable large images. |
-| `PI_DISCORD_SMALL_IMAGES` | `on` | Action badge asset key (`thinking`, `reading`, `editing`, `searching`, `running`, `testing`, `browsing`, `idle`). Set to `off` to disable. |
+| `PI_DISCORD_LARGE_IMAGE` | `pi` | Large Rich Presence asset key or image URL. Set to `off` to disable. |
+| `PI_DISCORD_SMALL_IMAGES` | `on` | Action badge asset key (`thinking`, `reading`, `editing`, `searching`, `running`, `testing`, `browsing`, `idle`), custom asset key, or image URL. Set to `off` to disable. |
+| `PI_DISCORD_SHOW_COST` | `on` | Set to `off` to hide price from public Discord presence. |
 
 #### Setup & Diagnostics
 
-The extension includes a public Discord application ID, so no environment variable is required. Start or reload Pi while Discord Desktop is running, then use `/discord-status` to check connection status and inspect per-session statistics (model, phase/action, token breakdown, pricing, context %, and duration).
+The extension includes a public Discord application ID, so no environment variable is required. Start or reload Pi while Discord Desktop is running, then use `/discord-status` to check connection status and inspect per-session statistics (model, phase/action, token breakdown, pricing, context %, and duration). Custom settings can be changed on the fly using `/discord-privacy` and `/discord-toggle`, and are saved to `~/.pi/agent/discord-presence-prefs.json`.
 
 Multiple Pi sessions share a registry at `~/.pi/agent/discord-presence-state.json`. One session publishes the aggregate activity while the others send heartbeats. If the publisher exits, another active session takes over; stale sessions are removed automatically. Usage totals include assistant/tool results plus compaction and branch-summary calls. Registry locks renew their lease during long operations, and only the newest pending Discord activity is published, keeping rapid tool/phase updates responsive without replaying stale states.
 

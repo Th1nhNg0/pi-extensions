@@ -34,10 +34,35 @@ export const PRIVACY_ENV = "PI_DISCORD_PRIVACY";
 export const BUTTONS_ENV = "PI_DISCORD_BUTTONS";
 export const LARGE_IMAGE_ENV = "PI_DISCORD_LARGE_IMAGE";
 export const SMALL_IMAGES_ENV = "PI_DISCORD_SMALL_IMAGES";
+export const SHOW_COST_ENV = "PI_DISCORD_SHOW_COST";
+export const ENABLED_ENV = "PI_DISCORD_ENABLED";
 
 export const DEFAULT_CLIENT_ID = "1541350417143955466";
-export const DEFAULT_LARGE_IMAGE_KEY = "pi";
+export const DEFAULT_LARGE_IMAGE_KEY =
+	"https://cdn.discordapp.com/app-icons/1541350417143955466/71bb55a3b54d84642419948a680f22e4.png";
 export const DEFAULT_LARGE_IMAGE_TEXT = "Pi Coding Agent";
+
+export const ACTION_EMOJI_BADGE_URLS: Record<PresenceAction, string> = {
+	thinking:
+		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f9e0.png",
+	testing:
+		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f9ea.png",
+	editing:
+		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/270f.png",
+	searching:
+		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f50d.png",
+	reading:
+		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f4d6.png",
+	running:
+		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f4bb.png",
+	browsing:
+		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f310.png",
+	tools:
+		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f6e0.png",
+	idle:
+		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2615.png",
+};
+
 export const DEFAULT_BUTTONS: Array<{ label: string; url: string }> = [
 	{
 		label: "Pi Extensions",
@@ -49,12 +74,20 @@ export const DEFAULT_BUTTONS: Array<{ label: string; url: string }> = [
 	},
 ];
 
-const DEFAULT_STATE_PATH = join(
+export const DEFAULT_STATE_PATH = join(
 	os.homedir(),
 	".pi",
 	"agent",
 	"discord-presence-state.json",
 );
+
+export const DEFAULT_PREFS_PATH = join(
+	os.homedir(),
+	".pi",
+	"agent",
+	"discord-presence-prefs.json",
+);
+
 const MAX_ACTIVITY_TEXT_LENGTH = 128;
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const STALE_SESSION_MS = 30_000;
@@ -85,6 +118,21 @@ export type PresenceAction =
 	| "idle";
 
 export type PresencePrivacyMode = "strict" | "project" | "developer";
+export const PRIVACY_MODES: readonly PresencePrivacyMode[] = [
+	"strict",
+	"project",
+	"developer",
+];
+
+export interface DiscordPresencePrefs {
+	privacyMode?: PresencePrivacyMode;
+	enabled?: boolean;
+	showCost?: boolean;
+	buttons?: boolean;
+	assets?: boolean;
+	largeImage?: string;
+	smallImages?: string;
+}
 
 export interface UsageTotals {
 	input: number;
@@ -174,6 +222,7 @@ export interface PresenceStateStore {
 
 export interface ActivityBuildOptions {
 	privacyMode?: PresencePrivacyMode;
+	showCost?: boolean;
 	clientId?: string;
 	enableButtons?: boolean;
 	enableAssets?: boolean;
@@ -199,8 +248,11 @@ export interface PresenceManagerOptions {
 	retryBaseMs?: number;
 	retryCapMs?: number;
 	privacyMode?: PresencePrivacyMode;
+	showCost?: boolean;
 	enableButtons?: boolean;
 	enableAssets?: boolean;
+	largeImageKey?: string;
+	smallImageKey?: string;
 }
 
 function defaultLogger(message: string): void {
@@ -221,6 +273,29 @@ function finiteNonNegative(value: unknown): number | undefined {
 
 function finiteNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+export async function readPrefs(
+	filePath = DEFAULT_PREFS_PATH,
+): Promise<DiscordPresencePrefs> {
+	try {
+		const raw = JSON.parse(await readFile(filePath, "utf8"));
+		return (asRecord(raw) as DiscordPresencePrefs) ?? {};
+	} catch {
+		return {};
+	}
+}
+
+export async function writePrefs(
+	prefs: DiscordPresencePrefs,
+	filePath = DEFAULT_PREFS_PATH,
+): Promise<void> {
+	try {
+		await mkdir(dirname(filePath), { recursive: true });
+		await writeFile(filePath, JSON.stringify(prefs, null, 2), "utf8");
+	} catch {
+		// Non-fatal if the filesystem is read-only
+	}
 }
 
 export function emptyUsageTotals(): UsageTotals {
@@ -705,7 +780,8 @@ export function formatDiscordModelLabel(
 export function formatPublicMetrics(
 	usage: UsageTotals,
 	context?: ContextSnapshot,
-	privacy: PresencePrivacyMode = "strict",
+	_privacy: PresencePrivacyMode = "strict",
+	showCost = true,
 ): string {
 	const parts: string[] = [];
 	parts.push(`${formatTokenCount(usage.total)} tok`);
@@ -718,7 +794,8 @@ export function formatPublicMetrics(
 		parts.push(`ctx ${clampedPercent}%`);
 	}
 
-	if (privacy === "developer" && usage.cost !== undefined) {
+	// Show cost by default when available
+	if (showCost && usage.cost !== undefined) {
 		const prefix = usage.costComplete ? "$" : "~$";
 		parts.push(`${prefix}${usage.cost.toFixed(2)}`);
 	}
@@ -735,8 +812,14 @@ export function formatSingleSessionDetails(record: SessionRecord): string {
 export function formatSingleSessionState(
 	record: SessionRecord,
 	privacy: PresencePrivacyMode = "strict",
+	showCost = true,
 ): string {
-	const metrics = formatPublicMetrics(record.usage, record.context, privacy);
+	const metrics = formatPublicMetrics(
+		record.usage,
+		record.context,
+		privacy,
+		showCost,
+	);
 	if (privacy === "project" || privacy === "developer") {
 		const project = truncateText(record.projectName || "project", 48);
 		return truncateText(`${project} · ${metrics}`);
@@ -756,9 +839,12 @@ export function summarizeModels(records: readonly SessionRecord[]): string {
 export function formatMultiSessionDetails(
 	summary: AggregateSummary,
 	sessionCount: number,
+	showCost = true,
 ): string {
 	const costPart =
-		summary.usage.cost === undefined ? "" : ` · ${formatCost(summary.usage)}`;
+		showCost && summary.usage.cost !== undefined
+			? ` · ${formatCost(summary.usage)}`
+			: "";
 	return truncateText(
 		`${sessionCount} Pi sessions · ${formatTokenCount(summary.usage.total)} tok${costPart}`,
 	);
@@ -785,38 +871,80 @@ export function attachAssetsAndButtons(
 	const clientId = options.clientId ?? DEFAULT_CLIENT_ID;
 	const isDefaultClient = clientId === DEFAULT_CLIENT_ID;
 
-	const largeImageEnv = process.env[LARGE_IMAGE_ENV];
-	const smallImagesEnv = process.env[SMALL_IMAGES_ENV];
-	const assetsExplicitlyDisabled =
+	const largeImageEnv = options.largeImageKey ?? process.env[LARGE_IMAGE_ENV];
+	const smallImagesEnv = options.smallImageKey ?? process.env[SMALL_IMAGES_ENV];
+
+	const largeDisabled =
 		options.enableAssets === false ||
 		largeImageEnv === "off" ||
 		largeImageEnv === "false" ||
-		largeImageEnv === "none";
+		largeImageEnv === "none" ||
+		largeImageEnv === "0";
+
+	const smallDisabled =
+		options.enableAssets === false ||
+		smallImagesEnv === "off" ||
+		smallImagesEnv === "false" ||
+		smallImagesEnv === "none" ||
+		smallImagesEnv === "0";
 
 	const canUseAssets =
-		!assetsExplicitlyDisabled && (isDefaultClient || !!largeImageEnv);
+		options.enableAssets === true ||
+		isDefaultClient ||
+		Boolean(largeImageEnv) ||
+		Boolean(smallImagesEnv);
 
-	if (canUseAssets) {
-		const largeKey =
-			options.largeImageKey ??
-			(largeImageEnv && largeImageEnv !== "on"
-				? largeImageEnv
-				: DEFAULT_LARGE_IMAGE_KEY);
+	if (canUseAssets && !largeDisabled) {
+		let largeKey = DEFAULT_LARGE_IMAGE_KEY;
+		if (
+			largeImageEnv &&
+			largeImageEnv !== "on" &&
+			largeImageEnv !== "true" &&
+			largeImageEnv !== "1" &&
+			largeImageEnv !== "auto"
+		) {
+			largeKey = largeImageEnv;
+		}
 		const largeText = options.largeImageText ?? DEFAULT_LARGE_IMAGE_TEXT;
-		activity.largeImageKey = largeKey;
-		activity.largeImageText = truncateText(largeText, 128);
 
-		const smallDisabled =
-			smallImagesEnv === "off" ||
-			smallImagesEnv === "false" ||
-			smallImagesEnv === "none";
-		if (!smallDisabled) {
-			const effectiveAction = action ?? (phase === "tools" ? "tools" : phase);
-			const smallKey = options.smallImageKey ?? effectiveAction;
-			const smallText =
-				options.smallImageText ?? formatAction(effectiveAction, phase);
+		if (largeKey.startsWith("http://") || largeKey.startsWith("https://")) {
+			activity.largeImageUrl = largeKey;
+			activity.largeImageKey = largeKey;
+		} else {
+			activity.largeImageKey = largeKey;
+		}
+		activity.largeImageText = truncateText(largeText, 128);
+	}
+
+	if (canUseAssets && !smallDisabled) {
+		const effectiveAction = action ?? (phase === "tools" ? "tools" : phase);
+		let smallKey: string =
+			ACTION_EMOJI_BADGE_URLS[effectiveAction] ?? ACTION_EMOJI_BADGE_URLS.tools;
+		if (
+			smallImagesEnv &&
+			smallImagesEnv !== "on" &&
+			smallImagesEnv !== "true" &&
+			smallImagesEnv !== "1" &&
+			smallImagesEnv !== "auto"
+		) {
+			smallKey = smallImagesEnv;
+		}
+
+		const smallText =
+			options.smallImageText ?? formatAction(effectiveAction, phase);
+
+		if (smallKey.startsWith("http://") || smallKey.startsWith("https://")) {
+			activity.smallImageUrl = smallKey;
 			activity.smallImageKey = smallKey;
-			activity.smallImageText = truncateText(smallText, 128);
+		} else {
+			activity.smallImageKey = smallKey;
+		}
+		activity.smallImageText = truncateText(smallText, 128);
+
+		// If a small image is set, Discord requires large_image to be present too
+		if (!activity.largeImageKey && !largeDisabled) {
+			activity.largeImageKey = DEFAULT_LARGE_IMAGE_KEY;
+			activity.largeImageText = DEFAULT_LARGE_IMAGE_TEXT;
 		}
 	}
 
@@ -825,6 +953,7 @@ export function attachAssetsAndButtons(
 		options.enableButtons === false ||
 		buttonsEnv === "off" ||
 		buttonsEnv === "false" ||
+		buttonsEnv === "none" ||
 		buttonsEnv === "0";
 
 	if (!buttonsDisabled) {
@@ -837,8 +966,9 @@ export function buildSingleSessionActivity(
 	options: ActivityBuildOptions = {},
 ): PresenceActivity {
 	const privacy = options.privacyMode ?? "strict";
+	const showCost = options.showCost ?? true;
 	const details = formatSingleSessionDetails(record);
-	const state = formatSingleSessionState(record, privacy);
+	const state = formatSingleSessionState(record, privacy, showCost);
 
 	const activity: PresenceActivity = {
 		details,
@@ -867,7 +997,8 @@ export function buildMultiSessionActivity(
 
 	const primary = records[0];
 	const summary = summarizeRecords(records);
-	const details = formatMultiSessionDetails(summary, records.length);
+	const showCost = options.showCost ?? true;
+	const details = formatMultiSessionDetails(summary, records.length, showCost);
 	const activityState = formatMultiSessionState(records, summary.projectCount);
 
 	const activity: PresenceActivity = {
@@ -1461,9 +1592,12 @@ export class DiscordPresenceManager {
 	private readonly heartbeatMs: number;
 	private readonly retryBaseMs: number;
 	private readonly retryCapMs: number;
-	private readonly privacyMode: PresencePrivacyMode;
-	private readonly enableButtons?: boolean;
-	private readonly enableAssets?: boolean;
+	private privacyMode: PresencePrivacyMode;
+	private showCost: boolean;
+	private enableButtons?: boolean;
+	private enableAssets?: boolean;
+	private largeImageKey?: string;
+	private smallImageKey?: string;
 	private readonly record: SessionRecord;
 
 	private status: PresenceStatus = "not-started";
@@ -1496,8 +1630,11 @@ export class DiscordPresenceManager {
 		this.retryCapMs = options.retryCapMs ?? RETRY_CAP_MS;
 		this.privacyMode =
 			options.privacyMode ?? parsePrivacyMode(process.env[PRIVACY_ENV]);
+		this.showCost = options.showCost ?? true;
 		this.enableButtons = options.enableButtons;
 		this.enableAssets = options.enableAssets;
+		this.largeImageKey = options.largeImageKey;
+		this.smallImageKey = options.smallImageKey;
 		const startedAt = options.startedAt ?? this.now();
 		this.record = {
 			sessionId: this.sessionId,
@@ -1523,6 +1660,30 @@ export class DiscordPresenceManager {
 
 	getStatus(): PresenceStatus {
 		return this.status;
+	}
+
+	getPrivacyMode(): PresencePrivacyMode {
+		return this.privacyMode;
+	}
+
+	setPrivacyMode(mode: PresencePrivacyMode): Promise<void> {
+		this.privacyMode = mode;
+		return this.refresh();
+	}
+
+	setShowCost(showCost: boolean): Promise<void> {
+		this.showCost = showCost;
+		return this.refresh();
+	}
+
+	setEnableButtons(enable: boolean | undefined): Promise<void> {
+		this.enableButtons = enable;
+		return this.refresh();
+	}
+
+	setEnableAssets(enable: boolean | undefined): Promise<void> {
+		this.enableAssets = enable;
+		return this.refresh();
 	}
 
 	getStatusText(): string {
@@ -1609,7 +1770,7 @@ export class DiscordPresenceManager {
 				)
 			: "none";
 		const lines = [
-			`Discord presence: ${this.getStatusText()}`,
+			`Discord presence: ${this.getStatusText()} · Privacy: ${this.privacyMode}`,
 			`Publisher: ${publisherLabel}`,
 			`Sessions: ${records.length}`,
 		];
@@ -1773,9 +1934,12 @@ export class DiscordPresenceManager {
 					await assertOwnership();
 					const activity = buildAggregateActivity(state, {
 						privacyMode: this.privacyMode,
+						showCost: this.showCost,
 						clientId: this.clientId,
 						enableButtons: this.enableButtons,
 						enableAssets: this.enableAssets,
+						largeImageKey: this.largeImageKey,
+						smallImageKey: this.smallImageKey,
 					});
 					await awaitWithTimeout(
 						transport.setActivity(activity),
@@ -1955,17 +2119,218 @@ export default function (pi: ExtensionAPI) {
 	const activeTools = new Map<string, PresenceAction>();
 	let anonymousToolCounter = 0;
 
-	pi.registerCommand("discord-status", {
-		description: "Show Discord Rich Presence and session statistics",
-		handler: async (_args, ctx) => {
-			const text = manager
-				? await manager.getDiagnosticText()
-				: `Discord presence: ${disabledReason ?? "not started"}`;
+	async function handleStatus(
+		ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1],
+	) {
+		const text = manager
+			? await manager.getDiagnosticText()
+			: `Discord presence: ${disabledReason ?? "not started"}`;
+		ctx.ui.notify(
+			text,
+			manager?.getStatus() === "connected" ? "info" : "warning",
+		);
+	}
+
+	async function handlePrivacy(
+		arg: string,
+		ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1],
+	) {
+		let nextMode: PresencePrivacyMode;
+		if (arg) {
+			if (arg !== "strict" && arg !== "project" && arg !== "developer") {
+				ctx.ui.notify(
+					`Unknown privacy mode "${arg}". Options: ${PRIVACY_MODES.join(", ")}`,
+					"warning",
+				);
+				return;
+			}
+			nextMode = arg;
+		} else {
+			const current = manager?.getPrivacyMode() ?? "strict";
+			const currentIndex = PRIVACY_MODES.indexOf(current);
+			nextMode = PRIVACY_MODES[(currentIndex + 1) % PRIVACY_MODES.length];
+		}
+
+		const prefs = await readPrefs();
+		prefs.privacyMode = nextMode;
+		await writePrefs(prefs);
+
+		if (manager) {
+			await manager.setPrivacyMode(nextMode);
+		}
+
+		ctx.ui.notify(
+			`Discord Presence privacy mode set to "${nextMode}" (saved).`,
+			"info",
+		);
+	}
+
+	async function handleToggle(
+		arg: string,
+		ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1],
+	) {
+		const prefs = await readPrefs();
+		const currentEnabled = prefs.enabled !== false;
+		let nextEnabled: boolean;
+
+		if (arg === "on") nextEnabled = true;
+		else if (arg === "off") nextEnabled = false;
+		else nextEnabled = !currentEnabled;
+
+		prefs.enabled = nextEnabled;
+		await writePrefs(prefs);
+
+		if (nextEnabled) {
+			if (manager) {
+				void manager.start();
+				ctx.ui.notify("Discord Presence enabled and running.", "info");
+			} else {
+				ctx.ui.notify(
+					"Discord Presence enabled. Reload or restart session to activate.",
+					"info",
+				);
+			}
+		} else {
+			if (manager) {
+				await manager.stop();
+			}
 			ctx.ui.notify(
-				text,
-				manager?.getStatus() === "connected" ? "info" : "warning",
+				"Discord Presence disabled (/discord toggle on to resume).",
+				"info",
 			);
+		}
+	}
+
+	async function handleConfig(
+		ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1],
+	) {
+		const prefs = await readPrefs();
+		const configuredClientId = process.env[CLIENT_ID_ENV];
+		const clientId = configuredClientId ?? DEFAULT_CLIENT_ID;
+		const isDefaultClient = clientId === DEFAULT_CLIENT_ID;
+		const privacy =
+			manager?.getPrivacyMode() ??
+			prefs.privacyMode ??
+			parsePrivacyMode(process.env[PRIVACY_ENV]);
+		const enabled = prefs.enabled !== false;
+		const buttonsEnv = process.env[BUTTONS_ENV];
+		const buttons =
+			buttonsEnv !== "off" &&
+			buttonsEnv !== "false" &&
+			buttonsEnv !== "none" &&
+			buttonsEnv !== "0" &&
+			prefs.buttons !== false;
+
+		const largeImg =
+			process.env[LARGE_IMAGE_ENV] ??
+			prefs.largeImage ??
+			(isDefaultClient ? "pi" : "(none)");
+		const smallImg =
+			process.env[SMALL_IMAGES_ENV] ??
+			prefs.smallImages ??
+			(isDefaultClient ? "action badge" : "(none)");
+
+		const lines = [
+			"Discord Rich Presence Configuration:",
+			`• Status: ${manager?.getStatusText() ?? (enabled ? "ready" : "disabled")}`,
+			`• Privacy Mode: ${privacy}`,
+			`• Show Price: yes (by default when pricing is available)`,
+			`• Client ID: ${clientId} (${isDefaultClient ? "default" : "custom"})`,
+			`• Buttons: ${buttons ? "enabled" : "disabled"}`,
+			`• Large Image: ${largeImg}`,
+			`• Small Images: ${smallImg}`,
+			`• Preferences file: ${DEFAULT_PREFS_PATH}`,
+			"",
+			"Commands:",
+			"• /discord status — view active sessions & diagnostics",
+			"• /discord privacy [strict|project|developer] — set privacy mode",
+			"• /discord toggle [on|off] — toggle presence on or off",
+			"• /discord config — show configuration overview",
+		];
+		ctx.ui.notify(lines.join("\n"), "info");
+	}
+
+	// Unified /discord command
+	pi.registerCommand("discord", {
+		description:
+			"Manage Discord Rich Presence (/discord status | privacy | toggle | config)",
+		getArgumentCompletions: (prefix) => {
+			const trimmed = prefix.trimStart();
+			const spaceIndex = trimmed.indexOf(" ");
+			if (spaceIndex === -1) {
+				const subcommands = ["status", "privacy", "toggle", "config", "help"];
+				const filtered = subcommands.filter((sub) => sub.startsWith(trimmed));
+				return filtered.length > 0
+					? filtered.map((sub) => ({ value: sub, label: sub }))
+					: null;
+			}
+
+			const sub = trimmed.slice(0, spaceIndex).toLowerCase();
+			const rest = trimmed.slice(spaceIndex + 1).trimStart();
+
+			if (sub === "privacy") {
+				const options = ["strict", "project", "developer"];
+				const filtered = options.filter((o) => o.startsWith(rest));
+				return filtered.length > 0
+					? filtered.map((o) => ({
+							value: `privacy ${o}`,
+							label: `privacy ${o}`,
+						}))
+					: null;
+			}
+
+			if (sub === "toggle") {
+				const options = ["on", "off"];
+				const filtered = options.filter((o) => o.startsWith(rest));
+				return filtered.length > 0
+					? filtered.map((o) => ({
+							value: `toggle ${o}`,
+							label: `toggle ${o}`,
+						}))
+					: null;
+			}
+
+			return null;
 		},
+		handler: async (args, ctx) => {
+			const trimmed = args.trim();
+			const spaceIndex = trimmed.indexOf(" ");
+			const sub = (
+				spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex)
+			).toLowerCase();
+			const rest = spaceIndex === -1 ? "" : trimmed.slice(spaceIndex + 1).trim();
+
+			switch (sub) {
+				case "status":
+					await handleStatus(ctx);
+					break;
+				case "privacy":
+					await handlePrivacy(rest, ctx);
+					break;
+				case "toggle":
+					await handleToggle(rest, ctx);
+					break;
+				case "config":
+					await handleConfig(ctx);
+					break;
+				case "help":
+				case "":
+					await handleConfig(ctx);
+					break;
+				default:
+					ctx.ui.notify(
+						`Unknown subcommand "${sub}". Usage: /discord status | privacy | toggle | config`,
+						"warning",
+					);
+					break;
+			}
+		},
+	});
+
+	// Backwards-compatible alias
+	pi.registerCommand("discord-status", {
+		description: "Show Discord Rich Presence connection and session statistics",
+		handler: async (_args, ctx) => handleStatus(ctx),
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -1976,6 +2341,12 @@ export default function (pi: ExtensionAPI) {
 		agentActive = false;
 		activeTools.clear();
 		anonymousToolCounter = 0;
+
+		const prefs = await readPrefs();
+		if (prefs.enabled === false) {
+			disabledReason = "disabled via /discord-toggle (preferences)";
+			return;
+		}
 
 		const configuredClientId = process.env[CLIENT_ID_ENV];
 		const clientId = parseClientId(configuredClientId ?? DEFAULT_CLIENT_ID);
@@ -1996,6 +2367,18 @@ export default function (pi: ExtensionAPI) {
 		const initialUsage = collectUsageFromEntries(ctx.sessionManager.getBranch());
 		const initialContext = normalizeContextUsage(ctx.getContextUsage());
 
+		const privacyMode =
+			prefs.privacyMode ?? parsePrivacyMode(process.env[PRIVACY_ENV]);
+		const showCost =
+			process.env[SHOW_COST_ENV] !== "off" &&
+			process.env[SHOW_COST_ENV] !== "false" &&
+			prefs.showCost !== false;
+		const enableButtons =
+			process.env[BUTTONS_ENV] !== "off" &&
+			process.env[BUTTONS_ENV] !== "false" &&
+			process.env[BUTTONS_ENV] !== "0" &&
+			prefs.buttons !== false;
+
 		manager = new DiscordPresenceManager({
 			clientId,
 			projectName,
@@ -2004,6 +2387,11 @@ export default function (pi: ExtensionAPI) {
 			startedAt: sessionStartedAt,
 			initialUsage,
 			initialContext,
+			privacyMode,
+			showCost,
+			enableButtons,
+			largeImageKey: process.env[LARGE_IMAGE_ENV] ?? prefs.largeImage,
+			smallImageKey: process.env[SMALL_IMAGES_ENV] ?? prefs.smallImages,
 		});
 		void manager.start();
 	});

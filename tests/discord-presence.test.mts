@@ -7,11 +7,15 @@ import type { SetActivity } from "@xhayper/discord-rpc";
 import {
 	BUTTONS_ENV,
 	DEFAULT_CLIENT_ID,
+	DEFAULT_LARGE_IMAGE_KEY,
+	ACTION_EMOJI_BADGE_URLS,
 	DiscordPresenceManager,
 	FilePresenceStateStore,
 	LARGE_IMAGE_ENV,
 	PRIVACY_ENV,
+	PRIVACY_MODES,
 	SMALL_IMAGES_ENV,
+	type DiscordPresencePrefs,
 	type DiscordPresenceTransport,
 	type PresenceAction,
 	type PresenceState,
@@ -42,8 +46,10 @@ import {
 	parseClientId,
 	parsePrivacyMode,
 	pickHighestPriorityAction,
+	readPrefs,
 	resolveProjectName,
 	summarizeModels,
+	writePrefs,
 } from "../extensions/discord-presence.ts";
 
 const CLIENT_ID = "123456789012345678";
@@ -400,6 +406,14 @@ test("formatDiscordModelLabel normalizes popular and custom model names", () => 
 	assert.equal(formatDiscordModelLabel("openai-codex"), "OpenAI Codex");
 	assert.equal(formatDiscordModelLabel("anthropic"), "Anthropic");
 	assert.equal(formatDiscordModelLabel(), "Pi");
+
+	// Raw diagnostic label
+	assert.equal(
+		formatModelLabel("anthropic", "claude-3-7-sonnet"),
+		"anthropic/claude-3-7-sonnet",
+	);
+	assert.equal(formatModelLabel(undefined, "gpt-5"), "gpt-5");
+	assert.equal(formatModelLabel(), "Pi");
 });
 
 // ---------------------------------------------------------------------------
@@ -414,9 +428,11 @@ test("parsePrivacyMode validates input and defaults to strict", () => {
 	assert.equal(parsePrivacyMode("Project"), "project");
 	assert.equal(parsePrivacyMode("invalid-mode"), "strict");
 	assert.equal(parsePrivacyMode(undefined), "strict");
+	assert.deepEqual(PRIVACY_MODES, ["strict", "project", "developer"]);
+	assert.equal(PRIVACY_ENV, "PI_DISCORD_PRIVACY");
 });
 
-test("formatPublicMetrics formats tokens, context percentage, and cost by mode", () => {
+test("formatPublicMetrics formats tokens, context percentage, and cost by default", () => {
 	const usage = {
 		...emptyUsageTotals(),
 		total: 42_000,
@@ -425,16 +441,16 @@ test("formatPublicMetrics formats tokens, context percentage, and cost by mode",
 	};
 	const context = { tokens: 5000, contextWindow: 128_000, percent: 38.2 };
 
-	// Strict mode: tokens and context only
+	// Shows price by default in strict mode
 	assert.equal(
 		formatPublicMetrics(usage, context, "strict"),
-		"42k tok · ctx 38%",
+		"42k tok · ctx 38% · $0.84",
 	);
 
-	// Project mode: tokens and context only (project name is prepended by caller)
+	// Shows price by default in project mode
 	assert.equal(
 		formatPublicMetrics(usage, context, "project"),
-		"42k tok · ctx 38%",
+		"42k tok · ctx 38% · $0.84",
 	);
 
 	// Developer mode: includes cost
@@ -450,6 +466,12 @@ test("formatPublicMetrics formats tokens, context percentage, and cost by mode",
 		"42k tok · ctx 38% · ~$0.84",
 	);
 
+	// When cost is disabled explicitly (showCost = false)
+	assert.equal(
+		formatPublicMetrics(usage, context, "strict", false),
+		"42k tok · ctx 38%",
+	);
+
 	// Without context percent: context is omitted cleanly, never ctx ?
 	assert.equal(
 		formatPublicMetrics(
@@ -457,9 +479,15 @@ test("formatPublicMetrics formats tokens, context percentage, and cost by mode",
 			{ tokens: null, contextWindow: 8000, percent: null },
 			"strict",
 		),
-		"42k tok",
+		"42k tok · $0.84",
 	);
-	assert.equal(formatPublicMetrics(usage, undefined, "strict"), "42k tok");
+
+	// When usage cost is undefined: price is omitted cleanly
+	const noCostUsage = { ...emptyUsageTotals(), total: 42_000 };
+	assert.equal(
+		formatPublicMetrics(noCostUsage, context, "strict"),
+		"42k tok · ctx 38%",
+	);
 });
 
 // ---------------------------------------------------------------------------
@@ -485,34 +513,26 @@ test("single session activity formatting across privacy modes and actions", () =
 		context: { tokens: 5000, contextWindow: 128_000, percent: 38 },
 	};
 
-	// Strict mode (default)
+	// Strict mode (default, shows cost by default, hides project name)
 	const strictActivity = buildSingleSessionActivity(record, {
 		privacyMode: "strict",
 		clientId: DEFAULT_CLIENT_ID,
 	});
 	assert.equal(strictActivity.details, "Thinking · GPT-5.6");
-	assert.equal(strictActivity.state, "42k tok · ctx 38%");
-	assert.equal(strictActivity.largeImageKey, "pi");
+	assert.equal(strictActivity.state, "42k tok · ctx 38% · $0.84");
+	assert.equal(strictActivity.largeImageKey, DEFAULT_LARGE_IMAGE_KEY);
 	assert.equal(strictActivity.largeImageText, "Pi Coding Agent");
-	assert.equal(strictActivity.smallImageKey, "thinking");
+	assert.equal(strictActivity.smallImageKey, ACTION_EMOJI_BADGE_URLS.thinking);
 	assert.equal(strictActivity.smallImageText, "Thinking");
 	assert.equal(strictActivity.buttons?.length, 2);
 
-	// Project mode (shows project basename)
+	// Project mode (shows project basename and cost)
 	const projectActivity = buildSingleSessionActivity(record, {
 		privacyMode: "project",
 		clientId: DEFAULT_CLIENT_ID,
 	});
 	assert.equal(projectActivity.details, "Thinking · GPT-5.6");
-	assert.equal(projectActivity.state, "spring2026 · 42k tok · ctx 38%");
-
-	// Developer mode (shows project basename and cost)
-	const devActivity = buildSingleSessionActivity(record, {
-		privacyMode: "developer",
-		clientId: DEFAULT_CLIENT_ID,
-	});
-	assert.equal(devActivity.details, "Thinking · GPT-5.6");
-	assert.equal(devActivity.state, "spring2026 · 42k tok · ctx 38% · $0.84");
+	assert.equal(projectActivity.state, "spring2026 · 42k tok · ctx 38% · $0.84");
 
 	// Tool execution actions
 	const testRecord: SessionRecord = {
@@ -526,8 +546,8 @@ test("single session activity formatting across privacy modes and actions", () =
 		privacyMode: "project",
 	});
 	assert.equal(testActivity.details, "Running tests · GPT-5.6");
-	assert.equal(testActivity.state, "spring2026 · 47k tok · ctx 41%");
-	assert.equal(testActivity.smallImageKey, "testing");
+	assert.equal(testActivity.state, "spring2026 · 47k tok · ctx 41% · $0.84");
+	assert.equal(testActivity.smallImageKey, ACTION_EMOJI_BADGE_URLS.testing);
 	assert.equal(testActivity.smallImageText, "Running tests");
 
 	// Idle state
@@ -542,8 +562,8 @@ test("single session activity formatting across privacy modes and actions", () =
 		privacyMode: "project",
 	});
 	assert.equal(idleActivity.details, "Idle · GPT-5.6");
-	assert.equal(idleActivity.state, "spring2026 · 52k tok · ctx 44%");
-	assert.equal(idleActivity.smallImageKey, "idle");
+	assert.equal(idleActivity.state, "spring2026 · 52k tok · ctx 44% · $0.84");
+	assert.equal(idleActivity.smallImageKey, ACTION_EMOJI_BADGE_URLS.idle);
 	assert.equal(idleActivity.smallImageText, "Idle");
 });
 
@@ -677,8 +697,8 @@ test("buildActivity formats snapshot into v2 presence", () => {
 	assert.equal(activity.details, "Thinking · GPT-5");
 	assert.equal(activity.state, "0 tok");
 	assert.equal(activity.instance, true);
-	assert.equal(activity.largeImageKey, "pi");
-	assert.equal(activity.smallImageKey, "thinking");
+	assert.equal(activity.largeImageKey, DEFAULT_LARGE_IMAGE_KEY);
+	assert.equal(activity.smallImageKey, ACTION_EMOJI_BADGE_URLS.thinking);
 });
 
 test("presence text strips control characters before publishing", () => {
@@ -763,8 +783,27 @@ test("environment variable overrides for buttons and assets", () => {
 	process.env[SMALL_IMAGES_ENV] = "off";
 	try {
 		const envNoSmall = buildSingleSessionActivity(record);
-		assert.equal(envNoSmall.largeImageKey, "pi");
+		assert.equal(envNoSmall.largeImageKey, DEFAULT_LARGE_IMAGE_KEY);
 		assert.equal(envNoSmall.smallImageKey, undefined);
+	} finally {
+		delete process.env[SMALL_IMAGES_ENV];
+	}
+
+	// Custom small image key string via process.env
+	process.env[SMALL_IMAGES_ENV] = "custom_badge";
+	try {
+		const customBadge = buildSingleSessionActivity(record);
+		assert.equal(customBadge.smallImageKey, "custom_badge");
+	} finally {
+		delete process.env[SMALL_IMAGES_ENV];
+	}
+
+	// Custom small image URL via process.env
+	process.env[SMALL_IMAGES_ENV] = "https://example.com/icon.png";
+	try {
+		const customUrlBadge = buildSingleSessionActivity(record);
+		assert.equal(customUrlBadge.smallImageKey, "https://example.com/icon.png");
+		assert.equal(customUrlBadge.smallImageUrl, "https://example.com/icon.png");
 	} finally {
 		delete process.env[SMALL_IMAGES_ENV];
 	}
@@ -836,10 +875,13 @@ test("pure formatting helpers format single and multi session components", () =>
 	});
 
 	assert.equal(formatSingleSessionDetails(record), "Thinking · GPT-5.6");
-	assert.equal(formatSingleSessionState(record, "strict"), "42k tok · ctx 38%");
+	assert.equal(
+		formatSingleSessionState(record, "strict"),
+		"42k tok · ctx 38% · $0.84",
+	);
 	assert.equal(
 		formatSingleSessionState(record, "project"),
-		"my-project · 42k tok · ctx 38%",
+		"my-project · 42k tok · ctx 38% · $0.84",
 	);
 	assert.equal(
 		formatSingleSessionState(record, "developer"),
@@ -885,6 +927,28 @@ test("pure formatting helpers format single and multi session components", () =>
 		formatMultiSessionState(records, 2),
 		"1 active · GPT-5.6 · 2 projects",
 	);
+});
+
+test("preferences read and write persist custom settings", async () => {
+	const directory = await mkdtemp(join(os.tmpdir(), "pi-presence-prefs-test-"));
+	const path = join(directory, "prefs.json");
+	try {
+		const empty = await readPrefs(path);
+		assert.deepEqual(empty, {});
+
+		const prefs: DiscordPresencePrefs = {
+			privacyMode: "project",
+			enabled: true,
+			showCost: true,
+			buttons: false,
+		};
+		await writePrefs(prefs, path);
+
+		const restored = await readPrefs(path);
+		assert.deepEqual(restored, prefs);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
 });
 
 // ---------------------------------------------------------------------------
@@ -1022,7 +1086,7 @@ test("manager publishes metrics and clears the final session", async () => {
 		provider: "anthropic",
 		modelId: "claude-3-7-sonnet",
 		startedAt: 1_700_000_000_000,
-		privacyMode: "developer",
+		privacyMode: "project",
 		stateStore,
 		createTransport: () => transport,
 		logger: () => undefined,
@@ -1039,6 +1103,11 @@ test("manager publishes metrics and clears the final session", async () => {
 	const activity = transport.activities.at(-1);
 	assert.equal(activity?.details, "Editing · Claude 3.7 Sonnet");
 	assert.equal(activity?.state, "pi-extensions · 1.2k tok · $0.42");
+
+	// Test dynamic privacy mode update via manager method
+	await manager.setPrivacyMode("strict");
+	const strictActivity = transport.activities.at(-1);
+	assert.equal(strictActivity?.state, "1.2k tok · $0.42");
 
 	const diagnostics = await manager.getDiagnosticText();
 	assert.match(diagnostics, /Sessions: 1/);
