@@ -55,34 +55,82 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 
 ### 2. `discord-presence` (`extensions/discord-presence.ts`)
 
-Publishes a privacy-safe Discord Desktop Rich Presence while Pi is running.
+Publishes a privacy-safe, adaptive Discord Desktop Rich Presence while Pi is running.
 
-The activity aggregates all active Pi sessions:
+#### Single-Session Presence
 
 ```text
-Details: 3 sessions · 82k tok · $1.24
-State: Thinking · gpt-5 · 3 projects
+Details: Thinking · GPT-5.6
+State:   spring2026 · 42k tok · ctx 38%
 ```
 
-It updates between `Thinking`, `Using tools`, and `Idle`, includes the earliest active session timer, tracks tokens/cost/context usage, and never sends prompts, paths, filenames, commands, or tool arguments. Providers without pricing show `cost n/a`. Discord must be running in the background; if it is unavailable, the extension logs one warning and retries without interrupting Pi.
+During tool execution:
 
-#### Setup
-
-The extension includes a public Discord application ID, so no environment variable is required. Start or reload Pi while Discord Desktop is running, then use `/discord-status` to check the connection.
-
-To use your own Discord application instead, set `PI_DISCORD_CLIENT_ID` before starting Pi:
-
-```powershell
-$env:PI_DISCORD_CLIENT_ID = "<your-discord-application-id>"
+```text
+Details: Running tests · GPT-5.6
+State:   spring2026 · 47k tok · ctx 41%
 ```
 
-On macOS/Linux:
+#### Multi-Session Presence
 
-```bash
-export PI_DISCORD_CLIENT_ID="<your-discord-application-id>"
+When multiple Pi instances run concurrently:
+
+```text
+Details: 3 Pi sessions · 82k tok · $1.24
+State:   2 active · multiple models · 3 projects
 ```
 
-Multiple Pi sessions share a registry at `~/.pi/agent/discord-presence-state.json`. One session publishes the aggregate activity while the others send heartbeats. If the publisher exits, another active session takes over; stale sessions are removed automatically. Usage totals include assistant/tool results plus compaction and branch-summary calls. The registry contains only project/model/state/metrics metadata. `/discord-status` shows the per-session project, model, phase, tokens, cost, context, and duration. Registry locks renew their lease during long operations, and only the newest pending Discord activity is published, keeping rapid tool/phase updates responsive without replaying stale states.
+#### 🔒 Privacy Guarantees
+
+Discord Presence **never** sends:
+
+* Prompts or prompt summaries
+* Source code content
+* File paths or filenames
+* Shell commands or command arguments
+* Tool arguments or tool outputs
+* Private repository URLs
+
+#### 🛡️ Privacy Modes
+
+Configure how much metadata is visible in Discord via `PI_DISCORD_PRIVACY`:
+
+* `strict` (**Default**): Hides the project name completely for maximum privacy.
+
+  ```text
+  Thinking · GPT-5.6
+  42k tok · ctx 38%
+  ```
+
+* `project`: Includes the privacy-safe project directory basename.
+
+  ```text
+  Thinking · GPT-5.6
+  spring2026 · 42k tok · ctx 38%
+  ```
+
+* `developer`: Includes the project directory basename and session cost (when pricing is available).
+
+  ```text
+  Thinking · GPT-5.6
+  spring2026 · 42k tok · ctx 38% · $0.84
+  ```
+
+#### ⚙️ Configuration & Environment Variables
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `PI_DISCORD_CLIENT_ID` | `1541350417143955466` | Custom Discord Application Client ID snowflake. Custom IDs disable built-in assets automatically to prevent missing-asset errors. |
+| `PI_DISCORD_PRIVACY` | `strict` | Privacy level: `strict`, `project`, or `developer`. |
+| `PI_DISCORD_BUTTONS` | `on` | Set to `off` to disable the default static Discord profile buttons. |
+| `PI_DISCORD_LARGE_IMAGE` | `pi` | Large Rich Presence asset key. Set to `off` to disable large images. |
+| `PI_DISCORD_SMALL_IMAGES` | `on` | Action badge asset key (`thinking`, `reading`, `editing`, `searching`, `running`, `testing`, `browsing`, `idle`). Set to `off` to disable. |
+
+#### Setup & Diagnostics
+
+The extension includes a public Discord application ID, so no environment variable is required. Start or reload Pi while Discord Desktop is running, then use `/discord-status` to check connection status and inspect per-session statistics (model, phase/action, token breakdown, pricing, context %, and duration).
+
+Multiple Pi sessions share a registry at `~/.pi/agent/discord-presence-state.json`. One session publishes the aggregate activity while the others send heartbeats. If the publisher exits, another active session takes over; stale sessions are removed automatically. Usage totals include assistant/tool results plus compaction and branch-summary calls. Registry locks renew their lease during long operations, and only the newest pending Discord activity is published, keeping rapid tool/phase updates responsive without replaying stale states.
 
 ---
 

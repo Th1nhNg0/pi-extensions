@@ -1,14 +1,17 @@
 /**
- * Discord Rich Presence for Pi Coding Agent.
+ * Discord Rich Presence for Pi Coding Agent (v2).
  *
- * The extension publishes one privacy-safe, aggregated activity for all active
- * Pi sessions. It never sends prompts, paths, filenames, commands, or tool
- * arguments. Each session contributes project/model/state/usage metadata to a
- * shared registry; one elected session owns the Discord RPC connection.
+ * The extension publishes a privacy-safe, adaptive Discord Rich Presence
+ * for all active Pi sessions. It presents single sessions and multi-session
+ * workloads with dedicated layouts and human-readable model labels, while
+ * preserving strict privacy guarantees: it never sends prompts, paths,
+ * filenames, commands, or tool arguments.
+ *
+ * Each session contributes project/model/action/usage metadata to a shared
+ * registry; one elected session owns the Discord RPC connection.
  *
  * A public default Discord application ID is included; PI_DISCORD_CLIENT_ID
- * can override it. Discord's desktop client must be running. Connection and
- * registry failures are non-fatal and are retried in the background.
+ * can override it. Discord Desktop must be running in the background.
  */
 
 import { randomUUID } from "node:crypto";
@@ -26,8 +29,26 @@ import { dirname, join } from "node:path";
 import { Client, type SetActivity } from "@xhayper/discord-rpc";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const CLIENT_ID_ENV = "PI_DISCORD_CLIENT_ID";
-const DEFAULT_CLIENT_ID = "1541350417143955466";
+export const CLIENT_ID_ENV = "PI_DISCORD_CLIENT_ID";
+export const PRIVACY_ENV = "PI_DISCORD_PRIVACY";
+export const BUTTONS_ENV = "PI_DISCORD_BUTTONS";
+export const LARGE_IMAGE_ENV = "PI_DISCORD_LARGE_IMAGE";
+export const SMALL_IMAGES_ENV = "PI_DISCORD_SMALL_IMAGES";
+
+export const DEFAULT_CLIENT_ID = "1541350417143955466";
+export const DEFAULT_LARGE_IMAGE_KEY = "pi";
+export const DEFAULT_LARGE_IMAGE_TEXT = "Pi Coding Agent";
+export const DEFAULT_BUTTONS: Array<{ label: string; url: string }> = [
+	{
+		label: "Pi Extensions",
+		url: "https://github.com/Th1nhNg0/pi-extensions",
+	},
+	{
+		label: "Pi Coding Agent",
+		url: "https://pi.dev",
+	},
+];
+
 const DEFAULT_STATE_PATH = join(
 	os.homedir(),
 	".pi",
@@ -51,6 +72,19 @@ type GitCommandResult = {
 };
 
 export type PresencePhase = "thinking" | "tools" | "idle";
+
+export type PresenceAction =
+	| "thinking"
+	| "searching"
+	| "reading"
+	| "editing"
+	| "running"
+	| "testing"
+	| "browsing"
+	| "tools"
+	| "idle";
+
+export type PresencePrivacyMode = "strict" | "project" | "developer";
 
 export interface UsageTotals {
 	input: number;
@@ -84,6 +118,7 @@ export interface SessionRecord {
 	provider?: string;
 	modelId?: string;
 	phase: PresencePhase;
+	action?: PresenceAction;
 	startedAt: number;
 	lastSeenAt: number;
 	usage: UsageTotals;
@@ -137,6 +172,17 @@ export interface PresenceStateStore {
 	): Promise<T | undefined>;
 }
 
+export interface ActivityBuildOptions {
+	privacyMode?: PresencePrivacyMode;
+	clientId?: string;
+	enableButtons?: boolean;
+	enableAssets?: boolean;
+	largeImageKey?: string;
+	largeImageText?: string;
+	smallImageKey?: string;
+	smallImageText?: string;
+}
+
 export interface PresenceManagerOptions {
 	clientId: string;
 	projectName: string;
@@ -152,6 +198,9 @@ export interface PresenceManagerOptions {
 	heartbeatMs?: number;
 	retryBaseMs?: number;
 	retryCapMs?: number;
+	privacyMode?: PresencePrivacyMode;
+	enableButtons?: boolean;
+	enableAssets?: boolean;
 }
 
 function defaultLogger(message: string): void {
@@ -275,7 +324,7 @@ export function normalizeContextUsage(
 	};
 }
 
-interface AggregateSummary {
+export interface AggregateSummary {
 	usage: UsageTotals;
 	projectCount: number;
 	startTimestamp: number;
@@ -303,7 +352,7 @@ function summarizeRecords(records: readonly SessionRecord[]): AggregateSummary {
 	return {
 		usage,
 		projectCount: projects.size,
-		startTimestamp,
+		startTimestamp: Number.isFinite(startTimestamp) ? startTimestamp : Date.now(),
 	};
 }
 
@@ -326,7 +375,7 @@ export function formatCost(
 	return `${prefix}${usage.cost.toFixed(2)}`;
 }
 
-function truncateText(
+export function truncateText(
 	value: string,
 	maxLength = MAX_ACTIVITY_TEXT_LENGTH,
 ): string {
@@ -355,16 +404,13 @@ export function parseClientId(value: string | undefined): string | undefined {
 	return clientId && /^\d{17,20}$/.test(clientId) ? clientId : undefined;
 }
 
-export function formatModelLabel(provider?: string, modelId?: string): string {
-	const label =
-		provider && modelId
-			? `${provider}/${modelId}`
-			: (modelId ?? provider ?? "Pi");
-	return truncateText(label, 96);
-}
-
-function formatPresenceModelLabel(provider?: string, modelId?: string): string {
-	return truncateText(modelId ?? provider ?? "Pi", 48);
+export function parsePrivacyMode(
+	value: string | undefined,
+): PresencePrivacyMode {
+	const normalized = value?.trim().toLowerCase();
+	if (normalized === "project") return "project";
+	if (normalized === "developer") return "developer";
+	return "strict";
 }
 
 export function formatPhase(phase: PresencePhase): string {
@@ -380,11 +426,486 @@ export function formatPhase(phase: PresencePhase): string {
 	}
 }
 
+export function formatAction(
+	action?: PresenceAction,
+	phase: PresencePhase = "idle",
+): string {
+	const effectiveAction = action ?? (phase === "tools" ? "tools" : phase);
+	switch (effectiveAction) {
+		case "thinking":
+			return "Thinking";
+		case "searching":
+			return "Searching";
+		case "reading":
+			return "Reading";
+		case "editing":
+			return "Editing";
+		case "running":
+			return "Running command";
+		case "testing":
+			return "Running tests";
+		case "browsing":
+			return "Browsing";
+		case "tools":
+			return "Using tools";
+		case "idle":
+			return "Idle";
+		default:
+			return formatPhase(phase);
+	}
+}
+
+/**
+ * Pure tool action classifier based only on the tool name identifier.
+ * NEVER inspects tool arguments, command strings, filenames, or outputs.
+ */
+export function classifyToolAction(
+	toolName: string | undefined,
+): PresenceAction {
+	if (!toolName) return "tools";
+	const normalized = toolName.trim().toLowerCase().replace(/[-_]/g, " ");
+
+	// Test tools
+	if (
+		normalized.includes("test") ||
+		normalized.includes("jest") ||
+		normalized.includes("pytest") ||
+		normalized.includes("vitest")
+	) {
+		return "testing";
+	}
+
+	// Edit / write / patch tools
+	if (
+		normalized.includes("edit") ||
+		normalized.includes("write") ||
+		normalized.includes("patch") ||
+		normalized.includes("replace") ||
+		normalized.includes("create file") ||
+		normalized.includes("update file")
+	) {
+		return "editing";
+	}
+
+	// Browser / web tools (distinct from search)
+	if (
+		normalized.includes("browser") ||
+		normalized.includes("playwright") ||
+		normalized.includes("puppeteer") ||
+		normalized === "web" ||
+		normalized.startsWith("browse")
+	) {
+		return "browsing";
+	}
+
+	// Search / grep / find tools
+	if (
+		normalized.includes("grep") ||
+		normalized.includes("search") ||
+		normalized.includes("find") ||
+		normalized.includes("ripgrep") ||
+		normalized.includes("lookup") ||
+		normalized === "rg" ||
+		normalized.includes("source check")
+	) {
+		return "searching";
+	}
+
+	// Read / view / inspect tools
+	if (
+		normalized.includes("read") ||
+		normalized.includes("view") ||
+		normalized.includes("cat") ||
+		normalized.includes("fetch") ||
+		normalized.includes("open")
+	) {
+		return "reading";
+	}
+
+	// Shell / command / execution tools
+	if (
+		normalized.includes("bash") ||
+		normalized.includes("shell") ||
+		normalized.includes("exec") ||
+		normalized.includes("powershell") ||
+		normalized.includes("cmd") ||
+		normalized.includes("terminal") ||
+		normalized.includes("command") ||
+		normalized.includes("process") ||
+		normalized.includes("spawn") ||
+		normalized === "sh" ||
+		normalized === "zsh"
+	) {
+		return "running";
+	}
+
+	return "tools";
+}
+
+const ACTION_PRIORITY: Record<PresenceAction, number> = {
+	testing: 7,
+	editing: 6,
+	browsing: 5,
+	searching: 4,
+	reading: 3,
+	running: 2,
+	tools: 1,
+	thinking: 0,
+	idle: 0,
+};
+
+export function pickHighestPriorityAction(
+	actions: Iterable<PresenceAction>,
+): PresenceAction {
+	let bestAction: PresenceAction = "tools";
+	let highestPriority = -1;
+	for (const action of actions) {
+		const priority = ACTION_PRIORITY[action] ?? 0;
+		if (priority > highestPriority) {
+			highestPriority = priority;
+			bestAction = action;
+		}
+	}
+	return highestPriority >= 0 ? bestAction : "tools";
+}
+
+/** Diagnostic full model label (e.g. `openai-codex/gpt-5`). */
+export function formatModelLabel(provider?: string, modelId?: string): string {
+	const label =
+		provider && modelId
+			? `${provider}/${modelId}`
+			: (modelId ?? provider ?? "Pi");
+	return truncateText(label, 96);
+}
+
+const KNOWN_PREFIXES: Array<[RegExp, string]> = [
+	[/^gpt-/i, "GPT-"],
+	[/^claude-/i, "Claude "],
+	[/^gemini-/i, "Gemini "],
+	[/^deepseek-/i, "DeepSeek "],
+	[/^glm-/i, "GLM-"],
+	[/^qwen-/i, "Qwen "],
+	[/^llama-/i, "Llama "],
+	[/^mistral-/i, "Mistral "],
+	[/^codestral/i, "Codestral"],
+	[/^kimi-/i, "Kimi "],
+];
+
+const KNOWN_WORDS: Record<string, string> = {
+	gpt: "GPT",
+	glm: "GLM",
+	r1: "R1",
+	v3: "V3",
+	v2: "V2",
+	v1: "V1",
+	pro: "Pro",
+	flash: "Flash",
+	sonnet: "Sonnet",
+	opus: "Opus",
+	haiku: "Haiku",
+	turbo: "Turbo",
+	coder: "Coder",
+	chat: "Chat",
+	exp: "Exp",
+	preview: "Preview",
+	instruct: "Instruct",
+	mini: "mini",
+	large: "Large",
+	small: "Small",
+	medium: "Medium",
+	plus: "Plus",
+	thinking: "Thinking",
+};
+
+function formatProviderFallback(provider: string): string {
+	const normalized = provider.trim().toLowerCase();
+	switch (normalized) {
+		case "openai-codex":
+			return "OpenAI Codex";
+		case "openai":
+			return "OpenAI";
+		case "anthropic":
+			return "Anthropic";
+		case "google":
+			return "Google";
+		case "deepseek":
+			return "DeepSeek";
+		case "mistral":
+			return "Mistral";
+		case "ollama":
+			return "Ollama";
+		case "github":
+			return "GitHub";
+		default:
+			return formatModelWords(provider, true);
+	}
+}
+
+function formatModelWords(value: string, _capitalizeFirst = true): string {
+	const tokens = value
+		.replace(/[_]/g, " ")
+		.split(/[-\s]+/)
+		.filter(Boolean);
+
+	return tokens
+		.map((token, index) => {
+			const lower = token.toLowerCase();
+			if (KNOWN_WORDS[lower]) {
+				if (lower === "mini" && index > 0) return "mini";
+				return KNOWN_WORDS[lower];
+			}
+			if (/^\d+[bBkKmMgG]$/.test(token)) {
+				return token.toUpperCase();
+			}
+			if (/^\d+(\.\d+)?$/.test(token)) return token;
+			return token.charAt(0).toUpperCase() + token.slice(1);
+		})
+		.join(" ");
+}
+
+/** Human-readable model label for Discord Rich Presence. */
+export function formatDiscordModelLabel(
+	provider?: string,
+	modelId?: string,
+): string {
+	if (!modelId?.trim()) {
+		if (!provider?.trim()) return "Pi";
+		return formatProviderFallback(provider);
+	}
+
+	let raw = modelId.trim();
+	if (raw.includes("/")) {
+		raw = raw.slice(raw.lastIndexOf("/") + 1).trim();
+	}
+
+	// Preserve openai o-series models (e.g. o1, o3, o3-mini, o4-mini, o1-preview)
+	if (/^o\d(-[a-z0-9]+)?$/i.test(raw)) {
+		return raw.toLowerCase();
+	}
+
+	// Convert version numbers separated by dashes (e.g. 4-1 -> 4.1, 3-7 -> 3.7, 2-5 -> 2.5)
+	const transformed = raw.replace(
+		/(?<=[a-zA-Z]|^)-(\d+)-(\d+)(?=-|[a-zA-Z]|$)/g,
+		"-$1.$2",
+	);
+
+	for (const [pattern, prefix] of KNOWN_PREFIXES) {
+		if (pattern.test(transformed)) {
+			const rest = transformed.replace(pattern, "");
+			if (prefix.endsWith("-")) {
+				return truncateText(`${prefix}${formatModelWords(rest, false)}`, 48);
+			}
+			return truncateText(`${prefix}${formatModelWords(rest, true)}`, 48);
+		}
+	}
+
+	return truncateText(formatModelWords(transformed, true), 48);
+}
+
+export function formatPublicMetrics(
+	usage: UsageTotals,
+	context?: ContextSnapshot,
+	privacy: PresencePrivacyMode = "strict",
+): string {
+	const parts: string[] = [];
+	parts.push(`${formatTokenCount(usage.total)} tok`);
+
+	if (context && context.percent !== null && Number.isFinite(context.percent)) {
+		const clampedPercent = Math.min(
+			100,
+			Math.max(0, Math.round(context.percent)),
+		);
+		parts.push(`ctx ${clampedPercent}%`);
+	}
+
+	if (privacy === "developer" && usage.cost !== undefined) {
+		const prefix = usage.costComplete ? "$" : "~$";
+		parts.push(`${prefix}${usage.cost.toFixed(2)}`);
+	}
+
+	return parts.join(" · ");
+}
+
+export function formatSingleSessionDetails(record: SessionRecord): string {
+	const actionText = formatAction(record.action, record.phase);
+	const modelText = formatDiscordModelLabel(record.provider, record.modelId);
+	return truncateText(`${actionText} · ${modelText}`);
+}
+
+export function formatSingleSessionState(
+	record: SessionRecord,
+	privacy: PresencePrivacyMode = "strict",
+): string {
+	const metrics = formatPublicMetrics(record.usage, record.context, privacy);
+	if (privacy === "project" || privacy === "developer") {
+		const project = truncateText(record.projectName || "project", 48);
+		return truncateText(`${project} · ${metrics}`);
+	}
+	return truncateText(metrics);
+}
+
+export function summarizeModels(records: readonly SessionRecord[]): string {
+	if (records.length === 0) return "Pi";
+	const labels = new Set(
+		records.map((r) => formatDiscordModelLabel(r.provider, r.modelId)),
+	);
+	if (labels.size === 1) return labels.values().next().value!;
+	return "multiple models";
+}
+
+export function formatMultiSessionDetails(
+	summary: AggregateSummary,
+	sessionCount: number,
+): string {
+	const costPart =
+		summary.usage.cost === undefined ? "" : ` · ${formatCost(summary.usage)}`;
+	return truncateText(
+		`${sessionCount} Pi sessions · ${formatTokenCount(summary.usage.total)} tok${costPart}`,
+	);
+}
+
+export function formatMultiSessionState(
+	records: readonly SessionRecord[],
+	projectCount: number,
+): string {
+	const activeCount = records.filter((r) => r.phase !== "idle").length;
+	const activeLabel =
+		activeCount === 0 ? `${records.length} idle` : `${activeCount} active`;
+	const modelLabel = summarizeModels(records);
+	const projectLabel = `${projectCount} project${projectCount === 1 ? "" : "s"}`;
+	return truncateText(`${activeLabel} · ${modelLabel} · ${projectLabel}`);
+}
+
+export function attachAssetsAndButtons(
+	activity: SetActivity,
+	action?: PresenceAction,
+	phase: PresencePhase = "idle",
+	options: ActivityBuildOptions = {},
+): void {
+	const clientId = options.clientId ?? DEFAULT_CLIENT_ID;
+	const isDefaultClient = clientId === DEFAULT_CLIENT_ID;
+
+	const largeImageEnv = process.env[LARGE_IMAGE_ENV];
+	const smallImagesEnv = process.env[SMALL_IMAGES_ENV];
+	const assetsExplicitlyDisabled =
+		options.enableAssets === false ||
+		largeImageEnv === "off" ||
+		largeImageEnv === "false" ||
+		largeImageEnv === "none";
+
+	const canUseAssets =
+		!assetsExplicitlyDisabled && (isDefaultClient || !!largeImageEnv);
+
+	if (canUseAssets) {
+		const largeKey =
+			options.largeImageKey ??
+			(largeImageEnv && largeImageEnv !== "on"
+				? largeImageEnv
+				: DEFAULT_LARGE_IMAGE_KEY);
+		const largeText = options.largeImageText ?? DEFAULT_LARGE_IMAGE_TEXT;
+		activity.largeImageKey = largeKey;
+		activity.largeImageText = truncateText(largeText, 128);
+
+		const smallDisabled =
+			smallImagesEnv === "off" ||
+			smallImagesEnv === "false" ||
+			smallImagesEnv === "none";
+		if (!smallDisabled) {
+			const effectiveAction = action ?? (phase === "tools" ? "tools" : phase);
+			const smallKey = options.smallImageKey ?? effectiveAction;
+			const smallText =
+				options.smallImageText ?? formatAction(effectiveAction, phase);
+			activity.smallImageKey = smallKey;
+			activity.smallImageText = truncateText(smallText, 128);
+		}
+	}
+
+	const buttonsEnv = process.env[BUTTONS_ENV];
+	const buttonsDisabled =
+		options.enableButtons === false ||
+		buttonsEnv === "off" ||
+		buttonsEnv === "false" ||
+		buttonsEnv === "0";
+
+	if (!buttonsDisabled) {
+		activity.buttons = DEFAULT_BUTTONS;
+	}
+}
+
+export function buildSingleSessionActivity(
+	record: SessionRecord,
+	options: ActivityBuildOptions = {},
+): PresenceActivity {
+	const privacy = options.privacyMode ?? "strict";
+	const details = formatSingleSessionDetails(record);
+	const state = formatSingleSessionState(record, privacy);
+
+	const activity: PresenceActivity = {
+		details,
+		state,
+		startTimestamp: record.startedAt,
+		instance: true,
+	};
+
+	attachAssetsAndButtons(activity, record.action, record.phase, options);
+	return activity;
+}
+
+export function buildMultiSessionActivity(
+	state: PresenceState,
+	options: ActivityBuildOptions = {},
+): PresenceActivity {
+	const records = orderedSessions(state);
+	if (records.length === 0) {
+		return {
+			details: "0 Pi sessions · 0 tok",
+			state: "Pi · Idle",
+			startTimestamp: Date.now(),
+			instance: true,
+		};
+	}
+
+	const primary = records[0];
+	const summary = summarizeRecords(records);
+	const details = formatMultiSessionDetails(summary, records.length);
+	const activityState = formatMultiSessionState(records, summary.projectCount);
+
+	const activity: PresenceActivity = {
+		details,
+		state: activityState,
+		startTimestamp: summary.startTimestamp,
+		instance: true,
+	};
+
+	attachAssetsAndButtons(activity, primary.action, primary.phase, options);
+	return activity;
+}
+
+export function buildAggregateActivity(
+	state: PresenceState,
+	options: ActivityBuildOptions = {},
+): PresenceActivity {
+	const records = orderedSessions(state);
+	if (records.length === 0) {
+		return {
+			details: "0 Pi sessions · 0 tok",
+			state: "Pi · Idle",
+			startTimestamp: Date.now(),
+			instance: true,
+		};
+	}
+	if (records.length === 1) {
+		return buildSingleSessionActivity(records[0], options);
+	}
+	return buildMultiSessionActivity(state, options);
+}
+
 export interface PresenceSnapshot {
 	projectName: string;
 	provider?: string;
 	modelId?: string;
 	phase: PresencePhase;
+	action?: PresenceAction;
 	startedAt: number;
 	usage?: UsageTotals;
 	context?: ContextSnapshot;
@@ -397,6 +918,7 @@ function snapshotRecord(snapshot: PresenceSnapshot): SessionRecord {
 		provider: snapshot.provider,
 		modelId: snapshot.modelId,
 		phase: snapshot.phase,
+		action: snapshot.action,
 		startedAt: snapshot.startedAt,
 		lastSeenAt: snapshot.startedAt,
 		usage: snapshot.usage ?? emptyUsageTotals(),
@@ -427,40 +949,20 @@ function orderedSessions(state: PresenceState): SessionRecord[] {
 	});
 }
 
-export function buildAggregateActivity(state: PresenceState): PresenceActivity {
-	const records = orderedSessions(state);
-	if (records.length === 0) {
-		return {
-			details: "0 Pi sessions · 0 tok · cost n/a",
-			state: "Pi · Idle",
-			startTimestamp: Date.now(),
-			instance: true,
-		};
-	}
-
-	const primary = records[0];
-	const summary = summarizeRecords(records);
-	const sessionLabel = `${records.length} session${records.length === 1 ? "" : "s"}`;
-	const details = `${sessionLabel} · ${formatTokenCount(summary.usage.total)} tok · ${formatCost(summary.usage)}`;
-	const projectLabel = `${summary.projectCount} project${summary.projectCount === 1 ? "" : "s"}`;
-	const activityState = `${formatPhase(primary.phase)} · ${formatPresenceModelLabel(primary.provider, primary.modelId)} · ${projectLabel}`;
-
-	return {
-		details: truncateText(details),
-		state: truncateText(activityState),
-		startTimestamp: summary.startTimestamp,
-		instance: true,
-	};
-}
-
-export function buildActivity(snapshot: PresenceSnapshot): PresenceActivity {
-	return buildAggregateActivity({
-		version: 1,
-		publisherId: "current",
-		publisherGeneration: 1,
-		sessions: { current: snapshotRecord(snapshot) },
-		updatedAt: snapshot.startedAt,
-	});
+export function buildActivity(
+	snapshot: PresenceSnapshot,
+	options: ActivityBuildOptions = {},
+): PresenceActivity {
+	return buildAggregateActivity(
+		{
+			version: 1,
+			publisherId: "current",
+			publisherGeneration: 1,
+			sessions: { current: snapshotRecord(snapshot) },
+			updatedAt: snapshot.startedAt,
+		},
+		options,
+	);
 }
 
 /** Resolve the Git repository basename, falling back to the current cwd. */
@@ -550,6 +1052,24 @@ function parseContext(value: unknown): ContextSnapshot | undefined {
 	return normalizeContextUsage(value);
 }
 
+const validActions = new Set<string>([
+	"thinking",
+	"searching",
+	"reading",
+	"editing",
+	"running",
+	"testing",
+	"browsing",
+	"tools",
+	"idle",
+]);
+
+function parseAction(value: unknown): PresenceAction | undefined {
+	return typeof value === "string" && validActions.has(value)
+		? (value as PresenceAction)
+		: undefined;
+}
+
 function parseSessionRecord(value: unknown): SessionRecord | undefined {
 	const record = asRecord(value);
 	if (!record) return undefined;
@@ -577,6 +1097,7 @@ function parseSessionRecord(value: unknown): SessionRecord | undefined {
 		provider: typeof record.provider === "string" ? record.provider : undefined,
 		modelId: typeof record.modelId === "string" ? record.modelId : undefined,
 		phase,
+		action: parseAction(record.action),
 		startedAt: startedAt as number,
 		lastSeenAt: lastSeenAt as number,
 		usage,
@@ -710,9 +1231,6 @@ async function reclaimFileLock(
 ): Promise<boolean> {
 	const tombstone = `${lockPath}.reclaim.${randomUUID()}`;
 	try {
-		// Renaming the whole lock directory is the fencing operation. Verify
-		// the owner token after the rename so a contender cannot clean up a
-		// replacement lock that won the race while this one was stale.
 		await rename(lockPath, tombstone);
 	} catch {
 		return false;
@@ -769,8 +1287,6 @@ async function withFileLock<T>(
 			let shouldBreak = false;
 			try {
 				const lockStats = await stat(lockPath);
-				// Do not rely on PID liveness here: Windows can reuse a PID after
-				// the process that created this lock has exited.
 				shouldBreak = Date.now() - lockStats.mtimeMs > LOCK_STALE_MS;
 			} catch {
 				// A concurrent owner may have released the lock.
@@ -896,8 +1412,6 @@ export class FilePresenceStateStore implements PresenceStateStore {
 				state.publisherGeneration !== previousPublisherGeneration;
 			if (!publisherChanged) return persist();
 
-			// Publisher changes and Discord writes share this second lock. A
-			// publisher cannot be elected away while its RPC write is in flight.
 			return withFileLock(
 				this.publisherLockPath,
 				(assertPublisherLock) => persist(assertPublisherLock),
@@ -947,6 +1461,9 @@ export class DiscordPresenceManager {
 	private readonly heartbeatMs: number;
 	private readonly retryBaseMs: number;
 	private readonly retryCapMs: number;
+	private readonly privacyMode: PresencePrivacyMode;
+	private readonly enableButtons?: boolean;
+	private readonly enableAssets?: boolean;
 	private readonly record: SessionRecord;
 
 	private status: PresenceStatus = "not-started";
@@ -977,6 +1494,10 @@ export class DiscordPresenceManager {
 		this.heartbeatMs = options.heartbeatMs ?? HEARTBEAT_INTERVAL_MS;
 		this.retryBaseMs = options.retryBaseMs ?? RETRY_BASE_MS;
 		this.retryCapMs = options.retryCapMs ?? RETRY_CAP_MS;
+		this.privacyMode =
+			options.privacyMode ?? parsePrivacyMode(process.env[PRIVACY_ENV]);
+		this.enableButtons = options.enableButtons;
+		this.enableAssets = options.enableAssets;
 		const startedAt = options.startedAt ?? this.now();
 		this.record = {
 			sessionId: this.sessionId,
@@ -984,6 +1505,7 @@ export class DiscordPresenceManager {
 			provider: options.provider,
 			modelId: options.modelId,
 			phase: "idle",
+			action: "idle",
 			startedAt,
 			lastSeenAt: startedAt,
 			usage: cloneUsage(options.initialUsage ?? emptyUsageTotals()),
@@ -1041,8 +1563,14 @@ export class DiscordPresenceManager {
 		return this.enqueueRegistryUpdate();
 	}
 
-	setPhase(phase: PresencePhase): Promise<void> {
+	setPhase(phase: PresencePhase, action?: PresenceAction): Promise<void> {
 		this.record.phase = phase;
+		this.record.action = action ?? (phase === "tools" ? "tools" : phase);
+		return this.enqueueRegistryUpdate();
+	}
+
+	setAction(action?: PresenceAction): Promise<void> {
+		this.record.action = action;
 		return this.enqueueRegistryUpdate();
 	}
 
@@ -1189,9 +1717,6 @@ export class DiscordPresenceManager {
 	}
 
 	private enqueuePresencePublish(state: PresenceState): Promise<void> {
-		// Registry heartbeats and phase/usage events can arrive faster than an
-		// RPC round trip. Keep only the newest aggregate instead of replaying a
-		// queue of obsolete activities.
 		this.pendingPresenceState = state;
 		if (this.presenceDrain) return this.presenceDrain;
 
@@ -1246,8 +1771,14 @@ export class DiscordPresenceManager {
 						return false;
 					}
 					await assertOwnership();
+					const activity = buildAggregateActivity(state, {
+						privacyMode: this.privacyMode,
+						clientId: this.clientId,
+						enableButtons: this.enableButtons,
+						enableAssets: this.enableAssets,
+					});
 					await awaitWithTimeout(
-						transport.setActivity(buildAggregateActivity(state)),
+						transport.setActivity(activity),
 						RPC_WRITE_TIMEOUT_MS,
 					);
 					return true;
@@ -1260,8 +1791,6 @@ export class DiscordPresenceManager {
 				this.clearRetryTimer();
 			}
 		} catch {
-			// A late failure from an old transport must not tear down a newer
-			// connection established by a retry.
 			await this.handleUnavailable(transport);
 		}
 	}
@@ -1409,20 +1938,22 @@ function formatDuration(ms: number): string {
 
 function formatDiagnosticSession(record: SessionRecord, now: number): string {
 	const model = formatModelLabel(record.provider, record.modelId);
+	const action = formatAction(record.action, record.phase);
 	const context =
 		record.context?.percent === null || record.context?.percent === undefined
 			? "ctx ?"
 			: `ctx ${Math.round(record.context.percent)}%`;
 	const breakdown = `in ${formatTokenCount(record.usage.input)} / out ${formatTokenCount(record.usage.output)}`;
 	const project = truncateText(record.projectName, 96) || "project";
-	return `${project} · ${model} · ${formatPhase(record.phase)} · ${formatTokenCount(record.usage.total)} tok (${breakdown}) · ${formatCost(record.usage)} · ${context} · ${formatDuration(now - record.startedAt)}`;
+	return `${project} · ${model} · ${action} · ${formatTokenCount(record.usage.total)} tok (${breakdown}) · ${formatCost(record.usage)} · ${context} · ${formatDuration(now - record.startedAt)}`;
 }
 
 export default function (pi: ExtensionAPI) {
 	let manager: DiscordPresenceManager | undefined;
 	let disabledReason: string | undefined;
 	let agentActive = false;
-	let activeToolCount = 0;
+	const activeTools = new Map<string, PresenceAction>();
+	let anonymousToolCounter = 0;
 
 	pi.registerCommand("discord-status", {
 		description: "Show Discord Rich Presence and session statistics",
@@ -1443,7 +1974,8 @@ export default function (pi: ExtensionAPI) {
 		manager = undefined;
 		disabledReason = undefined;
 		agentActive = false;
-		activeToolCount = 0;
+		activeTools.clear();
+		anonymousToolCounter = 0;
 
 		const configuredClientId = process.env[CLIENT_ID_ENV];
 		const clientId = parseClientId(configuredClientId ?? DEFAULT_CLIENT_ID);
@@ -1501,27 +2033,40 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_start", async () => {
 		agentActive = true;
-		activeToolCount = 0;
-		await manager?.setPhase("thinking");
+		activeTools.clear();
+		await manager?.setPhase("thinking", "thinking");
 	});
 
-	pi.on("tool_execution_start", async () => {
-		activeToolCount += 1;
-		await manager?.setPhase("tools");
+	pi.on("tool_execution_start", async (event) => {
+		const action = classifyToolAction(event?.toolName);
+		const callId = event?.toolCallId ?? `anon-${++anonymousToolCounter}`;
+		activeTools.set(callId, action);
+		const currentAction = pickHighestPriorityAction(activeTools.values());
+		await manager?.setPhase("tools", currentAction);
 	});
 
-	pi.on("tool_execution_end", async () => {
-		activeToolCount = Math.max(0, activeToolCount - 1);
-		let phase: PresencePhase = "idle";
-		if (activeToolCount > 0) phase = "tools";
-		else if (agentActive) phase = "thinking";
-		await manager?.setPhase(phase);
+	pi.on("tool_execution_end", async (event) => {
+		if (event?.toolCallId && activeTools.has(event.toolCallId)) {
+			activeTools.delete(event.toolCallId);
+		} else if (activeTools.size > 0) {
+			const firstKey = activeTools.keys().next().value;
+			if (firstKey !== undefined) activeTools.delete(firstKey);
+		}
+
+		if (activeTools.size > 0) {
+			const currentAction = pickHighestPriorityAction(activeTools.values());
+			await manager?.setPhase("tools", currentAction);
+		} else if (agentActive) {
+			await manager?.setPhase("thinking", "thinking");
+		} else {
+			await manager?.setPhase("idle", "idle");
+		}
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
 		agentActive = false;
-		activeToolCount = 0;
-		await manager?.setPhase("idle");
+		activeTools.clear();
+		await manager?.setPhase("idle", "idle");
 		await manager?.setContextUsage(normalizeContextUsage(ctx.getContextUsage()));
 	});
 
