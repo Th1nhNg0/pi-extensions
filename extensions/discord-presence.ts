@@ -26,7 +26,15 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import { dirname, join } from "node:path";
-import { Client, type SetActivity } from "@xhayper/discord-rpc";
+import { spawn, type ChildProcess } from "node:child_process";
+import {
+	Client,
+	Transport,
+	type ClientOptions,
+	type CommandIncoming,
+	type SetActivity,
+	type TransportOptions,
+} from "@xhayper/discord-rpc";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const CLIENT_ID_ENV = "PI_DISCORD_CLIENT_ID";
@@ -36,6 +44,45 @@ export const LARGE_IMAGE_ENV = "PI_DISCORD_LARGE_IMAGE";
 export const SMALL_IMAGES_ENV = "PI_DISCORD_SMALL_IMAGES";
 export const SHOW_COST_ENV = "PI_DISCORD_SHOW_COST";
 export const ENABLED_ENV = "PI_DISCORD_ENABLED";
+
+export const TRANSPORT_ENV = "PI_DISCORD_TRANSPORT";
+export const NPIPERELAY_ENV = "PI_DISCORD_NPIPERELAY";
+
+export type DiscordTransportMode = "ipc" | "wsl-relay";
+
+/** Detect WSL without treating ordinary Linux as a Windows host. */
+export function isWslEnvironment(
+	env: NodeJS.ProcessEnv = process.env,
+	platform: NodeJS.Platform = process.platform,
+	kernelRelease = os.release(),
+): boolean {
+	if (platform !== "linux") return false;
+	const release = kernelRelease.toLowerCase();
+	return Boolean(
+		env.WSL_INTEROP ||
+		env.WSL_DISTRO_NAME ||
+		release.includes("microsoft") ||
+		release.includes("wsl"),
+	);
+}
+
+/** Resolve the RPC transport, allowing an explicit override for unusual setups. */
+export function resolveDiscordTransportMode(
+	env: NodeJS.ProcessEnv = process.env,
+	platform: NodeJS.Platform = process.platform,
+	kernelRelease = os.release(),
+): DiscordTransportMode {
+	const configured = env[TRANSPORT_ENV]?.trim().toLowerCase();
+	if (configured === "ipc") return "ipc";
+	if (
+		configured === "wsl" ||
+		configured === "wsl-relay" ||
+		configured === "relay" ||
+		configured === "npiperelay"
+	)
+		return "wsl-relay";
+	return isWslEnvironment(env, platform, kernelRelease) ? "wsl-relay" : "ipc";
+}
 
 export const DEFAULT_CLIENT_ID = "1541350417143955466";
 export const DEFAULT_LARGE_IMAGE_KEY =
@@ -1552,10 +1599,281 @@ export class FilePresenceStateStore implements PresenceStateStore {
 	}
 }
 
+const DISCORD_PIPE_COUNT = 10;
+const RELAY_CONNECT_TIMEOUT_MS = 1_000;
+const MAX_RELAY_PAYLOAD_BYTES = 16 * 1024 * 1024;
+
+function isReadyRpcMessage(message: unknown): boolean {
+	const record = asRecord(message);
+	return record?.cmd === "DISPATCH" && record.evt === "READY";
+}
+
+function isMissingExecutableError(error: unknown): boolean {
+	return asRecord(error)?.code === "ENOENT";
+}
+
+/**
+ * Bridges Discord's Windows named pipe into WSL through npiperelay.exe.
+ *
+ * WSL cannot open \\.\\pipe\\discord-ipc-* directly. npiperelay is a small
+ * Windows executable that copies the pipe bytes to stdin/stdout, so this
+ * transport can keep the normal Discord IPC framing and authentication.
+ */
+export class WslDiscordIpcTransport extends Transport {
+	private readonly relayCommand =
+		process.env[NPIPERELAY_ENV]?.trim() || "npiperelay.exe";
+	private relay: ChildProcess | undefined;
+	private incoming = Buffer.alloc(0);
+	private connected = false;
+	private closing = false;
+
+	constructor(options: TransportOptions) {
+		super(options);
+	}
+
+	override get isConnected(): boolean {
+		return this.connected;
+	}
+
+	override async connect(): Promise<void> {
+		if (this.connected) return;
+
+		let lastError: unknown;
+		for (let pipeId = 0; pipeId < DISCORD_PIPE_COUNT; pipeId += 1) {
+			try {
+				await this.connectPipe(pipeId);
+				return;
+			} catch (error) {
+				lastError = error;
+				if (isMissingExecutableError(error)) {
+					throw new Error(
+						`WSL Discord support requires npiperelay.exe. Put it on PATH or set ${NPIPERELAY_ENV} to its Windows path.`,
+					);
+				}
+			}
+		}
+
+		const detail =
+			lastError instanceof Error ? ` (${lastError.message})` : "";
+		throw new Error(
+			`Could not connect to Windows Discord through ${this.relayCommand}. Ensure Discord Desktop is running.${detail}`,
+		);
+	}
+
+	private connectPipe(pipeId: number): Promise<void> {
+		return new Promise((resolve, reject) => {
+			const pipePath = `//./pipe/discord-ipc-${pipeId}`;
+			const relay = spawn(this.relayCommand, ["-ep", pipePath], {
+				stdio: ["pipe", "pipe", "ignore"],
+				windowsHide: true,
+			});
+			this.relay = relay;
+
+			let settled = false;
+			let ready = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+
+			const clearAttempt = (): void => {
+				if (timer) clearTimeout(timer);
+				timer = undefined;
+				this.removeListener("message", onMessage);
+			};
+
+			const fail = (error: unknown): void => {
+				if (settled) return;
+				settled = true;
+				clearAttempt();
+				relay.stdout?.removeListener("data", onData);
+				relay.removeListener("spawn", onSpawn);
+				relay.removeListener("error", onError);
+				relay.removeListener("close", onClose);
+				if (this.relay === relay) {
+					this.relay = undefined;
+					this.connected = false;
+					this.incoming = Buffer.alloc(0);
+				}
+				relay.kill();
+				reject(error instanceof Error ? error : new Error(String(error)));
+			};
+
+			const succeed = (): void => {
+				if (settled) return;
+				settled = true;
+				ready = true;
+				clearAttempt();
+				resolve();
+			};
+
+			const onMessage = (message: unknown): void => {
+				if (isReadyRpcMessage(message)) succeed();
+			};
+
+			const onData = (chunk: Buffer | string): void => {
+				this.handleIncomingData(
+					Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk),
+				);
+			};
+
+			const onSpawn = (): void => {
+				this.connected = true;
+				this.emit("open");
+				try {
+					this.writePacket(
+						{ v: 1, client_id: this.client.clientId },
+						0,
+					);
+				} catch (error) {
+					fail(error);
+				}
+			};
+
+			const onError = (error: Error): void => {
+				if (!settled) fail(error);
+			};
+
+			const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+				if (!ready) {
+					fail(
+						new Error(
+							`npiperelay exited before Discord IPC became ready (code ${code ?? "none"}, signal ${signal ?? "none"})`,
+						),
+					);
+					return;
+				}
+				if (this.relay === relay) {
+					this.relay = undefined;
+					this.connected = false;
+					this.incoming = Buffer.alloc(0);
+				}
+				if (!this.closing) this.emit("close", "Windows Discord IPC closed");
+			};
+
+			this.on("message", onMessage);
+			relay.stdout?.on("data", onData);
+			relay.once("spawn", onSpawn);
+			relay.once("error", onError);
+			relay.once("close", onClose);
+			timer = setTimeout(() => {
+				fail(`Timed out connecting to Discord IPC pipe ${pipeId}`);
+			}, RELAY_CONNECT_TIMEOUT_MS);
+		});
+	}
+
+	private handleIncomingData(chunk: Buffer): void {
+		this.incoming = Buffer.concat([this.incoming, chunk]);
+		while (this.incoming.length >= 8) {
+			const opcode = this.incoming.readUInt32LE(0);
+			const payloadLength = this.incoming.readUInt32LE(4);
+			if (payloadLength > MAX_RELAY_PAYLOAD_BYTES) {
+				this.relay?.kill();
+				return;
+			}
+			if (this.incoming.length < payloadLength + 8) return;
+
+			const payload = this.incoming
+				.subarray(8, payloadLength + 8)
+				.toString("utf8");
+			this.incoming = this.incoming.subarray(payloadLength + 8);
+
+			let message: unknown;
+			try {
+				message = JSON.parse(payload);
+			} catch {
+				this.relay?.kill();
+				return;
+			}
+
+			switch (opcode) {
+				case 1:
+					this.emit("message", message as CommandIncoming);
+					break;
+				case 2: {
+					let reason: string | { code: number; message: string } | undefined;
+					if (typeof message === "string") {
+						reason = message;
+					} else {
+						const record = asRecord(message);
+						if (
+							typeof record?.code === "number" &&
+							typeof record.message === "string"
+						)
+							reason = { code: record.code, message: record.message };
+					}
+					this.emit("close", reason);
+					break;
+				}
+				case 3:
+					this.writePacket(message, 4);
+					break;
+				default:
+					break;
+			}
+		}
+	}
+
+	private writePacket(message: unknown, opcode: number): void {
+		const stdin = this.relay?.stdin;
+		if (!stdin || stdin.destroyed)
+			throw new Error("The npiperelay stdin stream is unavailable");
+		const payload = Buffer.from(JSON.stringify(message) ?? "");
+		const packet = Buffer.alloc(8);
+		packet.writeUInt32LE(opcode, 0);
+		packet.writeUInt32LE(payload.length, 4);
+		stdin.write(Buffer.concat([packet, payload]));
+	}
+
+	override send(message?: unknown): void {
+		this.writePacket(message, 1);
+	}
+
+	override ping(): void {
+		this.writePacket(randomUUID(), 3);
+	}
+
+	override async close(): Promise<void> {
+		const relay = this.relay;
+		this.relay = undefined;
+		this.connected = false;
+		this.incoming = Buffer.alloc(0);
+		if (!relay) return;
+
+		this.closing = true;
+		await new Promise<void>((resolve) => {
+			let finished = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const finish = (): void => {
+				if (finished) return;
+				finished = true;
+				if (timer) clearTimeout(timer);
+				this.closing = false;
+				this.emit("close", "Closed by client");
+				resolve();
+			};
+			relay.once("close", finish);
+			relay.once("error", finish);
+			if (relay.exitCode !== null) {
+				finish();
+				return;
+			}
+			relay.kill();
+			timer = setTimeout(() => {
+				relay.kill("SIGKILL");
+				finish();
+			}, 1_000);
+			timer.unref?.();
+		});
+	}
+}
+
 export function createDiscordPresenceTransport(
 	clientId: string,
 ): DiscordPresenceTransport {
-	const client = new Client({ clientId });
+	const transportMode = resolveDiscordTransportMode();
+	const clientOptions: ClientOptions =
+		transportMode === "wsl-relay"
+			? { clientId, transport: { type: WslDiscordIpcTransport } }
+			: { clientId };
+	const client = new Client(clientOptions);
 	const disconnectHandlers = new Set<() => void>();
 
 	client.on("disconnected", () => {
@@ -1616,6 +1934,7 @@ export class DiscordPresenceManager {
 	private presenceDrain: Promise<void> | undefined;
 	private pendingPresenceState: PresenceState | undefined;
 	private outageWarningShown = false;
+	private transportErrorWarningShown = false;
 	private registryWarningShown = false;
 
 	constructor(options: PresenceManagerOptions) {
@@ -1994,7 +2313,12 @@ export class DiscordPresenceManager {
 		let transport: DiscordPresenceTransport;
 		try {
 			transport = this.createTransport(this.clientId);
-		} catch {
+		} catch (error) {
+			if (!this.transportErrorWarningShown) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.logger(`[discord-presence] ${message}`);
+				this.transportErrorWarningShown = true;
+			}
 			await this.handleUnavailable();
 			return false;
 		}
@@ -2016,8 +2340,14 @@ export class DiscordPresenceManager {
 				await this.closeTransport(transport);
 				return false;
 			}
+			this.transportErrorWarningShown = false;
 			return true;
-		} catch {
+		} catch (error) {
+			if (!this.transportErrorWarningShown) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.logger(`[discord-presence] ${message}`);
+				this.transportErrorWarningShown = true;
+			}
 			await this.handleUnavailable(transport);
 			return false;
 		}
@@ -2213,6 +2543,7 @@ export default function (pi: ExtensionAPI) {
 			prefs.privacyMode ??
 			parsePrivacyMode(process.env[PRIVACY_ENV]);
 		const enabled = prefs.enabled !== false;
+		const transportMode = resolveDiscordTransportMode();
 		const buttonsEnv = process.env[BUTTONS_ENV];
 		const buttons =
 			buttonsEnv !== "off" &&
@@ -2233,6 +2564,7 @@ export default function (pi: ExtensionAPI) {
 		const lines = [
 			"Discord Rich Presence Configuration:",
 			`• Status: ${manager?.getStatusText() ?? (enabled ? "ready" : "disabled")}`,
+			`• Transport: ${transportMode}`,
 			`• Privacy Mode: ${privacy}`,
 			`• Show Price: yes (by default when pricing is available)`,
 			`• Client ID: ${clientId} (${isDefaultClient ? "default" : "custom"})`,

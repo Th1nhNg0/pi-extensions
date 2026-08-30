@@ -6,6 +6,7 @@ import test from "node:test";
 import type { SetActivity } from "@xhayper/discord-rpc";
 import {
 	BUTTONS_ENV,
+	TRANSPORT_ENV,
 	DEFAULT_CLIENT_ID,
 	DEFAULT_LARGE_IMAGE_KEY,
 	ACTION_EMOJI_BADGE_URLS,
@@ -44,10 +45,12 @@ import {
 	mergeUsageTotals,
 	normalizeContextUsage,
 	parseClientId,
+	isWslEnvironment,
 	parsePrivacyMode,
 	pickHighestPriorityAction,
 	readPrefs,
 	resolveProjectName,
+	resolveDiscordTransportMode,
 	summarizeModels,
 	writePrefs,
 } from "../extensions/discord-presence.ts";
@@ -1060,6 +1063,30 @@ test("parseClientId accepts Discord snowflakes and rejects unsafe values", () =>
 	assert.equal(parseClientId("not-a-client-id"), undefined);
 	assert.equal(parseClientId("123"), undefined);
 	assert.equal(parseClientId(undefined), undefined);
+});
+
+test("detects WSL and selects the named-pipe relay transport", () => {
+	assert.equal(
+		isWslEnvironment({}, "linux", "5.15.90.1-microsoft-standard-WSL2"),
+		true,
+	);
+	assert.equal(isWslEnvironment({}, "linux", "6.8.0-generic"), false);
+	assert.equal(
+		isWslEnvironment({ WSL_INTEROP: "/run/WSL/123" }, "linux", "6.8.0-generic"),
+		true,
+	);
+	assert.equal(
+		resolveDiscordTransportMode({}, "linux", "5.15.90.1-microsoft-standard-WSL2"),
+		"wsl-relay",
+	);
+	assert.equal(
+		resolveDiscordTransportMode({ [TRANSPORT_ENV]: "ipc" }, "linux", "5.15.90.1-microsoft-standard-WSL2"),
+		"ipc",
+	);
+	assert.equal(
+		resolveDiscordTransportMode({ [TRANSPORT_ENV]: "wsl" }, "win32", "10.0.0"),
+		"wsl-relay",
+	);
 });
 
 test("resolveProjectName prefers the Git root and falls back to cwd", async () => {

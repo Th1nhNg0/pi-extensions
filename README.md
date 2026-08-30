@@ -139,10 +139,27 @@ All presence controls are consolidated under a single clean `/discord` command:
 | `PI_DISCORD_LARGE_IMAGE` | `pi` | Large Rich Presence asset key or image URL. Set to `off` to disable. |
 | `PI_DISCORD_SMALL_IMAGES` | `on` | Action badge asset key (`thinking`, `reading`, `editing`, `searching`, `running`, `testing`, `browsing`, `idle`), custom asset key, or image URL. Set to `off` to disable. |
 | `PI_DISCORD_SHOW_COST` | `on` | Set to `off` to hide price from public Discord presence. |
+| `PI_DISCORD_TRANSPORT` | `auto` | `ipc` or `wsl`; WSL auto-selects the `npiperelay.exe` bridge for Windows Discord. |
+| `PI_DISCORD_NPIPERELAY` | `npiperelay.exe` | Optional Windows path/name of the `npiperelay.exe` bridge used from WSL. |
 
 #### Setup & Diagnostics
 
-The extension includes a public Discord application ID, so no environment variable is required. Start or reload Pi while Discord Desktop is running, then use `/discord-status` to check connection status and inspect per-session statistics (model, phase/action, token breakdown, pricing, context %, and duration). Custom settings can be changed on the fly using `/discord-privacy` and `/discord-toggle`, and are saved to `~/.pi/agent/discord-presence-prefs.json`.
+The extension includes a public Discord application ID, so no environment variable is required. Start or reload Pi while Discord Desktop is running, then use `/discord status` to check connection status and inspect per-session statistics (model, phase/action, token breakdown, pricing, context %, and duration). Custom settings can be changed on the fly using `/discord privacy` and `/discord toggle`, and are saved to `~/.pi/agent/discord-presence-prefs.json`.
+
+##### WSL + Windows Discord
+
+WSL cannot open Discord's Windows named pipe directly. When Pi is running in WSL, the extension automatically uses `npiperelay.exe`; install/build it on the Windows filesystem and make it available on the WSL `PATH`, or set `PI_DISCORD_NPIPERELAY` to its mounted Windows path:
+
+```bash
+sudo apt install golang-go
+git clone https://github.com/jstarks/npiperelay.git
+cd npiperelay
+mkdir -p /mnt/c/Users/<windows-user>/bin
+GOOS=windows go build -o /mnt/c/Users/<windows-user>/bin/npiperelay.exe .
+export PI_DISCORD_NPIPERELAY=/mnt/c/Users/<windows-user>/bin/npiperelay.exe
+```
+
+Keep Discord Desktop running on Windows, restart Pi, and run `/discord status`. Set `PI_DISCORD_TRANSPORT=ipc` only when Discord is running inside Linux instead.
 
 Multiple Pi sessions share a registry at `~/.pi/agent/discord-presence-state.json`. One session publishes the aggregate activity while the others send heartbeats. If the publisher exits, another active session takes over; stale sessions are removed automatically. Usage totals include assistant/tool results plus compaction and branch-summary calls. Registry locks renew their lease during long operations, and only the newest pending Discord activity is published, keeping rapid tool/phase updates responsive without replaying stale states.
 
