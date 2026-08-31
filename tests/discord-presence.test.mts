@@ -9,7 +9,8 @@ import {
 	TRANSPORT_ENV,
 	DEFAULT_CLIENT_ID,
 	DEFAULT_LARGE_IMAGE_KEY,
-	ACTION_EMOJI_BADGE_URLS,
+	ACTION_BADGE_COLORS,
+	ACTION_BADGE_URLS,
 	DiscordPresenceManager,
 	FilePresenceStateStore,
 	LARGE_IMAGE_ENV,
@@ -525,7 +526,7 @@ test("single session activity formatting across privacy modes and actions", () =
 	assert.equal(strictActivity.state, "42k tok · ctx 38% · $0.84");
 	assert.equal(strictActivity.largeImageKey, DEFAULT_LARGE_IMAGE_KEY);
 	assert.equal(strictActivity.largeImageText, "Pi Coding Agent");
-	assert.equal(strictActivity.smallImageKey, ACTION_EMOJI_BADGE_URLS.thinking);
+	assert.equal(strictActivity.smallImageKey, ACTION_BADGE_URLS.thinking);
 	assert.equal(strictActivity.smallImageText, "Thinking");
 	assert.equal(strictActivity.buttons?.length, 2);
 
@@ -550,7 +551,7 @@ test("single session activity formatting across privacy modes and actions", () =
 	});
 	assert.equal(testActivity.details, "Running tests · GPT-5.6");
 	assert.equal(testActivity.state, "spring2026 · 47k tok · ctx 41% · $0.84");
-	assert.equal(testActivity.smallImageKey, ACTION_EMOJI_BADGE_URLS.testing);
+	assert.equal(testActivity.smallImageKey, ACTION_BADGE_URLS.testing);
 	assert.equal(testActivity.smallImageText, "Running tests");
 
 	// Idle state
@@ -566,7 +567,7 @@ test("single session activity formatting across privacy modes and actions", () =
 	});
 	assert.equal(idleActivity.details, "Idle · GPT-5.6");
 	assert.equal(idleActivity.state, "spring2026 · 52k tok · ctx 44% · $0.84");
-	assert.equal(idleActivity.smallImageKey, ACTION_EMOJI_BADGE_URLS.idle);
+	assert.equal(idleActivity.smallImageKey, ACTION_BADGE_URLS.idle);
 	assert.equal(idleActivity.smallImageText, "Idle");
 });
 
@@ -701,7 +702,7 @@ test("buildActivity formats snapshot into v2 presence", () => {
 	assert.equal(activity.state, "0 tok");
 	assert.equal(activity.instance, true);
 	assert.equal(activity.largeImageKey, DEFAULT_LARGE_IMAGE_KEY);
-	assert.equal(activity.smallImageKey, ACTION_EMOJI_BADGE_URLS.thinking);
+	assert.equal(activity.smallImageKey, ACTION_BADGE_URLS.thinking);
 });
 
 test("presence text strips control characters before publishing", () => {
@@ -736,6 +737,43 @@ test("presence activity respects 128 character limit", () => {
 // ---------------------------------------------------------------------------
 // Assets & Buttons Configuration Tests
 // ---------------------------------------------------------------------------
+
+test("default action badges use Phosphor Duotone icons and distinct colors", () => {
+	const expectedIcons: Record<PresenceAction, string> = {
+		thinking: "brain",
+		testing: "test-tube",
+		editing: "pencil-simple",
+		searching: "magnifying-glass",
+		reading: "book-open",
+		running: "terminal-window",
+		browsing: "globe",
+		tools: "wrench",
+		idle: "pause-circle",
+	};
+
+	assert.equal(
+		new Set(Object.values(ACTION_BADGE_COLORS)).size,
+		Object.keys(expectedIcons).length,
+	);
+
+	for (const [action, icon] of Object.entries(expectedIcons) as Array<
+		[PresenceAction, string]
+	>) {
+		const badgeUrl = new URL(ACTION_BADGE_URLS[action]);
+		assert.equal(badgeUrl.origin, "https://wsrv.nl");
+		assert.equal(badgeUrl.searchParams.get("output"), "png");
+		assert.equal(badgeUrl.searchParams.get("w"), "72");
+		assert.equal(badgeUrl.searchParams.get("h"), "72");
+
+		const sourceUrl = badgeUrl.searchParams.get("url") ?? "";
+		assert.match(
+			sourceUrl,
+			new RegExp(
+				`/ph/${icon}-duotone\\.svg\\?color=%23${ACTION_BADGE_COLORS[action].slice(1)}&width=72&height=72$`,
+			),
+		);
+	}
+});
 
 test("custom client id omits assets by default to prevent missing asset errors", () => {
 	const record = makeRecord("s1", 100);

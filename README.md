@@ -142,6 +142,23 @@ All presence controls are consolidated under a single clean `/discord` command:
 | `PI_DISCORD_TRANSPORT` | `auto` | `ipc` or `wsl`; WSL auto-selects the `npiperelay.exe` bridge for Windows Discord. |
 | `PI_DISCORD_NPIPERELAY` | `npiperelay.exe` | Optional Windows path/name of the `npiperelay.exe` bridge used from WSL. |
 
+##### Default Badge Icons
+
+The default action badges use [Phosphor Duotone](https://phosphoricons.com/) icons rasterized as 72×72 PNGs through [Iconify](https://iconify.design/) and `wsrv.nl` for Discord compatibility. Each action has its own vivid, high-contrast color:
+
+| Action | Icon | Color |
+| :--- | :--- | :--- |
+| Thinking | `brain` | `#ff375f` |
+| Testing | `test-tube` | `#ff9f0a` |
+| Editing | `pencil-simple` | `#0a84ff` |
+| Searching | `magnifying-glass` | `#00c7be` |
+| Reading | `book-open` | `#bf5af2` |
+| Running | `terminal-window` | `#30d158` |
+| Browsing | `globe` | `#5e5ce6` |
+| Tools | `wrench` | `#ffd60a` |
+| Idle | `pause-circle` | `#ffffff` |
+
+Set `PI_DISCORD_SMALL_IMAGES` to a custom asset key or image URL to replace the defaults.
 #### Setup & Diagnostics
 
 The extension includes a public Discord application ID, so no environment variable is required. Start or reload Pi while Discord Desktop is running, then use `/discord status` to check connection status and inspect per-session statistics (model, phase/action, token breakdown, pricing, context %, and duration). Custom settings can be changed on the fly using `/discord privacy` and `/discord toggle`, and are saved to `~/.pi/agent/discord-presence-prefs.json`.

@@ -89,26 +89,57 @@ export const DEFAULT_LARGE_IMAGE_KEY =
 	"https://cdn.discordapp.com/app-icons/1541350417143955466/71bb55a3b54d84642419948a680f22e4.png";
 export const DEFAULT_LARGE_IMAGE_TEXT = "Pi Coding Agent";
 
-export const ACTION_EMOJI_BADGE_URLS: Record<PresenceAction, string> = {
-	thinking:
-		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f9e0.png",
-	testing:
-		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f9ea.png",
-	editing:
-		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/270f.png",
-	searching:
-		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f50d.png",
-	reading:
-		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f4d6.png",
-	running:
-		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f4bb.png",
-	browsing:
-		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f310.png",
-	tools:
-		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f6e0.png",
-	idle:
-		"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2615.png",
+const PHOSPHOR_BADGE_BASE_URL = "https://api.iconify.design/ph";
+const PHOSPHOR_BADGE_PROXY_URL = "https://wsrv.nl/";
+const PHOSPHOR_BADGE_SIZE = 72;
+
+function phosphorDuotoneBadge(icon: string, color: string): string {
+	const sourceUrl = `${PHOSPHOR_BADGE_BASE_URL}/${icon}-duotone.svg?color=${encodeURIComponent(
+		color,
+	)}&width=${PHOSPHOR_BADGE_SIZE}&height=${PHOSPHOR_BADGE_SIZE}`;
+	return `${PHOSPHOR_BADGE_PROXY_URL}?url=${encodeURIComponent(
+		sourceUrl,
+	)}&output=png&w=${PHOSPHOR_BADGE_SIZE}&h=${PHOSPHOR_BADGE_SIZE}`;
+}
+
+/** One vivid, high-contrast color per presence action. */
+export const ACTION_BADGE_COLORS: Record<PresenceAction, string> = {
+	thinking: "#ff375f",
+	testing: "#ff9f0a",
+	editing: "#0a84ff",
+	searching: "#00c7be",
+	reading: "#bf5af2",
+	running: "#30d158",
+	browsing: "#5e5ce6",
+	tools: "#ffd60a",
+	idle: "#ffffff",
 };
+
+const ACTION_PHOSPHOR_ICONS: Record<PresenceAction, string> = {
+	thinking: "brain",
+	testing: "test-tube",
+	editing: "pencil-simple",
+	searching: "magnifying-glass",
+	reading: "book-open",
+	running: "terminal-window",
+	browsing: "globe",
+	tools: "wrench",
+	idle: "pause-circle",
+};
+
+export const ACTION_BADGE_URLS: Record<PresenceAction, string> =
+	Object.fromEntries(
+		(Object.keys(ACTION_PHOSPHOR_ICONS) as PresenceAction[]).map((action) => [
+			action,
+			phosphorDuotoneBadge(
+				ACTION_PHOSPHOR_ICONS[action],
+				ACTION_BADGE_COLORS[action],
+			),
+		]),
+	) as Record<PresenceAction, string>;
+
+/** @deprecated Use ACTION_BADGE_URLS instead. */
+export const ACTION_EMOJI_BADGE_URLS = ACTION_BADGE_URLS;
 
 export const DEFAULT_BUTTONS: Array<{ label: string; url: string }> = [
 	{
@@ -966,7 +997,7 @@ export function attachAssetsAndButtons(
 	if (canUseAssets && !smallDisabled) {
 		const effectiveAction = action ?? (phase === "tools" ? "tools" : phase);
 		let smallKey: string =
-			ACTION_EMOJI_BADGE_URLS[effectiveAction] ?? ACTION_EMOJI_BADGE_URLS.tools;
+			ACTION_BADGE_URLS[effectiveAction] ?? ACTION_BADGE_URLS.tools;
 		if (
 			smallImagesEnv &&
 			smallImagesEnv !== "on" &&
