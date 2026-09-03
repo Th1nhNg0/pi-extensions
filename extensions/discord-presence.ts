@@ -60,9 +60,9 @@ export function isWslEnvironment(
 	const release = kernelRelease.toLowerCase();
 	return Boolean(
 		env.WSL_INTEROP ||
-		env.WSL_DISTRO_NAME ||
-		release.includes("microsoft") ||
-		release.includes("wsl"),
+			env.WSL_DISTRO_NAME ||
+			release.includes("microsoft") ||
+			release.includes("wsl"),
 	);
 }
 
@@ -910,7 +910,7 @@ export function summarizeModels(records: readonly SessionRecord[]): string {
 	const labels = new Set(
 		records.map((r) => formatDiscordModelLabel(r.provider, r.modelId)),
 	);
-	if (labels.size === 1) return labels.values().next().value!;
+	if (labels.size === 1) return labels.values().next().value ?? "Pi";
 	return "multiple models";
 }
 
@@ -1684,8 +1684,7 @@ export class WslDiscordIpcTransport extends Transport {
 			}
 		}
 
-		const detail =
-			lastError instanceof Error ? ` (${lastError.message})` : "";
+		const detail = lastError instanceof Error ? ` (${lastError.message})` : "";
 		throw new Error(
 			`Could not connect to Windows Discord through ${this.relayCommand}. Ensure Discord Desktop is running.${detail}`,
 		);
@@ -1749,10 +1748,7 @@ export class WslDiscordIpcTransport extends Transport {
 				this.connected = true;
 				this.emit("open");
 				try {
-					this.writePacket(
-						{ v: 1, client_id: this.client.clientId },
-						0,
-					);
+					this.writePacket({ v: 1, client_id: this.client.clientId }, 0);
 				} catch (error) {
 					fail(error);
 				}
@@ -1762,7 +1758,10 @@ export class WslDiscordIpcTransport extends Transport {
 				if (!settled) fail(error);
 			};
 
-			const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+			const onClose = (
+				code: number | null,
+				signal: NodeJS.Signals | null,
+			): void => {
 				if (!ready) {
 					fail(
 						new Error(
@@ -2496,16 +2495,21 @@ export default function (pi: ExtensionAPI) {
 		arg: string,
 		ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1],
 	) {
+		const normalized = arg.trim().toLowerCase();
 		let nextMode: PresencePrivacyMode;
-		if (arg) {
-			if (arg !== "strict" && arg !== "project" && arg !== "developer") {
+		if (normalized) {
+			if (
+				normalized !== "strict" &&
+				normalized !== "project" &&
+				normalized !== "developer"
+			) {
 				ctx.ui.notify(
-					`Unknown privacy mode "${arg}". Options: ${PRIVACY_MODES.join(", ")}`,
+					`Unknown privacy mode "${arg.trim()}". Options: ${PRIVACY_MODES.join(", ")}`,
 					"warning",
 				);
 				return;
 			}
-			nextMode = arg;
+			nextMode = normalized;
 		} else {
 			const current = manager?.getPrivacyMode() ?? "strict";
 			const currentIndex = PRIVACY_MODES.indexOf(current);
@@ -2533,10 +2537,21 @@ export default function (pi: ExtensionAPI) {
 		const prefs = await readPrefs();
 		const currentEnabled = prefs.enabled !== false;
 		let nextEnabled: boolean;
+		const normalized = arg.trim().toLowerCase();
 
-		if (arg === "on") nextEnabled = true;
-		else if (arg === "off") nextEnabled = false;
-		else nextEnabled = !currentEnabled;
+		if (normalized === "on") {
+			nextEnabled = true;
+		} else if (normalized === "off") {
+			nextEnabled = false;
+		} else if (normalized === "") {
+			nextEnabled = !currentEnabled;
+		} else {
+			ctx.ui.notify(
+				`Unknown toggle option "${arg.trim()}". Usage: /discord toggle [on|off]`,
+				"warning",
+			);
+			return;
+		}
 
 		prefs.enabled = nextEnabled;
 		await writePrefs(prefs);
@@ -2621,36 +2636,86 @@ export default function (pi: ExtensionAPI) {
 			const trimmed = prefix.trimStart();
 			const spaceIndex = trimmed.indexOf(" ");
 			if (spaceIndex === -1) {
-				const subcommands = ["status", "privacy", "toggle", "config", "help"];
-				const filtered = subcommands.filter((sub) => sub.startsWith(trimmed));
-				return filtered.length > 0
-					? filtered.map((sub) => ({ value: sub, label: sub }))
-					: null;
+				const subcommands = [
+					{
+						value: "status",
+						label: "status",
+						description: "View active sessions & diagnostics",
+					},
+					{
+						value: "privacy",
+						label: "privacy",
+						description: "Set privacy mode (strict, project, developer)",
+					},
+					{
+						value: "toggle",
+						label: "toggle",
+						description: "Toggle presence on or off",
+					},
+					{
+						value: "config",
+						label: "config",
+						description: "Show configuration overview",
+					},
+					{
+						value: "help",
+						label: "help",
+						description: "Show help & usage information",
+					},
+				];
+				const filtered = subcommands.filter((sub) =>
+					sub.value.startsWith(trimmed.toLowerCase()),
+				);
+				return filtered.length > 0 ? filtered : null;
 			}
 
 			const sub = trimmed.slice(0, spaceIndex).toLowerCase();
-			const rest = trimmed.slice(spaceIndex + 1).trimStart();
+			const rest = trimmed
+				.slice(spaceIndex + 1)
+				.trimStart()
+				.toLowerCase();
 
 			if (sub === "privacy") {
-				const options = ["strict", "project", "developer"];
-				const filtered = options.filter((o) => o.startsWith(rest));
-				return filtered.length > 0
-					? filtered.map((o) => ({
-							value: `privacy ${o}`,
-							label: `privacy ${o}`,
-						}))
-					: null;
+				const options = [
+					{
+						value: "privacy strict",
+						label: "privacy strict",
+						description: "Hide project names (default)",
+					},
+					{
+						value: "privacy project",
+						label: "privacy project",
+						description: "Show project name",
+					},
+					{
+						value: "privacy developer",
+						label: "privacy developer",
+						description: "Show project name and dev metrics",
+					},
+				];
+				const filtered = options.filter((o) =>
+					o.value.startsWith(`privacy ${rest}`),
+				);
+				return filtered.length > 0 ? filtered : null;
 			}
 
 			if (sub === "toggle") {
-				const options = ["on", "off"];
-				const filtered = options.filter((o) => o.startsWith(rest));
-				return filtered.length > 0
-					? filtered.map((o) => ({
-							value: `toggle ${o}`,
-							label: `toggle ${o}`,
-						}))
-					: null;
+				const options = [
+					{
+						value: "toggle on",
+						label: "toggle on",
+						description: "Enable Discord presence",
+					},
+					{
+						value: "toggle off",
+						label: "toggle off",
+						description: "Disable Discord presence",
+					},
+				];
+				const filtered = options.filter((o) =>
+					o.value.startsWith(`toggle ${rest}`),
+				);
+				return filtered.length > 0 ? filtered : null;
 			}
 
 			return null;
@@ -2690,12 +2755,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Backwards-compatible alias
-	pi.registerCommand("discord-status", {
-		description: "Show Discord Rich Presence connection and session statistics",
-		handler: async (_args, ctx) => handleStatus(ctx),
-	});
-
 	pi.on("session_start", async (_event, ctx) => {
 		const sessionStartedAt = Date.now();
 		if (manager) await manager.stop();
@@ -2707,7 +2766,7 @@ export default function (pi: ExtensionAPI) {
 
 		const prefs = await readPrefs();
 		if (prefs.enabled === false) {
-			disabledReason = "disabled via /discord-toggle (preferences)";
+			disabledReason = "disabled via /discord toggle (preferences)";
 			return;
 		}
 
@@ -2824,5 +2883,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		await manager?.stop();
 		manager = undefined;
+		agentActive = false;
+		activeTools.clear();
+		anonymousToolCounter = 0;
 	});
 }

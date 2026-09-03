@@ -93,7 +93,7 @@ Discord Presence **never** sends:
 
 #### 🛡️ Privacy Modes
 
-Configure how much metadata is visible in Discord via `/discord-privacy [strict|project|developer]` or `PI_DISCORD_PRIVACY`:
+Configure how much metadata is visible in Discord via `/discord privacy [strict|project|developer]` or `PI_DISCORD_PRIVACY`:
 
 * `strict` (**Default**): Hides the project name completely for maximum privacy. Price is included by default when pricing is available.
 
@@ -127,8 +127,6 @@ All presence controls are consolidated under a single clean `/discord` command:
 | `/discord toggle` | `/discord toggle [on\|off]` | Turn Discord Presence publishing on or off on the fly. Persists in preferences. |
 | `/discord config` | `/discord config` | View an overview of all active settings, client ID, image keys, and preferences. |
 
-*(For backward compatibility, `/discord-status` is also supported as an alias.)*
-
 #### ⚙️ Configuration & Environment Variables
 
 | Variable | Default | Description |
@@ -144,7 +142,7 @@ All presence controls are consolidated under a single clean `/discord` command:
 
 ##### Default Badge Icons
 
-The default action badges use [Phosphor Duotone](https://phosphoricons.com/) icons rasterized as 72×72 PNGs through [Iconify](https://iconify.design/) and `wsrv.nl` for Discord compatibility. Each action has its own vivid, high-contrast color:
+The default action badges use [Phosphor Duotone](https://phosphoricons.com/) icons rasterized as 72×72 PNG images through [Iconify](https://iconify.design/) and `wsrv.nl` for Discord compatibility. Each action has its own vivid, high-contrast color:
 
 | Action | Icon | Color |
 | :--- | :--- | :--- |
@@ -159,6 +157,7 @@ The default action badges use [Phosphor Duotone](https://phosphoricons.com/) ico
 | Idle | `pause-circle` | `#ffffff` |
 
 Set `PI_DISCORD_SMALL_IMAGES` to a custom asset key or image URL to replace the defaults.
+
 #### Setup & Diagnostics
 
 The extension includes a public Discord application ID, so no environment variable is required. Start or reload Pi while Discord Desktop is running, then use `/discord status` to check connection status and inspect per-session statistics (model, phase/action, token breakdown, pricing, context %, and duration). Custom settings can be changed on the fly using `/discord privacy` and `/discord toggle`, and are saved to `~/.pi/agent/discord-presence-prefs.json`.

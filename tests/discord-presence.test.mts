@@ -54,6 +54,7 @@ import {
 	resolveDiscordTransportMode,
 	summarizeModels,
 	writePrefs,
+	default as discordPresenceExtension,
 } from "../extensions/discord-presence.ts";
 
 const CLIENT_ID = "123456789012345678";
@@ -1118,7 +1119,11 @@ test("detects WSL and selects the named-pipe relay transport", () => {
 		"wsl-relay",
 	);
 	assert.equal(
-		resolveDiscordTransportMode({ [TRANSPORT_ENV]: "ipc" }, "linux", "5.15.90.1-microsoft-standard-WSL2"),
+		resolveDiscordTransportMode(
+			{ [TRANSPORT_ENV]: "ipc" },
+			"linux",
+			"5.15.90.1-microsoft-standard-WSL2",
+		),
 		"ipc",
 	);
 	assert.equal(
@@ -1247,4 +1252,18 @@ test("multiple sessions share one publisher and fail over safely", async () => {
 
 	await second.stop();
 	assert.equal(secondTransport.clearCount, 1);
+});
+
+test("extension registers only unified 'discord' command and no redundant alias", () => {
+	const registeredCommands: string[] = [];
+	const dummyPi = {
+		registerCommand: (name: string) => {
+			registeredCommands.push(name);
+		},
+		on: () => {},
+	};
+	discordPresenceExtension(
+		dummyPi as unknown as Parameters<typeof discordPresenceExtension>[0],
+	);
+	assert.deepEqual(registeredCommands, ["discord"]);
 });

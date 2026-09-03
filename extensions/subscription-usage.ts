@@ -35,7 +35,35 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readStoredCredential } from "@earendil-works/pi-coding-agent";
+
+interface ApiKeyCredential {
+	type: "api_key";
+	key: string;
+}
+
+interface OAuthCredential {
+	type: "oauth";
+	access: string;
+	refresh?: string;
+	expires?: number;
+}
+
+type StoredCredential = ApiKeyCredential | OAuthCredential;
+
+const AUTH_PATH = path.join(os.homedir(), ".pi", "agent", "auth.json");
+
+function readStoredCredential(
+	providerId: string,
+	authPath = AUTH_PATH,
+): StoredCredential | undefined {
+	try {
+		const raw = fs.readFileSync(authPath, "utf8");
+		const data = JSON.parse(raw) as Record<string, StoredCredential>;
+		return data?.[providerId];
+	} catch {
+		return undefined;
+	}
+}
 
 const INTERVAL_MS = 5 * 60 * 1000; // idle refresh fallback
 const COOLDOWN_MS = 60 * 1000; // min gap between real fetches (event pokes)
@@ -106,10 +134,14 @@ function loadPrefs(): UsagePrefs {
 	}
 }
 
-function savePrefs(prefs: UsagePrefs): void {
+async function savePrefs(prefs: UsagePrefs): Promise<void> {
 	try {
-		fs.mkdirSync(path.dirname(PREFS_PATH), { recursive: true });
-		fs.writeFileSync(PREFS_PATH, `${JSON.stringify(prefs, null, 2)}\n`, "utf8");
+		await fs.promises.mkdir(path.dirname(PREFS_PATH), { recursive: true });
+		await fs.promises.writeFile(
+			PREFS_PATH,
+			`${JSON.stringify(prefs, null, 2)}\n`,
+			"utf8",
+		);
 	} catch (error) {
 		console.error("[subscription-usage] failed to save usage prefs:", error);
 	}
@@ -208,7 +240,7 @@ async function persistDiskCache(cache: DiskCache): Promise<void> {
 	const dir = path.dirname(CACHE_PATH);
 	await fs.promises.mkdir(dir, { recursive: true });
 	const contents = JSON.stringify(cache, null, 2);
-	const tmp = CACHE_PATH + `.${process.pid}.${Date.now()}.tmp`;
+	const tmp = `${CACHE_PATH}.${process.pid}.${Date.now()}.tmp`;
 	try {
 		await fs.promises.writeFile(tmp, contents, "utf8");
 		try {
@@ -314,12 +346,17 @@ export function bar(
 	const safePercent = normalizePercent(percent) ?? 0;
 	const filled = Math.round((safePercent / 100) * BAR_CELLS);
 	const cells = "█".repeat(filled) + "░".repeat(BAR_CELLS - filled);
-	const color =
-		safePercent > 90 ? "error" : safePercent > 70 ? "warning" : "dim";
-	let out = theme.fg(color, cells) + `  ${safePercent}%`;
+	let color = "dim";
+	if (safePercent > 90) {
+		color = "error";
+	} else if (safePercent > 70) {
+		color = "warning";
+	}
+	let out = `${theme.fg(color, cells)}  ${safePercent}%`;
 	const r = resets?.[key];
-	if (typeof r === "number" && Number.isFinite(r))
-		out += " " + theme.fg("dim", resetLabel(r, now));
+	if (typeof r === "number" && Number.isFinite(r)) {
+		out += ` ${theme.fg("dim", resetLabel(r, now))}`;
+	}
 	return out;
 }
 
@@ -337,12 +374,17 @@ export function windowSegment(
 ): string {
 	if (style === "percent") {
 		const safePercent = normalizePercent(percent) ?? 0;
-		const color =
-			safePercent > 90 ? "error" : safePercent > 70 ? "warning" : "dim";
+		let color = "dim";
+		if (safePercent > 90) {
+			color = "error";
+		} else if (safePercent > 70) {
+			color = "warning";
+		}
 		let out = theme.fg(color, `${safePercent}%`);
 		const r = resets?.[key];
-		if (typeof r === "number" && Number.isFinite(r))
-			out += " " + theme.fg("dim", resetLabel(r, now));
+		if (typeof r === "number" && Number.isFinite(r)) {
+			out += ` ${theme.fg("dim", resetLabel(r, now))}`;
+		}
 		return out;
 	}
 	return bar(percent, resets, key, theme, now);
@@ -430,6 +472,12 @@ export function earliestReset(
 }
 
 /** OpenCode Go: rolling / weekly / monthly usage windows. */
+const OPENCODE_WINDOW_LABELS = {
+	rolling: "R",
+	weekly: "W",
+	monthly: "M",
+} as const;
+
 export const opencodeCfg: ProviderCfg = {
 	id: "opencode-go",
 	async fetchUsage() {
@@ -473,18 +521,22 @@ export const opencodeCfg: ProviderCfg = {
 	},
 	render(data, theme, modelId, style = "bars") {
 		const w = data.windows;
-		const parts = (["rolling", "weekly", "monthly"] as const)
-			.filter((k) => typeof w[k] === "number")
-			.map((k) =>
-				labeledWindow(
-					k === "rolling" ? "R" : k === "weekly" ? "W" : "M",
-					w[k],
-					data.resets,
-					k,
-					theme,
-					style,
-				),
-			);
+		const parts: string[] = [];
+		for (const k of ["rolling", "weekly", "monthly"] as const) {
+			const val = w[k];
+			if (typeof val === "number") {
+				parts.push(
+					labeledWindow(
+						OPENCODE_WINDOW_LABELS[k],
+						val,
+						data.resets,
+						k,
+						theme,
+						style,
+					),
+				);
+			}
+		}
 		if (parts.length === 0) return "";
 
 		// DeepSeek pools flip on peak-hour windows; surface that countdown.
@@ -563,6 +615,13 @@ export function parseCodexUsage(json: CodexUsageResponse): UsageData {
 }
 
 /** OpenAI Codex (ChatGPT subscription): 5h rolling & weekly primary/secondary windows + plan type. */
+const CODEX_WINDOW_LABELS: Record<string, string> = {
+	"5h": "5h",
+	weekly: "W",
+	monthly: "M",
+	daily: "1d",
+};
+
 export const codexCfg: ProviderCfg = {
 	id: "openai-codex",
 	async fetchUsage() {
@@ -598,16 +657,7 @@ export const codexCfg: ProviderCfg = {
 		for (const k of orderedKeys) {
 			if (typeof w[k] === "number") {
 				seen.add(k);
-				const label =
-					k === "5h"
-						? "5h"
-						: k === "weekly"
-							? "W"
-							: k === "monthly"
-								? "M"
-								: k === "daily"
-									? "1d"
-									: k;
+				const label = CODEX_WINDOW_LABELS[k] ?? k;
 				parts.push(labeledWindow(label, w[k], data.resets, k, theme, style));
 			}
 		}
@@ -669,7 +719,7 @@ export const antigravityCfg: ProviderCfg = {
 			if (cred && cred.type === "oauth") {
 				access = cred.access;
 				refreshToken = cred.refresh;
-				expires = cred.expires || 0;
+				expires = typeof cred.expires === "number" ? cred.expires : 0;
 			}
 		}
 
@@ -705,7 +755,7 @@ export const antigravityCfg: ProviderCfg = {
 			}),
 		};
 
-		async function queryQuota(token: string) {
+		function queryQuota(token: string) {
 			return fetch(`${baseUrl}/v1internal:retrieveUserQuotaSummary`, {
 				method: "POST",
 				headers: { ...headers, Authorization: `Bearer ${token}` },
@@ -820,11 +870,13 @@ export const antigravityCfg: ProviderCfg = {
 			];
 		}
 
-		const parts = bucketKeys
-			.filter(([k]) => typeof w[k] === "number")
-			.map(([k, label]) =>
-				labeledWindow(label, w[k], data.resets, k, theme, style),
-			);
+		const parts: string[] = [];
+		for (const [k, label] of bucketKeys) {
+			const val = w[k];
+			if (typeof val === "number") {
+				parts.push(labeledWindow(label, val, data.resets, k, theme, style));
+			}
+		}
 
 		if (parts.length === 0) return "";
 		return joinParts(parts, theme);
@@ -906,9 +958,13 @@ export default function (pi: ExtensionAPI) {
 		if (cacheSyncTimer) return;
 		cacheSyncTimer = setTimeout(() => {
 			cacheSyncTimer = undefined;
-			void syncFromDisk().catch((error) => {
-				console.error("[subscription-usage] cache sync failed:", error);
-			});
+			void (async () => {
+				try {
+					await syncFromDisk();
+				} catch (error) {
+					console.error("[subscription-usage] cache sync failed:", error);
+				}
+			})();
 		}, 100);
 		cacheSyncTimer.unref?.();
 	}
@@ -1087,7 +1143,7 @@ export default function (pi: ExtensionAPI) {
 				);
 				if (state.lastText !== undefined && !state.lastText.includes("err")) {
 					// Keep the last known numbers, tinted so staleness is visible.
-					state.lastText = ui.theme.fg("warning", state.lastText + " ⚠");
+					state.lastText = ui.theme.fg("warning", `${state.lastText} ⚠`);
 					renderUi(ui, cfg.id, state.lastText);
 				} else {
 					state.lastText = ui.theme.fg("error", `${cfg.id}: err`);
@@ -1175,10 +1231,27 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Cycle subscription usage display: bars → percent → off (or set directly)",
 		getArgumentCompletions: (prefix) => {
-			const filtered = USAGE_MODES.filter((s) => s.startsWith(prefix));
-			return filtered.length > 0
-				? filtered.map((s) => ({ value: s, label: s }))
-				: null;
+			const items = [
+				{
+					value: "bars",
+					label: "bars",
+					description: "Visual quota progress bars",
+				},
+				{
+					value: "percent",
+					label: "percent",
+					description: "Compact percentage numbers",
+				},
+				{
+					value: "off",
+					label: "off",
+					description: "Hide usage readout completely",
+				},
+			];
+			const filtered = items.filter((item) =>
+				item.value.startsWith(prefix.trimStart().toLowerCase()),
+			);
+			return filtered.length > 0 ? filtered : null;
 		},
 		handler: async (args, ctx) => {
 			let next: UsageMode;
@@ -1199,7 +1272,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			mode = next;
-			savePrefs({ mode });
+			await savePrefs({ mode });
 
 			if (next === "off") {
 				// Hide: drop statuses and stop every timer/fetch for this session.
@@ -1247,8 +1320,11 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		stopDiskCacheWatcher();
-		clear(ctx, "opencode-go");
-		clear(ctx, "openai-codex");
-		clear(ctx, "antigravity");
+		if (cacheSyncTimer) {
+			clearTimeout(cacheSyncTimer);
+			cacheSyncTimer = undefined;
+		}
+		for (const c of cfgs) clear(ctx, c.id);
+		currentCtx = undefined;
 	});
 }
