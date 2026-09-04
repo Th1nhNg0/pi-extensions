@@ -1060,10 +1060,13 @@ export default function (pi: ExtensionAPI) {
 		return jitter(INTERVAL_MS);
 	}
 
+	// `hard` (manual /usage-refresh) also bypasses the MIN_FETCH_GAP_MS
+	// burst guard, so one keystroke always performs a live provider request.
 	async function refresh(
 		cfg: ProviderCfg,
 		ctx: StatusCtx,
 		force: boolean,
+		hard = false,
 	): Promise<"fetched" | "cached"> {
 		const state = cache.get(cfg.id) ?? freshState();
 		cache.set(cfg.id, state);
@@ -1109,8 +1112,8 @@ export default function (pi: ExtensionAPI) {
 
 			// Even on forced poke, if disk was updated within MIN_FETCH_GAP_MS
 			// (e.g. another session just fetched 2s ago), reuse it to avoid a
-			// duplicate burst request.
-			if (now - state.lastFetch < MIN_FETCH_GAP_MS && state.lastData) {
+			// duplicate burst request. Manual /usage-refresh (hard) skips this.
+			if (!hard && now - state.lastFetch < MIN_FETCH_GAP_MS && state.lastData) {
 				const ui = safeUi(ctx);
 				if (ui) {
 					state.lastText = renderText(cfg, state.lastData, ui, model?.id);
@@ -1303,6 +1306,42 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	/**
+	 * `/usage-refresh` — force a live refetch for the active provider right
+	 * now, bypassing the cooldown and burst guards. Useful when the source
+	 * API lags (e.g. Antigravity quota summary right after a reset) and you
+	 * want to rule out client-side staleness in one keystroke.
+	 */
+	pi.registerCommand("usage-refresh", {
+		description:
+			"Force-refresh subscription usage now, bypassing the fetch cooldown",
+		handler: async (_args, ctx) => {
+			const model = safeModel(ctx);
+			const cfg = cfgs.find((c) => c.id === model?.provider);
+			if (!cfg) {
+				ctx.ui.notify(
+					`No usage provider for "${model?.provider ?? "unknown"}"`,
+					"warning",
+				);
+				return;
+			}
+			const outcome = await refresh(cfg, ctx, true, true);
+			const s = cache.get(cfg.id);
+			const current = safeModel(ctx);
+			if (s && safeUi(ctx))
+				arm(cfg, ctx, nextDelay(s, Date.now(), current?.id, cfg.id));
+			if (mode === "off") {
+				ctx.ui.notify(`Usage refreshed for ${cfg.id} (display is off)`, "info");
+				return;
+			}
+			ctx.ui.notify(
+				outcome === "fetched"
+					? `Usage refreshed for ${cfg.id}`
+					: `Usage refresh finished from cache for ${cfg.id}`,
+				"info",
+			);
+		},
+	});
 	pi.on("session_start", async (_event, ctx) => {
 		startDiskCacheWatcher();
 		route(ctx, true);
