@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	bar,
+	antigravityEndpointCandidates,
 	cap,
 	codexCfg,
 	normalizeUsageData,
@@ -252,4 +253,18 @@ test("bar renders proper cell count and color bands", () => {
 	assert.equal(bar(150, undefined, "key", mockTheme), "██████  100%");
 	assert.equal(bar(-10, undefined, "key", mockTheme), "░░░░░░  0%");
 	assert.equal(bar(Number.NaN, undefined, "key", mockTheme), "░░░░░░  0%");
+});
+
+test("antigravity endpoint candidates use the canonical daily service first", () => {
+	assert.deepEqual(antigravityEndpointCandidates({}), [
+		"https://daily-cloudcode-pa.googleapis.com",
+		"https://daily-cloudcode-pa.sandbox.googleapis.com",
+		"https://cloudcode-pa.googleapis.com",
+	]);
+	assert.deepEqual(
+		antigravityEndpointCandidates({
+			ANTIGRAVITY_BASE_URL: " https://example.test ",
+		}),
+		["https://example.test"],
+	);
 });

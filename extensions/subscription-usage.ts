@@ -683,6 +683,29 @@ const ANTIGRAVITY_CLIENT_SECRET = Buffer.from(
 	"base64",
 ).toString("utf8");
 
+const ANTIGRAVITY_ENDPOINTS = [
+	"https://daily-cloudcode-pa.googleapis.com",
+	"https://daily-cloudcode-pa.sandbox.googleapis.com",
+	"https://cloudcode-pa.googleapis.com",
+] as const;
+const RETRYABLE_ANTIGRAVITY_STATUSES = new Set([
+	403,
+	404,
+	429,
+	500,
+	502,
+	503,
+	504,
+]);
+
+/** Match pi-antigravity's endpoint order so quota reads use the same pool. */
+export function antigravityEndpointCandidates(
+	env: NodeJS.ProcessEnv = process.env,
+): string[] {
+	const explicit = env.ANTIGRAVITY_BASE_URL?.trim();
+	return explicit ? [explicit] : [...ANTIGRAVITY_ENDPOINTS];
+}
+
 async function refreshAntigravityToken(refreshToken: string): Promise<string> {
 	const res = await fetch("https://oauth2.googleapis.com/token", {
 		method: "POST",
@@ -738,9 +761,7 @@ export const antigravityCfg: ProviderCfg = {
 		}
 		if (!access) throw new Error("antigravity access token is unavailable");
 
-		const baseUrl =
-			process.env.ANTIGRAVITY_BASE_URL?.trim() ||
-			"https://cloudcode-pa.googleapis.com";
+		const endpoints = antigravityEndpointCandidates();
 		const headers: Record<string, string> = {
 			Authorization: `Bearer ${access}`,
 			"Content-Type": "application/json",
@@ -755,20 +776,48 @@ export const antigravityCfg: ProviderCfg = {
 			}),
 		};
 
-		function queryQuota(token: string) {
-			return fetch(`${baseUrl}/v1internal:retrieveUserQuotaSummary`, {
-				method: "POST",
-				headers: { ...headers, Authorization: `Bearer ${token}` },
-				body: JSON.stringify({}),
-				signal: AbortSignal.timeout(10_000),
-			});
+		async function queryQuota(
+			token: string,
+		): Promise<{ response: Response; endpoint: string }> {
+			let lastResponse: Response | undefined;
+			let lastEndpoint: string | undefined;
+			let lastError: unknown;
+			for (const endpoint of endpoints) {
+				try {
+					const response = await fetch(
+						`${endpoint}/v1internal:retrieveUserQuotaSummary`,
+						{
+							method: "POST",
+							headers: { ...headers, Authorization: `Bearer ${token}` },
+							body: JSON.stringify({}),
+							signal: AbortSignal.timeout(10_000),
+						},
+					);
+					lastResponse = response;
+					lastEndpoint = endpoint;
+					if (response.ok || !RETRYABLE_ANTIGRAVITY_STATUSES.has(response.status)) {
+						return { response, endpoint };
+					}
+					await response.arrayBuffer().catch(() => undefined);
+				} catch (error) {
+					lastError = error;
+				}
+			}
+			if (lastResponse && lastEndpoint) {
+				return { response: lastResponse, endpoint: lastEndpoint };
+			}
+			throw lastError instanceof Error
+				? lastError
+				: new Error("all Antigravity quota endpoints failed");
 		}
 
-		let resQuota = await queryQuota(access);
-		if (resQuota.status === 401 && refreshToken) {
+		let quotaResult = await queryQuota(access);
+		if (quotaResult.response.status === 401 && refreshToken) {
 			access = await refreshAntigravityToken(refreshToken);
-			resQuota = await queryQuota(access);
+			quotaResult = await queryQuota(access);
 		}
+		const resQuota = quotaResult.response;
+		const baseUrl = quotaResult.endpoint;
 
 		if (!resQuota.ok) throw new Error(`HTTP ${resQuota.status}`);
 		const quotaJson = (await resQuota.json()) as {
