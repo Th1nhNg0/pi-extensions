@@ -17,6 +17,9 @@ import {
 	parseCodexUsage,
 	resetLabel,
 	windowSegment,
+	getDeepSeekPeakInfo,
+	antigravityCfg,
+	opencodeCfg,
 	type CodexUsageResponse,
 	type UsageData,
 } from "../extensions/subscription-usage.ts";
@@ -314,4 +317,46 @@ test("formatUsageDetails handles missing resets and empty data", () => {
 	assert.match(text, /Subscription usage — opencode-go/);
 	assert.match(text, /• rolling: 2% ░░░░░░/);
 	assert.equal(formatUsageDetails({ windows: {} }, "openai-codex"), "openai-codex: no usage data");
+});
+
+test("getDeepSeekPeakInfo accurately classifies UTC peak and off-peak windows", () => {
+	// 00:30 UTC -> off-peak (30m until peak window 1 at 01:00)
+	const t0030 = Date.parse("2026-09-06T00:30:00.000Z");
+	const info0030 = getDeepSeekPeakInfo(t0030);
+	assert.equal(info0030.isPeak, false);
+	assert.equal(info0030.nextFlipMs, Date.parse("2026-09-06T01:00:00.000Z"));
+
+	// 01:00 UTC -> peak window 1 starts (3h left until 04:00)
+	const t0100 = Date.parse("2026-09-06T01:00:00.000Z");
+	const info0100 = getDeepSeekPeakInfo(t0100);
+	assert.equal(info0100.isPeak, true);
+	assert.equal(info0100.nextFlipMs, Date.parse("2026-09-06T04:00:00.000Z"));
+
+	// 04:00 UTC -> off-peak (2h until peak window 2 at 06:00)
+	const t0400 = Date.parse("2026-09-06T04:00:00.000Z");
+	const info0400 = getDeepSeekPeakInfo(t0400);
+	assert.equal(info0400.isPeak, false);
+	assert.equal(info0400.nextFlipMs, Date.parse("2026-09-06T06:00:00.000Z"));
+
+	// 06:00 UTC -> peak window 2 starts (4h left until 10:00)
+	const t0600 = Date.parse("2026-09-06T06:00:00.000Z");
+	const info0600 = getDeepSeekPeakInfo(t0600);
+	assert.equal(info0600.isPeak, true);
+	assert.equal(info0600.nextFlipMs, Date.parse("2026-09-06T10:00:00.000Z"));
+
+	// 10:00 UTC -> off-peak until 01:00 UTC tomorrow (15h until peak)
+	const t1000 = Date.parse("2026-09-06T10:00:00.000Z");
+	const info1000 = getDeepSeekPeakInfo(t1000);
+	assert.equal(info1000.isPeak, false);
+	assert.equal(info1000.nextFlipMs, Date.parse("2026-09-07T01:00:00.000Z"));
+});
+
+test("earliestReset falls back to standard interval if expired reset was already fetched", () => {
+	const now = 1_000_000;
+	const data: UsageData = {
+		windows: { "5h": 20 },
+		resets: { "5h": now - 10_000 },
+	};
+	const earliest = earliestReset(data, "gpt-5", "openai-codex", now);
+	assert.equal(earliest, now - 10_000);
 });

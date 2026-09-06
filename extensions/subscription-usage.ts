@@ -287,7 +287,7 @@ async function saveDiskCache(
 
 interface ProviderCfg {
 	id: string;
-	fetchUsage: () => Promise<UsageData>;
+	fetchUsage: (signal?: AbortSignal) => Promise<UsageData>;
 	render: (
 		data: UsageData,
 		theme: { fg(color: string, text: string): string },
@@ -306,13 +306,16 @@ interface StatusCtx {
 
 /** Per-provider scheduler state: timers, backoff counter, cached results. */
 interface ProviderState {
-	lastFetch: number; // when we last actually hit the API
+	lastFetch: number; // when we last successfully retrieved fresh data from API/cache
+	lastAttempt: number; // when we last attempted a fetch
 	lastText: string | undefined;
 	lastData: UsageData | undefined; // last successful payload (reset times)
 	failStreak: number; // consecutive failures → exponential backoff
 	timer: ReturnType<typeof setTimeout> | undefined;
+	timerDeadline?: number;
 	inFlight: Promise<"fetched" | "cached"> | undefined;
 	requestId: number;
+	abortController?: AbortController;
 }
 
 export function cap(s: string): string {
@@ -571,20 +574,30 @@ const OPENCODE_WINDOW_LABELS = {
 	monthly: "M",
 } as const;
 
+function anySignal(a?: AbortSignal, b?: AbortSignal): AbortSignal {
+	if (!a) return b ?? new AbortController().signal;
+	if (!b) return a;
+	return AbortSignal.any([a, b]);
+}
+
 export const opencodeCfg: ProviderCfg = {
 	id: "opencode-go",
-	async fetchUsage() {
-		const fromEnv = process.env.OPENCODE_API_KEY;
-		const cred = fromEnv ? undefined : readStoredCredential("opencode-go");
+	async fetchUsage(signal?: AbortSignal) {
+		const rawEnv = process.env.OPENCODE_API_KEY?.trim();
+		const cred = rawEnv ? undefined : readStoredCredential("opencode-go");
 		const key =
-			fromEnv ?? (cred && cred.type === "api_key" ? cred.key : undefined);
+			(rawEnv && rawEnv.length > 0 ? rawEnv : undefined) ??
+			(cred && cred.type === "api_key" ? cred.key : undefined);
 		if (!key) throw new Error("no API key (OPENCODE_API_KEY or auth.json)");
 
 		const res = await fetch("https://opencode.ai/zen/go/v1/usage", {
 			headers: { Authorization: `Bearer ${key}` },
-			signal: AbortSignal.timeout(10_000),
+			signal: anySignal(signal, AbortSignal.timeout(10_000)),
 		});
-		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		if (!res.ok) {
+			await res.body?.cancel().catch(() => undefined);
+			throw new Error(`HTTP ${res.status}`);
+		}
 		const json = (await res.json()) as {
 			usage?: Record<
 				string,
@@ -717,14 +730,16 @@ const CODEX_WINDOW_LABELS: Record<string, string> = {
 
 export const codexCfg: ProviderCfg = {
 	id: "openai-codex",
-	async fetchUsage() {
-		const fromEnv =
+	async fetchUsage(signal?: AbortSignal) {
+		const fromEnv = (
 			process.env.OPENAI_CODEX_TOKEN ||
 			process.env.CODEX_ACCESS_TOKEN ||
-			process.env.CHATGPT_ACCESS_TOKEN;
+			process.env.CHATGPT_ACCESS_TOKEN
+		)?.trim();
 		const cred = fromEnv ? undefined : readStoredCredential("openai-codex");
 		const access =
-			fromEnv ?? (cred && cred.type === "oauth" ? cred.access : undefined);
+			(fromEnv && fromEnv.length > 0 ? fromEnv : undefined) ??
+			(cred && cred.type === "oauth" ? cred.access : undefined);
 		if (!access) throw new Error("no OAuth token for openai-codex");
 
 		const res = await fetch("https://chatgpt.com/backend-api/codex/usage", {
@@ -734,9 +749,12 @@ export const codexCfg: ProviderCfg = {
 					"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 				Accept: "application/json",
 			},
-			signal: AbortSignal.timeout(10_000),
+			signal: anySignal(signal, AbortSignal.timeout(10_000)),
 		});
-		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		if (!res.ok) {
+			await res.body?.cancel().catch(() => undefined);
+			throw new Error(`HTTP ${res.status}`);
+		}
 		const json = (await res.json()) as CodexUsageResponse;
 		return parseCodexUsage(json);
 	},
@@ -799,7 +817,21 @@ export function antigravityEndpointCandidates(
 	return explicit ? [explicit] : [...ANTIGRAVITY_ENDPOINTS];
 }
 
-async function refreshAntigravityToken(refreshToken: string): Promise<string> {
+interface CachedAntigravityToken {
+	token: string;
+	expiresAt: number;
+}
+let cachedAntigravityToken: CachedAntigravityToken | undefined;
+let cachedAntigravityTier: { plan: string | undefined; cachedAt: number } | undefined;
+const TIER_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+async function refreshAntigravityToken(
+	refreshToken: string,
+	signal?: AbortSignal,
+): Promise<string> {
+	if (cachedAntigravityToken && Date.now() < cachedAntigravityToken.expiresAt) {
+		return cachedAntigravityToken.token;
+	}
 	const res = await fetch("https://oauth2.googleapis.com/token", {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -810,23 +842,31 @@ async function refreshAntigravityToken(refreshToken: string): Promise<string> {
 			refresh_token: refreshToken,
 			grant_type: "refresh_token",
 		}).toString(),
-		signal: AbortSignal.timeout(10_000),
+		signal: anySignal(signal, AbortSignal.timeout(10_000)),
 	});
-	if (!res.ok) throw new Error(`token refresh HTTP ${res.status}`);
-	const data = (await res.json()) as { access_token?: unknown };
+	if (!res.ok) {
+		await res.body?.cancel().catch(() => undefined);
+		throw new Error(`token refresh HTTP ${res.status}`);
+	}
+	const data = (await res.json()) as { access_token?: unknown; expires_in?: unknown };
 	if (typeof data.access_token !== "string" || !data.access_token) {
 		throw new Error("token refresh response did not include an access token");
 	}
+	const expiresInSec = typeof data.expires_in === "number" ? data.expires_in : 3600;
+	cachedAntigravityToken = {
+		token: data.access_token,
+		expiresAt: Date.now() + Math.max(60_000, (expiresInSec - 60) * 1000),
+	};
 	return data.access_token;
 }
 
 /** Antigravity (Google Cloud Code Assist): 5h & weekly pools for Gemini and Claude/GPT models. */
 export const antigravityCfg: ProviderCfg = {
 	id: "antigravity",
-	async fetchUsage() {
+	async fetchUsage(signal?: AbortSignal) {
 		const fromEnv =
 			process.env.ANTIGRAVITY_TOKEN || process.env.ANTIGRAVITY_API_KEY;
-		let access = fromEnv;
+		let access = fromEnv?.trim();
 		let refreshToken: string | undefined;
 		let expires = 0;
 
@@ -847,7 +887,7 @@ export const antigravityCfg: ProviderCfg = {
 			(!access || (expires > 0 && Date.now() >= expires - 60_000))
 		) {
 			try {
-				access = await refreshAntigravityToken(refreshToken);
+				access = await refreshAntigravityToken(refreshToken, signal);
 			} catch (e) {
 				if (!access) throw e;
 			}
@@ -883,7 +923,7 @@ export const antigravityCfg: ProviderCfg = {
 							method: "POST",
 							headers: { ...headers, Authorization: `Bearer ${token}` },
 							body: JSON.stringify({}),
-							signal: AbortSignal.timeout(10_000),
+							signal: anySignal(signal, AbortSignal.timeout(10_000)),
 						},
 					);
 					lastResponse = response;
@@ -891,7 +931,7 @@ export const antigravityCfg: ProviderCfg = {
 					if (response.ok || !RETRYABLE_ANTIGRAVITY_STATUSES.has(response.status)) {
 						return { response, endpoint };
 					}
-					await response.arrayBuffer().catch(() => undefined);
+					await response.body?.cancel().catch(() => undefined);
 				} catch (error) {
 					lastError = error;
 				}
@@ -906,13 +946,17 @@ export const antigravityCfg: ProviderCfg = {
 
 		let quotaResult = await queryQuota(access);
 		if (quotaResult.response.status === 401 && refreshToken) {
-			access = await refreshAntigravityToken(refreshToken);
+			cachedAntigravityToken = undefined;
+			access = await refreshAntigravityToken(refreshToken, signal);
 			quotaResult = await queryQuota(access);
 		}
 		const resQuota = quotaResult.response;
 		const baseUrl = quotaResult.endpoint;
 
-		if (!resQuota.ok) throw new Error(`HTTP ${resQuota.status}`);
+		if (!resQuota.ok) {
+			await resQuota.body?.cancel().catch(() => undefined);
+			throw new Error(`HTTP ${resQuota.status}`);
+		}
 		const quotaJson = (await resQuota.json()) as {
 			groups?: Array<{
 				displayName?: string;
@@ -948,35 +992,43 @@ export const antigravityCfg: ProviderCfg = {
 
 		if (Object.keys(windows).length === 0) throw new Error("no usage data");
 
-		let plan: string | undefined;
-		try {
-			const resAssist = await fetch(`${baseUrl}/v1internal:loadCodeAssist`, {
-				method: "POST",
-				headers: { ...headers, Authorization: `Bearer ${access}` },
-				body: JSON.stringify({
-					metadata: {
-						ideType: "ANTIGRAVITY",
-						platform: "PLATFORM_UNSPECIFIED",
-						pluginType: "GEMINI",
-					},
-				}),
-				signal: AbortSignal.timeout(10_000),
-			});
-			if (resAssist.ok) {
-				const assistJson = (await resAssist.json()) as {
-					paidTier?: { id?: string; name?: string };
-					currentTier?: { id?: string; name?: string };
-				};
-				const paid = assistJson.paidTier?.name;
-				const current = assistJson.currentTier?.name;
-				if (paid) {
-					plan = paid.replace(/^Google AI\s*/i, "");
-				} else if (current) {
-					plan = current === "Antigravity" ? "Free" : current;
+		let plan =
+			cachedAntigravityTier && Date.now() - cachedAntigravityTier.cachedAt < TIER_CACHE_TTL_MS
+				? cachedAntigravityTier.plan
+				: undefined;
+		if (plan === undefined) {
+			try {
+				const resAssist = await fetch(`${baseUrl}/v1internal:loadCodeAssist`, {
+					method: "POST",
+					headers: { ...headers, Authorization: `Bearer ${access}` },
+					body: JSON.stringify({
+						metadata: {
+							ideType: "ANTIGRAVITY",
+							platform: "PLATFORM_UNSPECIFIED",
+							pluginType: "GEMINI",
+						},
+					}),
+					signal: anySignal(signal, AbortSignal.timeout(10_000)),
+				});
+				if (resAssist.ok) {
+					const assistJson = (await resAssist.json()) as {
+						paidTier?: { id?: string; name?: string };
+						currentTier?: { id?: string; name?: string };
+					};
+					const paid = assistJson.paidTier?.name;
+					const current = assistJson.currentTier?.name;
+					if (paid) {
+						plan = paid.replace(/^Google AI\s*/i, "");
+					} else if (current) {
+						plan = current === "Antigravity" ? "Free" : current;
+					}
+					cachedAntigravityTier = { plan, cachedAt: Date.now() };
+				} else {
+					await resAssist.body?.cancel().catch(() => undefined);
 				}
+			} catch {
+				// ignore tier lookup failure
 			}
-		} catch {
-			// ignore tier lookup failure
 		}
 
 		return { windows, plan, resets };
@@ -1059,12 +1111,15 @@ export default function (pi: ExtensionAPI) {
 	function freshState(): ProviderState {
 		return {
 			lastFetch: 0,
+			lastAttempt: 0,
 			lastText: undefined,
 			lastData: undefined,
 			failStreak: 0,
 			timer: undefined,
+			timerDeadline: undefined,
 			inFlight: undefined,
 			requestId: 0,
+			abortController: undefined,
 		};
 	}
 
@@ -1198,13 +1253,12 @@ export default function (pi: ExtensionAPI) {
 		if (reset !== undefined) {
 			const dt = reset - now;
 			if (dt <= 0) {
-				// A window flipped while we weren't looking — catch up soon.
-				// The cooldown inside refresh() still gates the actual HTTP call.
+				if (state.lastFetch >= reset) {
+					return jitter(INTERVAL_MS);
+				}
 				return jitter(Math.min(COOLDOWN_MS, INTERVAL_MS));
 			}
 			if (dt < INTERVAL_MS + RESET_CATCH_DELAY_MS) {
-				// Reset is imminent: wake right after it so the fresh pool
-				// shows up instead of sleeping through the flip.
 				return Math.max(dt + RESET_CATCH_DELAY_MS, MIN_FETCH_GAP_MS);
 			}
 		}
@@ -1222,11 +1276,15 @@ export default function (pi: ExtensionAPI) {
 	): Promise<"fetched" | "cached"> {
 		const state = cache.get(cfg.id) ?? freshState();
 		cache.set(cfg.id, state);
-		if (state.inFlight && !force) return state.inFlight;
+		if (state.inFlight && !hard) return state.inFlight;
 		const requestId = state.requestId + 1;
 		state.requestId = requestId;
 		const isCurrentRequest = (): boolean =>
 			cache.get(cfg.id) === state && state.requestId === requestId;
+
+		state.abortController?.abort();
+		const ac = new AbortController();
+		state.abortController = ac;
 
 		const request = (async (): Promise<"fetched" | "cached"> => {
 			const now = Date.now();
@@ -1252,7 +1310,7 @@ export default function (pi: ExtensionAPI) {
 				!force &&
 				!scheduled &&
 				state.lastText !== undefined &&
-				(now - state.lastFetch < COOLDOWN_MS ||
+				(now - state.lastAttempt < COOLDOWN_MS ||
 					(state.failStreak > 0 && !resetSoon))
 			) {
 				const ui = safeUi(ctx);
@@ -1275,13 +1333,13 @@ export default function (pi: ExtensionAPI) {
 				return "cached";
 			}
 
-			state.lastFetch = now;
+			state.lastAttempt = now;
 			try {
-				const data = normalizeUsageData(await cfg.fetchUsage());
+				const data = normalizeUsageData(await cfg.fetchUsage(ac.signal));
 				if (!data) throw new Error("provider returned no valid usage data");
-				// The session or model may have changed while awaiting the fetch.
 				const ui = safeUi(ctx);
 				if (!ui || !isCurrentRequest()) return "cached";
+				state.lastFetch = now;
 				state.failStreak = 0;
 				state.lastData = data;
 				state.lastText = renderText(cfg, data, ui, model?.id);
@@ -1289,7 +1347,6 @@ export default function (pi: ExtensionAPI) {
 				await saveDiskCache(cfg.id, data);
 				return "fetched";
 			} catch (err) {
-				// Stale ctx after session replacement: drop quietly, don't crash.
 				const ui = safeUi(ctx);
 				if (!ui || !isCurrentRequest()) return "cached";
 				state.failStreak += 1;
@@ -1297,9 +1354,9 @@ export default function (pi: ExtensionAPI) {
 					`[${cfg.id}-usage] fetch failed (${state.failStreak}×): ` +
 						(err instanceof Error ? err.message : String(err)),
 				);
-				if (state.lastText !== undefined && !state.lastText.includes("err")) {
-					// Keep the last known numbers, tinted so staleness is visible.
-					state.lastText = ui.theme.fg("warning", `${state.lastText} ⚠`);
+				if (state.lastData) {
+					const base = renderText(cfg, state.lastData, ui, model?.id);
+					state.lastText = ui.theme.fg("warning", `${base} ⚠`);
 					renderUi(ui, cfg.id, state.lastText);
 				} else {
 					state.lastText = ui.theme.fg("error", `${cfg.id}: err`);
@@ -1312,6 +1369,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			return await request;
 		} finally {
+			if (state.abortController === ac) state.abortController = undefined;
 			if (state.inFlight === request) state.inFlight = undefined;
 		}
 	}
@@ -1321,47 +1379,40 @@ export default function (pi: ExtensionAPI) {
 		const state = cache.get(cfg.id) ?? freshState();
 		if (state.timer) clearTimeout(state.timer);
 		cache.set(cfg.id, state);
+		state.timerDeadline = Date.now() + delayMs;
 		state.timer = setTimeout(() => {
 			state.timer = undefined;
+			state.timerDeadline = undefined;
 			void (async () => {
-				// Bail if the session is gone or this exact provider state was
-				// cleared (e.g. the model switched away and back).
 				if (!safeUi(ctx) || cache.get(cfg.id) !== state) return;
-				// The timer already waited out backoff/reset delay. Only event pokes
-				// use the cooldown gate; scheduled retries must be allowed to recover.
 				await refresh(cfg, ctx, false, false, true);
 				if (!safeUi(ctx) || cache.get(cfg.id) !== state) return;
 				const model = safeModel(ctx);
 				arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
 			})();
 		}, delayMs);
-		// Don't keep the process alive on the timer alone (unref is a no-op
-		// inside pi's TUI, where the render loop already holds the event loop).
 		state.timer.unref?.();
 	}
 
 	/** Immediate refresh + rearm from the fresh outcome (used by events). */
 	function poke(cfg: ProviderCfg, ctx: StatusCtx, force: boolean) {
-		const state = cache.get(cfg.id);
-		if (state?.timer) {
-			clearTimeout(state.timer);
-			state.timer = undefined;
-		}
 		void (async () => {
 			if (!safeUi(ctx)) return;
-			await refresh(cfg, ctx, force);
-			// Rearm from the result, unless the session was replaced or this
-			// provider got cleared while we were awaiting.
+			const outcome = await refresh(cfg, ctx, force);
 			const s = cache.get(cfg.id);
 			const model = safeModel(ctx);
-			if (s && safeUi(ctx))
-				arm(cfg, ctx, nextDelay(s, Date.now(), model?.id, cfg.id));
+			if (s && safeUi(ctx)) {
+				if (outcome === "fetched" || !s.timer) {
+					arm(cfg, ctx, nextDelay(s, Date.now(), model?.id, cfg.id));
+				}
+			}
 		})();
 	}
 
 	function clear(ctx: StatusCtx, key: string) {
 		const state = cache.get(key);
 		if (state?.timer) clearTimeout(state.timer);
+		state?.abortController?.abort();
 		cache.delete(key);
 		renderUi(safeUi(ctx), key, undefined);
 	}
@@ -1369,16 +1420,21 @@ export default function (pi: ExtensionAPI) {
 	/** Route to the right provider config for the active model. */
 	function route(ctx: StatusCtx, force: boolean) {
 		currentCtx = ctx;
-		// Hidden mode: no statuses, no timers, no fetches at all.
-		if (mode === "off") return;
+		if (mode === "off") {
+			stopDiskCacheWatcher();
+			return;
+		}
 		const provider = safeModel(ctx)?.provider;
 		const active = cfgs.find((c) => c.id === provider);
-		// Clear statuses+timers for all non-matching providers first, then
-		// poke the active one (which re-arms with its own adaptive timer).
 		for (const c of cfgs) {
 			if (c !== active) clear(ctx, c.id);
 		}
-		if (active) poke(active, ctx, force);
+		if (active) {
+			startDiskCacheWatcher();
+			poke(active, ctx, force);
+		} else {
+			stopDiskCacheWatcher();
+		}
 	}
 
 	/**
@@ -1413,6 +1469,7 @@ export default function (pi: ExtensionAPI) {
 		await savePrefs({ mode });
 
 		if (next === "off") {
+			stopDiskCacheWatcher();
 			// Hide: drop statuses and stop every timer/fetch for this session.
 			for (const c of cfgs) clear(ctx, c.id);
 			ctx.ui.notify("Subscription usage hidden (/usage toggle restores it)", "info");
@@ -1551,7 +1608,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				const s = cache.get(activeCfg.id);
 				const current = safeModel(ctx);
-				if (s && safeUi(ctx) && mode !== "off")
+				if (s && safeUi(ctx))
 					arm(activeCfg, ctx, nextDelay(s, Date.now(), current?.id, activeCfg.id));
 			}
 			const sections: string[] = [];

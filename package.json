@@ -22,7 +22,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test tests/*.test.mts"
+    "test": "node --test tests/*.test.mts",
+    "typecheck": "tsc --noEmit"
   },
   "pi": {
     "extensions": [
@@ -34,6 +35,7 @@
     "@xhayper/discord-rpc": "1.3.4"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "typescript": "^7.0.2"
   }
 }

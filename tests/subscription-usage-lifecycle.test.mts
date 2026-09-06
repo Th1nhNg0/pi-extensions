@@ -96,7 +96,7 @@ test("manual refresh while hidden does not fetch, render, or start polling", asy
 test("hiding usage discards an outstanding provider result", async (t) => {
 	const h = harness(t);
 	let finish!: (data: { windows: Record<string, number> }) => void;
-	h.fetch.mock.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+	h.fetch.mock.mockImplementation(() => new Promise<{ windows: Record<string, number> }>((resolve) => { finish = resolve; }));
 	await h.event("session_start");
 	await h.commands.get("usage")!.handler("toggle off", h.ctx);
 	finish({ windows: { "5h": 12 } });
@@ -195,4 +195,65 @@ test("/usage help and unknown subcommands notify", async (t) => {
 	await flush();
 	assert.match(notices[0], /\/usage toggle/);
 	assert.match(notices[1], /Unknown subcommand/);
+});
+
+test("event pokes arriving during retry backoff do not postpone the retry deadline", async (t) => {
+	const h = harness(t);
+	let attempts = 0;
+	h.fetch.mock.mockImplementation(async () => {
+		if (++attempts === 1) throw new Error("outage");
+		return { windows: { "5h": 50 } };
+	});
+
+	await h.event("session_start");
+	assert.equal(attempts, 1);
+
+	// Poke halfway through the 20s backoff (at 10s)
+	t.mock.timers.tick(10_000);
+	await h.event("agent_settled");
+	assert.equal(attempts, 1);
+
+	// Advance the remaining 10s to reach the original 20s deadline
+	t.mock.timers.tick(10_000);
+	await flush();
+	// The retry must fire at the original 20s deadline, NOT postponed to 30s!
+	assert.equal(attempts, 2);
+	assert.match(h.statuses.get("openai-codex")!, /50%/);
+});
+
+test("toggling usage off aborts active fetch via signal", async (t) => {
+	const h = harness(t);
+	let receivedSignal: AbortSignal | undefined;
+	h.fetch.mock.mockImplementation(async (signal?: AbortSignal) => {
+		receivedSignal = signal;
+		return new Promise<{ windows: Record<string, number> }>((_, reject) => {
+			signal?.addEventListener("abort", () => reject(new Error("aborted")));
+		});
+	});
+
+	await h.event("session_start");
+	assert.ok(receivedSignal);
+	assert.equal(receivedSignal.aborted, false);
+
+	await h.commands.get("usage")!.handler("toggle off", h.ctx);
+	await flush();
+	assert.equal(receivedSignal.aborted, true);
+});
+
+test("concurrent model selections coalesce in-flight fetch without duplicate HTTP requests", async (t) => {
+	const h = harness(t);
+	let finish!: (d: { windows: Record<string, number> }) => void;
+	h.fetch.mock.mockImplementation(async () => new Promise<{ windows: Record<string, number> }>((resolve) => { finish = resolve; }));
+
+	await h.event("session_start");
+	assert.equal(h.fetch.mock.callCount(), 1);
+
+	// Rapid model selections while request is in flight
+	await h.event("model_select");
+	await h.event("model_select");
+	assert.equal(h.fetch.mock.callCount(), 1);
+
+	finish({ windows: { "5h": 25 } });
+	await flush();
+	assert.match(h.statuses.get("openai-codex")!, /25%/);
 });

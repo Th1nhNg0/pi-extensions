@@ -47,7 +47,53 @@ export const ENABLED_ENV = "PI_DISCORD_ENABLED";
 
 export const TRANSPORT_ENV = "PI_DISCORD_TRANSPORT";
 export const NPIPERELAY_ENV = "PI_DISCORD_NPIPERELAY";
+export const MIN_INTERVAL_ENV = "PI_DISCORD_MIN_INTERVAL_MS";
+export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
+export const IS_SUBAGENT_ENV = "PI_IS_SUBAGENT";
 
+export const DEFAULT_MIN_PUBLISH_INTERVAL_MS = 2_000;
+export const RATE_LIMIT_BACKOFF_MS = 5_000;
+
+/** Detect whether the current process is running inside a subagent child run. */
+export function isSubagentEnvironment(
+	env: NodeJS.ProcessEnv = process.env,
+): boolean {
+	return Boolean(
+		env.PI_SUBAGENT_CHILD === "1" ||
+			env.PI_SUBAGENT_CHILD === "true" ||
+			env.PI_IS_SUBAGENT === "1" ||
+			env.PI_IS_SUBAGENT === "true",
+	);
+}
+
+/** Detect whether a session context belongs to a subagent child run. */
+export function isSubagentSession(
+	ctx?: {
+		cwd?: string;
+		sessionManager?: { getSessionFile?: () => string | undefined };
+	},
+	env: NodeJS.ProcessEnv = process.env,
+): boolean {
+	if (isSubagentEnvironment(env)) return true;
+	if (!ctx) return false;
+	const cwd = ctx.cwd ?? "";
+	if (
+		cwd.includes("pi-worktree-") ||
+		cwd.includes("/.pi/subagents/") ||
+		cwd.includes("\\.pi\\subagents\\")
+	) {
+		return true;
+	}
+	const sessionFile = ctx.sessionManager?.getSessionFile?.() ?? "";
+	if (
+		sessionFile.includes("pi-worktree-") ||
+		sessionFile.includes("/.pi/subagents/") ||
+		sessionFile.includes("\\.pi\\subagents\\")
+	) {
+		return true;
+	}
+	return false;
+}
 export type DiscordTransportMode = "ipc" | "wsl-relay";
 
 /** Detect WSL without treating ordinary Linux as a Windows host. */
@@ -253,6 +299,24 @@ export interface SessionRecord {
 	usage: UsageTotals;
 	context?: ContextSnapshot;
 	activeSubagents?: number;
+	isSubagent?: boolean;
+}
+
+/** Check whether a session record belongs to a subagent child rather than a main session. */
+export function isSubagentRecord(record: SessionRecord): boolean {
+	if (record.isSubagent === true) return true;
+	const pName = record.projectName.toLowerCase();
+	const sId = record.sessionId.toLowerCase();
+	if (pName.includes("pi-worktree-") || sId.includes("pi-worktree-")) return true;
+	if (
+		pName.includes("/.pi/subagents/") ||
+		pName.includes("\\.pi\\subagents\\") ||
+		sId.includes("/.pi/subagents/") ||
+		sId.includes("\\.pi\\subagents\\")
+	) {
+		return true;
+	}
+	return false;
 }
 
 export interface PresenceState {
@@ -338,6 +402,8 @@ export interface PresenceManagerOptions {
 	largeImageKey?: string;
 	smallImageKey?: string;
 	initialActiveSubagents?: number;
+	isSubagent?: boolean;
+	minPublishIntervalMs?: number;
 }
 
 function defaultLogger(message: string): void {
@@ -377,7 +443,18 @@ export async function writePrefs(
 ): Promise<void> {
 	try {
 		await mkdir(dirname(filePath), { recursive: true });
-		await writeFile(filePath, JSON.stringify(prefs, null, 2), "utf8");
+		const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+		const contents = JSON.stringify(prefs, null, 2);
+		try {
+			await writeFile(tempPath, contents, "utf8");
+			try {
+				await rename(tempPath, filePath);
+			} catch {
+				await writeFile(filePath, contents, "utf8");
+			}
+		} finally {
+			await rm(tempPath, { force: true }).catch(() => undefined);
+		}
 	} catch {
 		// Non-fatal if the filesystem is read-only
 	}
@@ -497,6 +574,7 @@ function summarizeRecords(records: readonly SessionRecord[]): AggregateSummary {
 	let startTimestamp = Number.POSITIVE_INFINITY;
 	let subagentCount = 0;
 	for (const record of records) {
+		if (isSubagentRecord(record)) continue;
 		projects.add(record.projectName);
 		startTimestamp = Math.min(startTimestamp, record.startedAt);
 		usage.input += record.usage.input;
@@ -1126,8 +1204,9 @@ export function buildSingleSessionActivity(
 export function buildMultiSessionActivity(
 	state: PresenceState,
 	options: ActivityBuildOptions = {},
+	orderedRecords?: SessionRecord[],
 ): PresenceActivity {
-	const records = orderedSessions(state);
+	const records = orderedRecords ?? orderedSessions(state);
 	if (records.length === 0) {
 		return {
 			details: "0 Pi sessions · 0 tok",
@@ -1173,14 +1252,14 @@ export function buildAggregateActivity(
 		return {
 			details: "0 Pi sessions · 0 tok",
 			state: "Pi · Idle",
-			startTimestamp: Date.now(),
+			startTimestamp: state.updatedAt || Date.now(),
 			instance: true,
 		};
 	}
 	if (records.length === 1) {
 		return buildSingleSessionActivity(records[0], options);
 	}
-	return buildMultiSessionActivity(state, options);
+	return buildMultiSessionActivity(state, options, records);
 }
 
 export interface PresenceSnapshot {
@@ -1211,14 +1290,84 @@ function snapshotRecord(snapshot: PresenceSnapshot): SessionRecord {
 
 function compareSessions(a: SessionRecord, b: SessionRecord): number {
 	return (
-		b.lastSeenAt - a.lastSeenAt ||
 		a.startedAt - b.startedAt ||
+		b.lastSeenAt - a.lastSeenAt ||
 		a.sessionId.localeCompare(b.sessionId)
 	);
 }
 
+export function isActivityEqual(
+	a?: PresenceActivity,
+	b?: PresenceActivity,
+): boolean {
+	if (a === b) return true;
+	if (!a || !b) return false;
+	if (
+		a.details !== b.details ||
+		a.state !== b.state ||
+		a.startTimestamp !== b.startTimestamp ||
+		a.endTimestamp !== b.endTimestamp ||
+		a.largeImageKey !== b.largeImageKey ||
+		a.largeImageUrl !== b.largeImageUrl ||
+		a.largeImageText !== b.largeImageText ||
+		a.smallImageKey !== b.smallImageKey ||
+		a.smallImageUrl !== b.smallImageUrl ||
+		a.smallImageText !== b.smallImageText ||
+		a.instance !== b.instance
+	) {
+		return false;
+	}
+	const aButtons = a.buttons;
+	const bButtons = b.buttons;
+	if (aButtons === bButtons) return true;
+	if (!aButtons || !bButtons) return false;
+	if (aButtons.length !== bButtons.length) return false;
+	for (let i = 0; i < aButtons.length; i++) {
+		if (
+			aButtons[i]?.label !== bButtons[i]?.label ||
+			aButtons[i]?.url !== bButtons[i]?.url
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
+export function isRateLimitError(error: unknown): boolean {
+	if (!error) return false;
+	const record = asRecord(error);
+	const code = record?.code;
+	if (code === 4002 || code === "4002") return true;
+	const message =
+		typeof record?.message === "string"
+			? record.message.toLowerCase()
+			: error instanceof Error
+				? error.message.toLowerCase()
+				: "";
+	return (
+		message.includes("rate limit") ||
+		message.includes("rate_limit") ||
+		message.includes("4002")
+	);
+}
+
+export function isRegistryLockError(error: unknown): boolean {
+	if (!error) return false;
+	const message = (
+		error instanceof Error ? error.message : String(error)
+	).toLowerCase();
+	return (
+		message.includes("lock") ||
+		message.includes("ownership lost") ||
+		message.includes("state file") ||
+		message.includes("registry")
+	);
+}
+
 function orderedSessions(state: PresenceState): SessionRecord[] {
-	const records = Object.values(state.sessions);
+	const records = Object.values(state.sessions).filter(
+		(r) => !isSubagentRecord(r),
+	);
 	const publisher = state.publisherId
 		? state.sessions[state.publisherId]
 		: undefined;
@@ -1226,8 +1375,10 @@ function orderedSessions(state: PresenceState): SessionRecord[] {
 		const aActive = a.phase !== "idle" || (a.activeSubagents ?? 0) > 0;
 		const bActive = b.phase !== "idle" || (b.activeSubagents ?? 0) > 0;
 		if (aActive !== bActive) return aActive ? -1 : 1;
-		if (!aActive && a.sessionId === publisher?.sessionId) return -1;
-		if (!bActive && b.sessionId === publisher?.sessionId) return 1;
+		if (publisher && !isSubagentRecord(publisher)) {
+			if (a.sessionId === publisher.sessionId) return -1;
+			if (b.sessionId === publisher.sessionId) return 1;
+		}
 		return compareSessions(a, b);
 	});
 }
@@ -1366,6 +1517,8 @@ function parseSessionRecord(value: unknown): SessionRecord | undefined {
 	const lastSeenAt = finiteNumber(record.lastSeenAt);
 	const usage = parseUsage(record.usage);
 	const activeSubagents = finiteNonNegative(record.activeSubagents);
+	const isSubagent =
+		typeof record.isSubagent === "boolean" ? record.isSubagent : undefined;
 	if (
 		!sessionId ||
 		projectName === undefined ||
@@ -1390,6 +1543,7 @@ function parseSessionRecord(value: unknown): SessionRecord | undefined {
 		...(activeSubagents !== undefined && activeSubagents > 0
 			? { activeSubagents }
 			: {}),
+		...(isSubagent ? { isSubagent: true } : {}),
 	};
 }
 
@@ -1400,16 +1554,24 @@ function pruneState(
 ): PresenceState {
 	const previousPublisherId = state.publisherId;
 	for (const [sessionId, record] of Object.entries(state.sessions)) {
-		if (now - record.lastSeenAt > staleAfterMs) delete state.sessions[sessionId];
+		if (now - record.lastSeenAt > staleAfterMs || isSubagentRecord(record)) {
+			delete state.sessions[sessionId];
+		}
 	}
-	if (state.publisherId && !state.sessions[state.publisherId]) {
+	if (
+		state.publisherId &&
+		(!state.sessions[state.publisherId] ||
+			isSubagentRecord(state.sessions[state.publisherId]))
+	) {
 		state.publisherId = undefined;
 	}
 	if (!state.publisherId) {
-		const next = Object.values(state.sessions).sort(
-			(a, b) =>
-				a.startedAt - b.startedAt || a.sessionId.localeCompare(b.sessionId),
-		)[0];
+		const next = Object.values(state.sessions)
+			.filter((r) => !isSubagentRecord(r))
+			.sort(
+				(a, b) =>
+					a.startedAt - b.startedAt || a.sessionId.localeCompare(b.sessionId),
+			)[0];
 		state.publisherId = next?.sessionId;
 	}
 	if (state.publisherId !== previousPublisherId) state.publisherGeneration += 1;
@@ -1733,10 +1895,86 @@ export class WslDiscordIpcTransport extends Transport {
 	private readonly relayCommand =
 		process.env[NPIPERELAY_ENV]?.trim() || "npiperelay.exe";
 	private relay: ChildProcess | undefined;
-	private incoming = Buffer.alloc(0);
+	private incomingChunks: Buffer[] = [];
+	private incomingBytes = 0;
 	private connected = false;
 	private closing = false;
 
+	/** Compatibility accessor for tests inspecting the buffered incoming stream. */
+	get incoming(): Buffer {
+		if (this.incomingChunks.length === 0) return Buffer.alloc(0);
+		if (this.incomingChunks.length === 1) return this.incomingChunks[0];
+		return Buffer.concat(this.incomingChunks, this.incomingBytes);
+	}
+
+	set incoming(buffer: Buffer) {
+		this.incomingChunks = buffer.length > 0 ? [buffer] : [];
+		this.incomingBytes = buffer.length;
+	}
+
+	private resetIncoming(): void {
+		this.incomingChunks = [];
+		this.incomingBytes = 0;
+	}
+
+	private readUInt32LE(offset: number): number {
+		let currentOffset = offset;
+		for (let i = 0; i < this.incomingChunks.length; i++) {
+			const chunk = this.incomingChunks[i];
+			if (currentOffset < chunk.length) {
+				if (currentOffset + 4 <= chunk.length) {
+					return chunk.readUInt32LE(currentOffset);
+				}
+				const temp = Buffer.allocUnsafe(4);
+				let bytesCopied = 0;
+				let chunkIdx = i;
+				let localOffset = currentOffset;
+				while (bytesCopied < 4 && chunkIdx < this.incomingChunks.length) {
+					const cur = this.incomingChunks[chunkIdx];
+					const available = cur.length - localOffset;
+					const toCopy = Math.min(4 - bytesCopied, available);
+					cur.copy(temp, bytesCopied, localOffset, localOffset + toCopy);
+					bytesCopied += toCopy;
+					localOffset = 0;
+					chunkIdx++;
+				}
+				return temp.readUInt32LE(0);
+			}
+			currentOffset -= chunk.length;
+		}
+		return 0;
+	}
+
+	private consumeBytes(count: number): Buffer {
+		if (count <= 0) return Buffer.alloc(0);
+		this.incomingBytes = Math.max(0, this.incomingBytes - count);
+		if (this.incomingChunks.length === 1) {
+			const single = this.incomingChunks[0];
+			if (single.length === count) {
+				this.incomingChunks = [];
+				return single;
+			}
+			const result = single.subarray(0, count);
+			this.incomingChunks[0] = single.subarray(count);
+			return result;
+		}
+		const result = Buffer.allocUnsafe(count);
+		let copied = 0;
+		while (copied < count && this.incomingChunks.length > 0) {
+			const head = this.incomingChunks[0];
+			const needed = count - copied;
+			if (head.length <= needed) {
+				head.copy(result, copied);
+				copied += head.length;
+				this.incomingChunks.shift();
+			} else {
+				head.copy(result, copied, 0, needed);
+				this.incomingChunks[0] = head.subarray(needed);
+				copied += needed;
+			}
+		}
+		return result;
+	}
 	constructor(options: TransportOptions) {
 		super(options);
 	}
@@ -1796,10 +2034,11 @@ export class WslDiscordIpcTransport extends Transport {
 				relay.removeListener("spawn", onSpawn);
 				relay.removeListener("error", onError);
 				relay.removeListener("close", onClose);
+				relay.on("error", () => {});
 				if (this.relay === relay) {
 					this.relay = undefined;
 					this.connected = false;
-					this.incoming = Buffer.alloc(0);
+					this.resetIncoming();
 				}
 				relay.kill();
 				reject(error instanceof Error ? error : new Error(String(error)));
@@ -1809,6 +2048,7 @@ export class WslDiscordIpcTransport extends Transport {
 				if (settled) return;
 				settled = true;
 				ready = true;
+				this.connected = true;
 				clearAttempt();
 				resolve();
 			};
@@ -1824,7 +2064,6 @@ export class WslDiscordIpcTransport extends Transport {
 			};
 
 			const onSpawn = (): void => {
-				this.connected = true;
 				this.emit("open");
 				try {
 					this.writePacket({ v: 1, client_id: this.client.clientId }, 0);
@@ -1852,7 +2091,7 @@ export class WslDiscordIpcTransport extends Transport {
 				if (this.relay === relay) {
 					this.relay = undefined;
 					this.connected = false;
-					this.incoming = Buffer.alloc(0);
+					this.resetIncoming();
 				}
 				if (!this.closing) this.emit("close", "Windows Discord IPC closed");
 			};
@@ -1869,26 +2108,31 @@ export class WslDiscordIpcTransport extends Transport {
 	}
 
 	private handleIncomingData(chunk: Buffer): void {
-		this.incoming = Buffer.concat([this.incoming, chunk]);
-		while (this.incoming.length >= 8) {
-			const opcode = this.incoming.readUInt32LE(0);
-			const payloadLength = this.incoming.readUInt32LE(4);
+		if (chunk.length === 0) return;
+		this.incomingChunks.push(chunk);
+		this.incomingBytes += chunk.length;
+
+		while (this.incomingBytes >= 8) {
+			const opcode = this.readUInt32LE(0);
+			const payloadLength = this.readUInt32LE(4);
 			if (payloadLength > MAX_RELAY_PAYLOAD_BYTES) {
 				this.relay?.kill();
+				this.resetIncoming();
 				return;
 			}
-			if (this.incoming.length < payloadLength + 8) return;
+			if (this.incomingBytes < payloadLength + 8) return;
 
-			const payload = this.incoming
-				.subarray(8, payloadLength + 8)
-				.toString("utf8");
-			this.incoming = this.incoming.subarray(payloadLength + 8);
+			// Consume the 8-byte header and extract the payload
+			this.consumeBytes(8);
+			const payloadBuf = this.consumeBytes(payloadLength);
+			const payload = payloadBuf.toString("utf8");
 
 			let message: unknown;
 			try {
 				message = JSON.parse(payload);
 			} catch {
 				this.relay?.kill();
+				this.resetIncoming();
 				return;
 			}
 
@@ -1932,7 +2176,11 @@ export class WslDiscordIpcTransport extends Transport {
 	}
 
 	override send(message?: unknown): void {
-		this.writePacket(message, 1);
+		try {
+			this.writePacket(message, 1);
+		} catch (error) {
+			this.emit("close", error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	override ping(): void {
@@ -1943,7 +2191,7 @@ export class WslDiscordIpcTransport extends Transport {
 		const relay = this.relay;
 		this.relay = undefined;
 		this.connected = false;
-		this.incoming = Buffer.alloc(0);
+		this.resetIncoming();
 		if (!relay) return;
 
 		this.closing = true;
@@ -1990,7 +2238,7 @@ export function createDiscordPresenceTransport(
 	});
 
 	return {
-		isConnected: () => client.isConnected,
+		isConnected: () => Boolean(client.isConnected && client.user),
 		connect: () => client.connect(),
 		setActivity: async (activity) => {
 			if (!client.user) throw new Error("Discord RPC user is not ready");
@@ -2046,7 +2294,15 @@ export class DiscordPresenceManager {
 	private outageWarningShown = false;
 	private transportErrorWarningShown = false;
 	private registryWarningShown = false;
-
+	private readonly minPublishIntervalMs: number;
+	private lastPublishTime = Number.NEGATIVE_INFINITY;
+	private pendingPresenceForce = false;
+	private pendingRegistryUpdate = false;
+	private registryDrain: Promise<void> | undefined;
+	private stopPromise: Promise<void> | undefined;
+	private lastPublishedActivity: PresenceActivity | undefined;
+	private rateLimitBackoffUntil = 0;
+	private publishThrottleTimer: ReturnType<typeof setTimeout> | undefined;
 	constructor(options: PresenceManagerOptions) {
 		this.clientId = options.clientId;
 		this.stateStore = options.stateStore ?? new FilePresenceStateStore();
@@ -2065,6 +2321,16 @@ export class DiscordPresenceManager {
 		this.enableAssets = options.enableAssets;
 		this.largeImageKey = options.largeImageKey;
 		this.smallImageKey = options.smallImageKey;
+		const configuredMinInterval = process.env[MIN_INTERVAL_ENV]
+			? Number.parseInt(process.env[MIN_INTERVAL_ENV], 10)
+			: undefined;
+		this.minPublishIntervalMs =
+			options.minPublishIntervalMs ??
+			(Number.isFinite(configuredMinInterval) && (configuredMinInterval as number) >= 0
+				? (configuredMinInterval as number)
+				: options.createTransport
+					? 0
+					: DEFAULT_MIN_PUBLISH_INTERVAL_MS);
 		const startedAt = options.startedAt ?? this.now();
 		this.record = {
 			sessionId: this.sessionId,
@@ -2082,6 +2348,7 @@ export class DiscordPresenceManager {
 				options.initialActiveSubagents > 0
 					? Math.floor(options.initialActiveSubagents)
 					: undefined,
+			isSubagent: options.isSubagent,
 		};
 	}
 
@@ -2158,18 +2425,26 @@ export class DiscordPresenceManager {
 	}
 
 	setModel(provider?: string, modelId?: string): Promise<void> {
+		if (this.record.provider === provider && this.record.modelId === modelId) {
+			return this.registryDrain ?? Promise.resolve();
+		}
 		this.record.provider = provider;
 		this.record.modelId = modelId;
 		return this.enqueueRegistryUpdate();
 	}
 
 	setPhase(phase: PresencePhase, action?: PresenceAction): Promise<void> {
+		const nextAction = action ?? (phase === "tools" ? "tools" : phase);
+		if (this.record.phase === phase && this.record.action === nextAction) {
+			return this.registryDrain ?? Promise.resolve();
+		}
 		this.record.phase = phase;
-		this.record.action = action ?? (phase === "tools" ? "tools" : phase);
+		this.record.action = nextAction;
 		return this.enqueueRegistryUpdate();
 	}
 
 	setAction(action?: PresenceAction): Promise<void> {
+		if (this.record.action === action) return this.registryDrain ?? Promise.resolve();
 		this.record.action = action;
 		return this.enqueueRegistryUpdate();
 	}
@@ -2180,11 +2455,15 @@ export class DiscordPresenceManager {
 	}
 
 	setContextUsage(context: ContextSnapshot | undefined): Promise<void> {
+		const current = this.record.context;
+		if (current === context || (current && context &&
+			current.tokens === context.tokens && current.contextWindow === context.contextWindow &&
+			current.percent === context.percent)) return this.registryDrain ?? Promise.resolve();
 		this.record.context = context ? { ...context } : undefined;
 		return this.enqueueRegistryUpdate();
 	}
 	setActiveSubagents(count: number): Promise<void> {
-		const safeCount = Math.max(0, Math.floor(count));
+		const safeCount = Math.floor(finiteNonNegative(count) ?? 0);
 		const currentCount = this.record.activeSubagents ?? 0;
 		if (currentCount === safeCount) return Promise.resolve();
 		this.record.activeSubagents = safeCount > 0 ? safeCount : undefined;
@@ -2199,7 +2478,7 @@ export class DiscordPresenceManager {
 	async refresh(): Promise<void> {
 		if (!this.started || this.disposed) return;
 		try {
-			await this.applyState(await this.stateStore.read(), true);
+			await this.applyState(await this.stateStore.read(), true, true);
 		} catch {
 			this.warnRegistryFailure();
 		}
@@ -2229,13 +2508,29 @@ export class DiscordPresenceManager {
 		return lines.join("\n");
 	}
 
-	async stop(): Promise<void> {
+	stop(): Promise<void> {
+		if (this.stopPromise) return this.stopPromise;
+		const stopping = this.stopInternal();
+		this.stopPromise = stopping;
+		void stopping.then(
+			() => { if (this.stopPromise === stopping) this.stopPromise = undefined; },
+			() => { if (this.stopPromise === stopping) this.stopPromise = undefined; },
+		);
+		return stopping;
+	}
+
+	private async stopInternal(): Promise<void> {
 		if (this.disposed) return;
 		this.disposed = true;
 		this.started = false;
 		if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
 		this.heartbeatTimer = undefined;
 		this.clearRetryTimer();
+		this.clearPublishTimer();
+		this.pendingPresenceForce = false;
+		this.pendingRegistryUpdate = false;
+		this.pendingPresenceState = undefined;
+		this.lastPublishedActivity = undefined;
 		await this.registryQueue.catch(() => undefined);
 		await this.presenceQueue.catch(() => undefined);
 
@@ -2247,9 +2542,12 @@ export class DiscordPresenceManager {
 					this.publisherGeneration,
 					async (assertOwnership) => {
 						const current = await this.stateStore.read();
+						const mainSessions = Object.values(current.sessions).filter(
+							(r) => !isSubagentRecord(r),
+						);
 						if (
 							current.publisherId === this.sessionId &&
-							Object.keys(current.sessions).length === 1
+							mainSessions.length <= 1
 						) {
 							try {
 								await assertOwnership();
@@ -2286,36 +2584,53 @@ export class DiscordPresenceManager {
 	}
 
 	private enqueueRegistryUpdate(): Promise<void> {
-		const previous = this.registryQueue;
-		const next = (async () => {
-			try {
-				await previous;
-			} catch {
-				// A failed update must not block later heartbeats.
-			}
-			if (!this.started || this.disposed) return;
-			this.record.lastSeenAt = this.now();
-			try {
-				const state = await this.stateStore.upsert(cloneRecord(this.record));
-				this.registryWarningShown = false;
-				await this.applyState(state, false);
-			} catch {
-				this.warnRegistryFailure();
+		if (!this.started || this.disposed) return Promise.resolve();
+		this.pendingRegistryUpdate = true;
+		if (this.registryDrain) return this.registryDrain;
+		const drain = (async () => {
+			// Batch synchronous setters; retain only one dirty flag during slow I/O.
+			await Promise.resolve();
+			while (this.pendingRegistryUpdate && this.started && !this.disposed) {
+				this.pendingRegistryUpdate = false;
+				this.record.lastSeenAt = this.now();
+				try {
+					const state = await this.stateStore.upsert(cloneRecord(this.record));
+					this.registryWarningShown = false;
+					await this.applyState(state, false);
+				} catch {
+					this.warnRegistryFailure();
+				}
 			}
 		})();
-		this.registryQueue = next;
-		return next;
+		this.registryDrain = drain;
+		this.registryQueue = drain;
+		void drain.then(
+			() => {
+				if (this.registryDrain !== drain) return;
+				this.registryDrain = undefined;
+				if (this.pendingRegistryUpdate && this.started && !this.disposed) {
+					void this.enqueueRegistryUpdate();
+				}
+			},
+			() => { if (this.registryDrain === drain) this.registryDrain = undefined; },
+		);
+		return drain;
 	}
 
 	private async applyState(
 		state: PresenceState,
 		waitForPresence: boolean,
+		force = false,
 	): Promise<void> {
 		if (this.disposed) return;
 		const shouldPublish = state.publisherId === this.sessionId;
 		if (!shouldPublish) {
 			this.publisher = false;
 			this.clearRetryTimer();
+			this.clearPublishTimer();
+			this.pendingPresenceForce = false;
+			this.pendingPresenceState = undefined;
+			this.lastPublishedActivity = undefined;
 			await this.closeTransport();
 			this.status = "standby";
 			return;
@@ -2323,18 +2638,46 @@ export class DiscordPresenceManager {
 
 		this.publisher = true;
 		this.publisherGeneration = state.publisherGeneration;
-		const publish = this.enqueuePresencePublish(state);
+		const publish = this.enqueuePresencePublish(state, force);
 		if (waitForPresence) await publish;
 	}
 
-	private enqueuePresencePublish(state: PresenceState): Promise<void> {
+	private enqueuePresencePublish(
+		state: PresenceState,
+		force = false,
+	): Promise<void> {
 		this.pendingPresenceState = state;
+		this.pendingPresenceForce ||= force;
+		if (force) this.clearPublishTimer();
 		if (this.presenceDrain) return this.presenceDrain;
 
 		const drain = (async () => {
-			while (this.pendingPresenceState) {
+			while (this.pendingPresenceState && !this.disposed && this.publisher) {
+				const now = this.now();
+				const delay = Math.max(
+					0,
+					this.rateLimitBackoffUntil - now,
+					this.pendingPresenceForce ? 0 : this.lastPublishTime + this.minPublishIntervalMs - now,
+				);
+				if (delay > 0) {
+					// A timer owns deferred work; never keep a drain awaiting an unref'ed
+					// sleep or restart it in a microtask loop while backoff is active.
+					if (!this.publishThrottleTimer) {
+						this.publishThrottleTimer = setTimeout(() => {
+							this.publishThrottleTimer = undefined;
+							if (this.pendingPresenceState && !this.disposed && this.publisher) {
+								void this.enqueuePresencePublish(this.pendingPresenceState);
+							}
+						}, delay);
+						this.publishThrottleTimer.unref?.();
+					}
+					break;
+				}
+
+				this.clearPublishTimer();
 				const nextState = this.pendingPresenceState;
 				this.pendingPresenceState = undefined;
+				this.pendingPresenceForce = false;
 				try {
 					await this.publish(nextState);
 				} catch {
@@ -2348,14 +2691,20 @@ export class DiscordPresenceManager {
 			() => {
 				if (this.presenceDrain !== drain) return;
 				this.presenceDrain = undefined;
-				if (this.pendingPresenceState && !this.disposed)
-					this.enqueuePresencePublish(this.pendingPresenceState);
+				if (this.pendingPresenceState && !this.publishThrottleTimer && !this.disposed && this.publisher) {
+					void this.enqueuePresencePublish(this.pendingPresenceState);
+				}
 			},
 			() => {
 				if (this.presenceDrain === drain) this.presenceDrain = undefined;
 			},
 		);
 		return drain;
+	}
+
+	private clearPublishTimer(): void {
+		if (this.publishThrottleTimer) clearTimeout(this.publishThrottleTimer);
+		this.publishThrottleTimer = undefined;
 	}
 
 	private async publish(state: PresenceState): Promise<void> {
@@ -2366,8 +2715,11 @@ export class DiscordPresenceManager {
 		const transport = this.transport;
 		if (!transport || !transport.isConnected()) return;
 
+		let didPublish: boolean | undefined;
+		let transportFailed = false;
+
 		try {
-			const didPublish = await this.stateStore.withPublisherLock(
+			didPublish = await this.stateStore.withPublisherLock(
 				this.sessionId,
 				state.publisherGeneration,
 				async (assertOwnership) => {
@@ -2395,21 +2747,47 @@ export class DiscordPresenceManager {
 						largeImageKey: this.largeImageKey,
 						smallImageKey: this.smallImageKey,
 					});
-					await awaitWithTimeout(
-						transport.setActivity(activity),
-						RPC_WRITE_TIMEOUT_MS,
-					);
-					return true;
+					if (isActivityEqual(this.lastPublishedActivity, activity)) {
+						return true;
+					}
+					try {
+						await awaitWithTimeout(
+							transport.setActivity(activity),
+							RPC_WRITE_TIMEOUT_MS,
+						);
+						this.lastPublishedActivity = activity;
+						this.lastPublishTime = this.now();
+						return true;
+					} catch (transportErr) {
+						if (isRateLimitError(transportErr)) {
+							this.rateLimitBackoffUntil = this.now() + RATE_LIMIT_BACKOFF_MS;
+							// Do not replace a newer update received while this RPC was pending.
+							this.pendingPresenceState ??= state;
+							return true;
+						}
+						transportFailed = true;
+						throw transportErr;
+					}
 				},
 			);
-			if (didPublish) {
-				this.status = "connected";
-				this.retryAttempt = 0;
-				this.outageWarningShown = false;
-				this.clearRetryTimer();
+		} catch (error) {
+			if (transportFailed) {
+				await this.handleUnavailable(transport);
+			} else if (isRegistryLockError(error)) {
+				this.warnRegistryFailure();
+			} else if (this.transport === transport && !transport.isConnected()) {
+				await this.handleUnavailable(transport);
+			} else {
+				this.warnRegistryFailure();
 			}
-		} catch {
-			await this.handleUnavailable(transport);
+			return;
+		}
+
+		if (didPublish) {
+			this.status = "connected";
+			this.retryAttempt = 0;
+			this.outageWarningShown = false;
+			this.clearRetryTimer();
 		}
 	}
 
@@ -2538,6 +2916,7 @@ export class DiscordPresenceManager {
 		const transport = this.transport;
 		if (expectedTransport && transport !== expectedTransport) return;
 		this.transport = undefined;
+		this.lastPublishedActivity = undefined;
 		const removeDisconnectedListener = this.removeDisconnectedListener;
 		this.removeDisconnectedListener = undefined;
 		removeDisconnectedListener?.();
@@ -2598,14 +2977,14 @@ export interface SubagentTrackerEventBus {
 export interface SubagentTrackerOptions {
 	events?: SubagentTrackerEventBus;
 	sessionId: string;
-	onCountChange?: (count: number) => void | Promise<void>;
+	onCountChange?: (count: number) => unknown;
 	logger?: (message: string) => void;
 }
 
 export class SubagentTracker {
 	private readonly events?: SubagentTrackerEventBus;
 	private readonly sessionId: string;
-	private readonly onCountChange?: (count: number) => void | Promise<void>;
+	private readonly onCountChange?: (count: number) => unknown;
 	private readonly logger: (message: string) => void;
 	private activeAsyncRuns = new Set<string>();
 	private activeForegroundCalls = new Set<string>();
@@ -2613,6 +2992,8 @@ export class SubagentTracker {
 	private installed = false;
 	private unsubscribers: Array<() => void> = [];
 	private lastNotifiedCount = 0;
+	private activeRpcCleanups = new Map<string, () => void>();
+	private latestRpcRequestId: string | undefined;
 
 	constructor(options: SubagentTrackerOptions) {
 		this.events = options.events;
@@ -2687,36 +3068,44 @@ export class SubagentTracker {
 
 	queryRpcStatus(): void {
 		if (!this.events) return;
+		if (this.latestRpcRequestId) {
+			const prevCleanup = this.activeRpcCleanups.get(this.latestRpcRequestId);
+			if (prevCleanup) prevCleanup();
+		}
 		const requestId = randomUUID();
+		this.latestRpcRequestId = requestId;
 		const replyEvent = `${SUBAGENT_RPC_REPLY_EVENT_PREFIX}${requestId}`;
+
 		let unsub: (() => void) | undefined;
-		const timer = setTimeout(() => {
+		const cleanup = (): void => {
+			clearTimeout(timer);
+			this.activeRpcCleanups.delete(requestId);
 			unsub?.();
-		}, 4000);
+		};
+
+		const timer = setTimeout(cleanup, 4000);
 		timer.unref?.();
 
 		const unlisten = this.events.on(replyEvent, (reply) => {
-			clearTimeout(timer);
-			unsub?.();
+			cleanup();
+			if (this.latestRpcRequestId !== requestId) return;
 			if (!reply || typeof reply !== "object") return;
 			const res = reply as {
 				ok?: boolean;
 				result?: { fleet?: { totalActive?: number } };
 			};
-			if (
-				res.ok &&
-				res.result?.fleet &&
-				typeof res.result.fleet.totalActive === "number"
-			) {
+			const totalActive = finiteNonNegative(res.result?.fleet?.totalActive);
+			if (res.ok && totalActive !== undefined) {
 				this.installed = true;
-				const totalActive = Math.max(0, Math.floor(res.result.fleet.totalActive));
-				this.rpcActiveCount = totalActive;
+				this.rpcActiveCount = Math.floor(totalActive);
 				this.emitCount();
 			}
 		});
+
 		if (typeof unlisten === "function") {
 			unsub = unlisten;
 		}
+		this.activeRpcCleanups.set(requestId, cleanup);
 
 		try {
 			this.events.emit(SUBAGENT_RPC_REQUEST_EVENT, {
@@ -2726,8 +3115,7 @@ export class SubagentTracker {
 				params: { action: "status" },
 			});
 		} catch {
-			clearTimeout(timer);
-			unsub?.();
+			cleanup();
 		}
 	}
 
@@ -2743,13 +3131,16 @@ export class SubagentTracker {
 		const count = this.getTotalActiveCount();
 		if (count !== this.lastNotifiedCount) {
 			this.lastNotifiedCount = count;
-			void this.onCountChange?.(count);
+			Promise.resolve(this.onCountChange?.(count)).catch(() => undefined);
 		}
 	}
 
 	dispose(): void {
 		for (const unsub of this.unsubscribers) unsub();
 		this.unsubscribers = [];
+		for (const cleanup of this.activeRpcCleanups.values()) cleanup();
+		this.activeRpcCleanups.clear();
+		this.latestRpcRequestId = undefined;
 		this.activeAsyncRuns.clear();
 		this.activeForegroundCalls.clear();
 		this.rpcActiveCount = undefined;
@@ -2757,7 +3148,10 @@ export class SubagentTracker {
 	}
 }
 
-export default function (pi: ExtensionAPI) {
+export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void {
+	if (isSubagentEnvironment()) {
+		return;
+	}
 	let manager: DiscordPresenceManager | undefined;
 	let subagentTracker: SubagentTracker | undefined;
 	let disabledReason: string | undefined;
@@ -3046,6 +3440,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		if (isSubagentSession(ctx)) {
+			disabledReason = "disabled: subagent session";
+			return;
+		}
 		const sessionStartedAt = Date.now();
 		subagentTracker?.dispose();
 		subagentTracker = undefined;

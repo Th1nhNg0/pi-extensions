@@ -55,6 +55,15 @@ import {
 	summarizeModels,
 	writePrefs,
 	SubagentTracker,
+	isSubagentEnvironment,
+	isSubagentSession,
+	isSubagentRecord,
+	isActivityEqual,
+	isRateLimitError,
+	isRegistryLockError,
+	DEFAULT_MIN_PUBLISH_INTERVAL_MS,
+	RATE_LIMIT_BACKOFF_MS,
+	WslDiscordIpcTransport,
 	default as discordPresenceExtension,
 } from "../extensions/discord-presence.ts";
 
@@ -1609,4 +1618,414 @@ test("FilePresenceStateStore serializes and restores activeSubagents", async () 
 	assert.equal(restored.sessions["session-with-subagents"]?.activeSubagents, 3);
 
 	await rm(directory, { recursive: true, force: true });
+});
+
+test("isSubagentEnvironment detects child process flags", () => {
+	assert.equal(isSubagentEnvironment({ PI_SUBAGENT_CHILD: "1" }), true);
+	assert.equal(isSubagentEnvironment({ PI_SUBAGENT_CHILD: "true" }), true);
+	assert.equal(isSubagentEnvironment({ PI_IS_SUBAGENT: "1" }), true);
+	assert.equal(isSubagentEnvironment({ PI_IS_SUBAGENT: "true" }), true);
+	assert.equal(isSubagentEnvironment({ PI_SUBAGENT_CHILD: "0" }), false);
+	assert.equal(isSubagentEnvironment({}), false);
+});
+
+test("isSubagentSession detects worktree and subagent paths", () => {
+	assert.equal(
+		isSubagentSession({ cwd: "/home/user/code/pi-worktree-123-0" }),
+		true,
+	);
+	assert.equal(
+		isSubagentSession({
+			cwd: "/home/user/code/repo",
+			sessionManager: {
+				getSessionFile: () => "/home/user/code/repo/.pi/subagents/session-1.jsonl",
+			},
+		}),
+		true,
+	);
+	assert.equal(
+		isSubagentSession({
+			cwd: "/home/user/code/repo",
+			sessionManager: {
+				getSessionFile: () => "/home/user/code/repo/session-1.jsonl",
+			},
+		}),
+		false,
+	);
+});
+
+test("isSubagentRecord identifies subagent session records", () => {
+	const mainRec = makeRecord("main-1", 100, { projectName: "my-project" });
+	const explicitSubRec = makeRecord("sub-1", 100, {
+		projectName: "my-project",
+		isSubagent: true,
+	});
+	const worktreeRec = makeRecord("sub-wt", 100, {
+		projectName: "my-project/pi-worktree-abc-0",
+	});
+	assert.equal(isSubagentRecord(mainRec), false);
+	assert.equal(isSubagentRecord(explicitSubRec), true);
+	assert.equal(isSubagentRecord(worktreeRec), true);
+});
+
+test("subagents running are not calculated as sessions", () => {
+	const mainSession = makeRecord("main-sess", 100, {
+		projectName: "main-project",
+		phase: "thinking",
+		action: "thinking",
+		activeSubagents: 2,
+	});
+	const subagentSession = makeRecord("sub-wt", 150, {
+		projectName: "main-project/pi-worktree-123-0",
+		phase: "tools",
+		action: "reading",
+		isSubagent: true,
+	});
+
+	const state: PresenceState = {
+		version: 1,
+		publisherId: "main-sess",
+		publisherGeneration: 1,
+		sessions: {
+			"main-sess": mainSession,
+			"sub-wt": subagentSession,
+		},
+		updatedAt: 200,
+	};
+
+	// buildAggregateActivity should treat this as a single session, not 2 sessions
+	const activity = buildAggregateActivity(state);
+	// Details should show subagent running info under main session, not "2 Pi sessions"
+	assert.match(activity.details, /Thinking \(2 subagents\)/);
+	assert.doesNotMatch(activity.details, /2 Pi sessions/);
+});
+
+test("isActivityEqual detects identical and differing activity payloads", () => {
+	const a = {
+		details: "Editing · Claude 3.7 Sonnet",
+		state: "12k tok · $0.05",
+		startTimestamp: 1000,
+		instance: true as const,
+		largeImageKey: "key-1",
+		buttons: [{ label: "Pi", url: "https://pi.dev" }],
+	};
+	const b = { ...a };
+	assert.equal(isActivityEqual(a, b), true);
+
+	const diffDetails = { ...a, details: "Thinking · Claude 3.7 Sonnet" };
+	assert.equal(isActivityEqual(a, diffDetails), false);
+
+	const diffButtons = {
+		...a,
+		buttons: [{ label: "Pi Coding Agent", url: "https://pi.dev" }],
+	};
+	assert.equal(isActivityEqual(a, diffButtons), false);
+});
+
+test("DiscordPresenceManager deduplicates identical presence payloads without calling Discord RPC repeatedly", async () => {
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID,
+		projectName: "dedup-test",
+		stateStore,
+		createTransport: () => transport,
+		logger: () => {},
+	});
+
+	await manager.start();
+	assert.equal(transport.activities.length, 1);
+
+	// Re-applying same state via refresh should not invoke setActivity again
+	await manager.refresh();
+	assert.equal(transport.activities.length, 1);
+
+	// Phase change modifies activity, so it publishes once more
+	await manager.setPhase("thinking");
+	await manager.refresh();
+	assert.equal(transport.activities.length, 2);
+
+	// Refreshing again with same phase should NOT publish
+	await manager.refresh();
+	assert.equal(transport.activities.length, 2);
+
+	await manager.stop();
+});
+
+test("DiscordPresenceManager handles Discord RPC rate limit error (4002) without dropping connection", async () => {
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	let failWithRateLimit = false;
+	const originalSetActivity = transport.setActivity.bind(transport);
+	transport.setActivity = async (activity) => {
+		if (failWithRateLimit) {
+			const err = new Error("Rate limited");
+			(err as unknown as { code: number }).code = 4002;
+			throw err;
+		}
+		return originalSetActivity(activity);
+	};
+
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID,
+		projectName: "rate-limit-test",
+		stateStore,
+		createTransport: () => transport,
+		logger: () => {},
+	});
+
+	await manager.start();
+	assert.equal(manager.getStatus(), "connected");
+
+	// Next update hits 4002 rate limit
+	failWithRateLimit = true;
+	await manager.setPhase("thinking");
+	await manager.refresh();
+
+	// Status should remain connected, transport should NOT be closed or destroyed
+	assert.equal(manager.getStatus(), "connected");
+	assert.equal(transport.closeCount, 0);
+
+	await manager.stop();
+});
+
+test("extension does not register when running inside a subagent process", () => {
+	const registeredCommands: string[] = [];
+	const eventsRegistered: string[] = [];
+	const dummyPi = {
+		registerCommand: (name: string) => {
+			registeredCommands.push(name);
+		},
+		on: (event: string) => {
+			eventsRegistered.push(event);
+		},
+	};
+
+	const originalEnv = process.env.PI_SUBAGENT_CHILD;
+	try {
+		process.env.PI_SUBAGENT_CHILD = "1";
+		discordPresenceExtension(
+			dummyPi as unknown as Parameters<typeof discordPresenceExtension>[0],
+		);
+		assert.equal(registeredCommands.length, 0);
+		assert.equal(eventsRegistered.length, 0);
+	} finally {
+		if (originalEnv === undefined) delete process.env.PI_SUBAGENT_CHILD;
+		else process.env.PI_SUBAGENT_CHILD = originalEnv;
+	}
+});
+
+test("registry lock timeout does not disconnect or destroy Discord transport", async () => {
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID,
+		projectName: "lock-test",
+		stateStore,
+		createTransport: () => transport,
+		logger: () => {},
+	});
+
+	await manager.start();
+	assert.equal(manager.getStatus(), "connected");
+	assert.equal(transport.connectCount, 1);
+
+	// Simulate withPublisherLock failing with lock timeout
+	const origWithPublisherLock = stateStore.withPublisherLock.bind(stateStore);
+	stateStore.withPublisherLock = async () => {
+		throw new Error("presence state lock timeout");
+	};
+
+	await manager.setPhase("thinking");
+	await manager.refresh();
+
+	// Transport should NOT have been closed
+	assert.equal(transport.closeCount, 0);
+
+	// Restore and stop
+	stateStore.withPublisherLock = origWithPublisherLock;
+	await manager.stop();
+	assert.equal(transport.closeCount, 1);
+});
+test("isRegistryLockError detects lock and state file errors", () => {
+	assert.equal(isRegistryLockError(new Error("presence state lock timeout")), true);
+	assert.equal(isRegistryLockError(new Error("presence lock ownership lost")), true);
+	assert.equal(isRegistryLockError(new Error("corrupted state file")), true);
+	assert.equal(isRegistryLockError(new Error("Discord is offline")), false);
+	assert.equal(isRegistryLockError(null), false);
+});
+
+test("WslDiscordIpcTransport efficiently reassembles fragmented incoming data and frees buffers", async () => {
+	const transport = new WslDiscordIpcTransport({ client: { clientId: CLIENT_ID } as unknown as import("@xhayper/discord-rpc").Client });
+	const messages: unknown[] = [];
+	transport.on("message", (msg) => messages.push(msg));
+
+	const payload = Buffer.from(JSON.stringify({ cmd: "DISPATCH", evt: "READY", data: { user: { id: "123" } } }));
+	const packet = Buffer.alloc(8 + payload.length);
+	packet.writeUInt32LE(1, 0);
+	packet.writeUInt32LE(payload.length, 4);
+	payload.copy(packet, 8);
+
+	// Split across 1-byte, 7-byte (header split) and multiple body chunks
+	const chunk1 = packet.subarray(0, 1);
+	const chunk2 = packet.subarray(1, 8);
+	const chunk3 = packet.subarray(8, 20);
+	const chunk4 = packet.subarray(20);
+
+	// Feed chunks
+	(transport as unknown as { handleIncomingData: (b: Buffer) => void }).handleIncomingData(chunk1);
+	assert.equal(messages.length, 0);
+	(transport as unknown as { handleIncomingData: (b: Buffer) => void }).handleIncomingData(chunk2);
+	assert.equal(messages.length, 0);
+	(transport as unknown as { handleIncomingData: (b: Buffer) => void }).handleIncomingData(chunk3);
+	assert.equal(messages.length, 0);
+	(transport as unknown as { handleIncomingData: (b: Buffer) => void }).handleIncomingData(chunk4);
+
+	assert.equal(messages.length, 1);
+	assert.deepEqual(messages[0], { cmd: "DISPATCH", evt: "READY", data: { user: { id: "123" } } });
+	// Ensure buffer memory is reclaimed
+	assert.equal(transport.incoming.length, 0);
+	await transport.close();
+});
+
+test("SubagentTracker disposal cleans up in-flight RPC reply listeners and timers", () => {
+	class TrackedMockBus {
+		listeners = new Map<string, (data: unknown) => void>();
+		on(event: string, handler: (data: unknown) => void) {
+			this.listeners.set(event, handler);
+			return () => this.listeners.delete(event);
+		}
+		emit(_event: string, _data: unknown) {}
+	}
+	const bus = new TrackedMockBus();
+	let notifiedCount = -1;
+	const tracker = new SubagentTracker({
+		events: bus,
+		sessionId: "clean-test",
+		onCountChange: (c) => { notifiedCount = c; },
+	});
+
+	tracker.queryRpcStatus();
+	// 3 persistent listeners (started, complete, ready) + 1 request listener = 4
+	assert.equal(bus.listeners.size, 4);
+
+	tracker.dispose();
+	// All listeners removed!
+	assert.equal(bus.listeners.size, 0);
+	assert.equal(notifiedCount, -1);
+});
+
+test("SubagentTracker cancels previous in-flight RPC query on rapid subsequent queries", () => {
+	class TrackedMockBus {
+		listeners = new Map<string, (data: unknown) => void>();
+		on(event: string, handler: (data: unknown) => void) {
+			this.listeners.set(event, handler);
+			return () => this.listeners.delete(event);
+		}
+		emit(_event: string, _data: unknown) {}
+	}
+	const bus = new TrackedMockBus();
+	const tracker = new SubagentTracker({
+		events: bus,
+		sessionId: "rapid-rpc",
+	});
+
+	for (let i = 0; i < 20; i++) {
+		tracker.queryRpcStatus();
+	}
+	// 3 base listeners + exactly 1 latest active request listener = 4 (no accumulation of 20 listeners)
+	assert.equal(bus.listeners.size, 4);
+	tracker.dispose();
+	assert.equal(bus.listeners.size, 0);
+});
+
+test("SubagentTracker safely rejects non-finite RPC counts", () => {
+	class TrackedMockBus {
+		listeners = new Map<string, (data: unknown) => void>();
+		emitted: Array<{ event: string; data: unknown }> = [];
+		on(event: string, handler: (data: unknown) => void) {
+			this.listeners.set(event, handler);
+			return () => this.listeners.delete(event);
+		}
+		emit(event: string, data: unknown) {
+			this.emitted.push({ event, data });
+		}
+	}
+	const bus = new TrackedMockBus();
+	let lastCount = 0;
+	const tracker = new SubagentTracker({
+		events: bus,
+		sessionId: "non-finite",
+		onCountChange: (c) => { lastCount = c; },
+	});
+
+	tracker.queryRpcStatus();
+	const req = bus.emitted[0].data as { requestId: string };
+	const replyHandler = bus.listeners.get(`subagents:rpc:v1:reply:${req.requestId}`);
+	assert.ok(replyHandler);
+
+	// Deliver NaN
+	replyHandler({ ok: true, result: { fleet: { totalActive: Number.NaN } } });
+	assert.equal(tracker.getTotalActiveCount(), 0);
+	assert.equal(lastCount, 0);
+
+	tracker.dispose();
+});
+
+test("DiscordPresenceManager coalesces burst registry updates into minimal disk operations", async () => {
+	let upsertCount = 0;
+	const store = {
+		state: { version: 1 as const, sessions: {} as Record<string, SessionRecord>, updatedAt: 0, publisherGeneration: 1 },
+		async upsert(record: SessionRecord) {
+			upsertCount++;
+			this.state.sessions[record.sessionId] = record;
+			return structuredClone(this.state);
+		},
+		async read() { return structuredClone(this.state); },
+		async remove(id: string) { delete this.state.sessions[id]; return structuredClone(this.state); },
+		async withPublisherLock<T>() { return undefined as unknown as T; },
+	};
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID,
+		projectName: "coalesce-bench",
+		stateStore: store,
+		logger: () => {},
+	});
+
+	await manager.start();
+	upsertCount = 0;
+
+	// Fire 100 updates concurrently
+	await Promise.all(Array.from({ length: 100 }, (_, i) => manager.setPhase(i % 2 ? "thinking" : "idle")));
+	// Should be coalesced into 1 (or at most 2) upserts, not 100!
+	assert.ok(upsertCount <= 2, `expected <= 2 upserts, got ${upsertCount}`);
+	assert.equal(store.state.sessions[manager.getSessionId()].phase, "thinking");
+
+	await manager.stop();
+});
+
+test("DiscordPresenceManager stop cancels pending throttle timer without deadlock", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID,
+		projectName: "stop-throttle",
+		minPublishIntervalMs: 5000,
+		stateStore,
+		createTransport: () => transport,
+		logger: () => {},
+	});
+
+	await manager.start();
+	assert.equal(transport.activities.length, 1);
+
+	// Advance 1s and set phase; this schedules a 4s throttle timer
+	t.mock.timers.tick(1000);
+	await manager.setPhase("thinking");
+	await manager.refresh();
+
+	// Stop while throttle is pending; stop must resolve promptly and not deadlock!
+	await manager.stop();
+	assert.equal(manager.getStatus(), "stopped");
 });
