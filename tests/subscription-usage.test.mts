@@ -5,6 +5,9 @@ import {
 	antigravityEndpointCandidates,
 	cap,
 	codexCfg,
+	detailBar,
+	fetchAgeLabel,
+	formatUsageDetails,
 	normalizeUsageData,
 	normalizePrefs,
 	normalizeUsageMode,
@@ -267,4 +270,48 @@ test("antigravity endpoint candidates use the canonical daily service first", ()
 		}),
 		["https://example.test"],
 	);
+});
+
+test("detailBar renders theme-free cells and clamps", () => {
+	assert.equal(detailBar(0), "░░░░░░");
+	assert.equal(detailBar(50), "███░░░");
+	assert.equal(detailBar(100), "██████");
+	assert.equal(detailBar(150), "██████");
+	assert.equal(detailBar(-10), "░░░░░░");
+	assert.equal(detailBar(Number.NaN), "░░░░░░");
+});
+
+test("fetchAgeLabel formats cache freshness", () => {
+	const now = 1_000_000;
+	assert.equal(fetchAgeLabel(now - 30_000, now), "just now");
+	assert.equal(fetchAgeLabel(now - 5 * 60_000, now), "5m ago");
+	assert.equal(fetchAgeLabel(now - 3 * 3600_000, now), "3h ago");
+	assert.equal(fetchAgeLabel(now - 3 * 86400_000, now), "3d ago");
+	assert.equal(fetchAgeLabel(Number.NaN, now), "unknown age");
+});
+
+test("formatUsageDetails lists every window with resets, plan, and freshness", () => {
+	const now = Date.parse("2026-09-06T12:00:00Z");
+	const text = formatUsageDetails(
+		{
+			windows: { weekly: 51, "5h": 12.5 },
+			resets: { "5h": now + 4 * 3600_000, weekly: now + 3 * 86400_000 },
+			plan: "plus",
+		},
+		"openai-codex",
+		{ modelId: "gpt-5", fetchedAt: now - 5 * 60_000, now },
+	);
+	const lines = text.split("\n");
+	assert.equal(lines[0], "Subscription usage — openai-codex (plus) • gpt-5");
+	// Preferred order: 5h before weekly regardless of input order.
+	assert.match(lines[1], /• 5h: 12\.5% .* — resets ~4h \(2026-09-06 16:00 UTC\)/);
+	assert.match(lines[2], /• weekly: 51% .* — resets ~3d \(2026-09-09 12:00 UTC\)/);
+	assert.equal(lines[3], "Updated 5m ago");
+});
+
+test("formatUsageDetails handles missing resets and empty data", () => {
+	const text = formatUsageDetails({ windows: { rolling: 2 } }, "opencode-go", {});
+	assert.match(text, /Subscription usage — opencode-go/);
+	assert.match(text, /• rolling: 2% ░░░░░░/);
+	assert.equal(formatUsageDetails({ windows: {} }, "openai-codex"), "openai-codex: no usage data");
 });

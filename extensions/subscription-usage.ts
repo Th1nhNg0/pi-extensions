@@ -412,6 +412,98 @@ function joinParts(
 	return parts.join(` ${theme.fg("dim", "·")} `);
 }
 
+
+/** Plain (theme-free) bar cells for the detailed `/usage` readout. */
+export function detailBar(percent: number): string {
+	const safePercent = normalizePercent(percent) ?? 0;
+	const filled = Math.round((safePercent / 100) * BAR_CELLS);
+	return "█".repeat(filled) + "░".repeat(BAR_CELLS - filled);
+}
+
+/** Preferred window order for the detailed readout; unknown keys sort alphabetically after. */
+const DETAIL_WINDOW_ORDER = [
+	"5h",
+	"rolling",
+	"daily",
+	"gemini-5h",
+	"3p-5h",
+	"weekly",
+	"gemini-weekly",
+	"3p-weekly",
+	"monthly",
+] as const;
+
+function detailWindowOrder(key: string): number {
+	const idx = (DETAIL_WINDOW_ORDER as readonly string[]).indexOf(key);
+	return idx === -1 ? Number.MAX_SAFE_INTEGER : idx;
+}
+
+/** Compact age label for `fetchedAt`, e.g. "just now", "5m ago", "3h ago". */
+export function fetchAgeLabel(fetchedAt: number, now = Date.now()): string {
+	if (!Number.isFinite(fetchedAt) || !Number.isFinite(now)) return "unknown age";
+	const age = now - fetchedAt;
+	if (age < 0) return "just now";
+	if (age < 60_000) return "just now";
+	const m = Math.floor(age / 60_000);
+	if (m < 60) return `${m}m ago`;
+	const h = Math.floor(m / 60);
+	if (h < 48) return `${h}h ago`;
+	const d = Math.floor(h / 24);
+	return `${d}d ago`;
+}
+
+/**
+ * Full multi-line breakdown of every usage window for a provider.
+ *
+ * Used by the `/usage` command (plain text for `ctx.ui.notify`), unlike the
+ * single-line footer `render()` which is theme-colored and truncated to the
+ * active model's pool. Shows per-window percent + bar + relative reset
+ * countdown + absolute reset time, plus plan and freshness when known.
+ */
+export function formatUsageDetails(
+	data: UsageData,
+	providerId: string,
+	options: { modelId?: string; fetchedAt?: number; now?: number } = {},
+): string {
+	const now = options.now ?? Date.now();
+	const normalized = normalizeUsageData(data);
+	if (!normalized) return `${providerId}: no usage data`;
+	const headerPlan = normalized.plan ? ` (${normalized.plan})` : "";
+	const headerModel = options.modelId ? ` \u2022 ${options.modelId}` : "";
+	const lines: string[] = [`Subscription usage \u2014 ${providerId}${headerPlan}${headerModel}`];
+	const keys = Object.keys(normalized.windows).sort((a, b) => {
+		const order = detailWindowOrder(a) - detailWindowOrder(b);
+		return order !== 0 ? order : a.localeCompare(b);
+	});
+	for (const key of keys) {
+		const percent = normalized.windows[key];
+		if (typeof percent !== "number") continue;
+		const safe = normalizePercent(percent) ?? 0;
+		const cells = detailBar(safe);
+		const reset = normalized.resets?.[key];
+		if (typeof reset === "number" && Number.isFinite(reset)) {
+			const rel = resetLabel(reset, now);
+			let abs: string;
+			try {
+				abs = new Date(reset).toISOString().replace("T", " ").slice(0, 16) + " UTC";
+			} catch {
+				abs = "unknown time";
+			}
+			lines.push(`\u2022 ${key}: ${safe}% ${cells} \u2014 resets ${rel} (${abs})`);
+		} else {
+			lines.push(`\u2022 ${key}: ${safe}% ${cells}`);
+		}
+	}
+	if (providerId === "opencode-go" && options.modelId && /deepseek/i.test(options.modelId)) {
+		const peak = getDeepSeekPeakInfo(now);
+		const tag = peak.isPeak ? `Peak hours ${resetLabel(peak.nextFlipMs, now)} left` : `Off-peak ${resetLabel(peak.nextFlipMs, now)} until peak`;
+		lines.push(`\u2022 deepseek pool: ${tag}`);
+	}
+	if (typeof options.fetchedAt === "number" && Number.isFinite(options.fetchedAt) && options.fetchedAt > 0) {
+		lines.push(`Updated ${fetchAgeLabel(options.fetchedAt, now)}`);
+	}
+	return lines.join("\n");
+}
 /** ±JITTER_RATIO randomization so timers don't line up across instances. */
 function jitter(ms: number): number {
 	return Math.round(ms * (1 + (Math.random() * 2 - 1) * JITTER_RATIO));
@@ -1405,6 +1497,60 @@ export default function (pi: ExtensionAPI) {
 					: `Usage refresh finished from cache for ${cfg.id}`,
 				"info",
 			);
+		},
+	});
+
+	/**
+	 * `/usage` — show every usage window for all providers as a detailed
+	 * readout. Unlike the one-line footer, this lists all buckets with
+	 * percents, bars, reset countdowns, absolute reset times, plan, and
+	 * freshness. Only the active provider is live-fetched; the rest render
+	 * from cache. Works even while the footer is hidden (`off`).
+	 */
+	pi.registerCommand("usage", {
+		description: "Show detailed subscription usage for all providers",
+		handler: async (_args, ctx) => {
+			const model = safeModel(ctx);
+			const activeCfg = cfgs.find((c) => c.id === model?.provider);
+			// One live fetch for the active provider; the rest render from cache
+			// so one keystroke never fans out to every API.
+			// While hidden (`off`) there are no fetches at all; render from cache.
+			if (activeCfg && mode !== "off") {
+				try {
+					await refresh(activeCfg, ctx, true, true);
+				} catch {
+					// refresh() already renders footer errors; details fall back to cache below.
+				}
+				const s = cache.get(activeCfg.id);
+				const current = safeModel(ctx);
+				if (s && safeUi(ctx) && mode !== "off")
+					arm(activeCfg, ctx, nextDelay(s, Date.now(), current?.id, activeCfg.id));
+			}
+			const sections: string[] = [];
+			for (const cfg of cfgs) {
+				const state = cache.get(cfg.id);
+				let data = state?.lastData;
+				let fetchedAt = state?.lastFetch;
+				if (!data) {
+					try {
+						const disk = (await loadDiskCache())[cfg.id];
+						if (disk?.data) {
+							data = disk.data;
+							fetchedAt = disk.fetchedAt;
+						}
+					} catch {
+						// Disk cache is best-effort; missing data is reported below.
+					}
+				}
+				const modelId = cfg === activeCfg ? model?.id : undefined;
+				sections.push(
+					data
+						? formatUsageDetails(data, cfg.id, { modelId, fetchedAt, now: Date.now() })
+						: `${cfg.id}: no usage data yet`,
+				);
+			}
+			const hiddenHint = mode === "off" ? "\n(Footer hidden — /usage-toggle to restore it)" : "";
+			ctx.ui.notify(sections.join("\n\n") + hiddenHint, "info");
 		},
 	});
 	pi.on("session_start", async (_event, ctx) => {

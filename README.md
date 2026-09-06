@@ -53,6 +53,15 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 
 Use `/usage-refresh` to request fresh usage immediately, bypassing cooldowns. When the display is `off`, this command makes no requests; enable it with `/usage-toggle` first. Automatic retries recover from temporary provider failures without needing a model switch or reload.
 
+Use `/usage` to show every window for **all** providers as a detailed readout (percents, bars, reset countdowns + absolute reset times, plan, and freshness). Only the active provider is live-fetched; the rest render from cache. It works even while the footer is hidden.
+
+```text
+Subscription usage — openai-codex (plus) • gpt-5
+• 5h: 1% ░░░░░░ — resets ~4h (2026-09-06 16:00 UTC)
+• weekly: 51% ███░░░ — resets ~3d (2026-09-09 12:00 UTC)
+Updated 5m ago
+```
+
 ---
 
 ### 2. `discord-presence` (`extensions/discord-presence.ts`)

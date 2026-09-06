@@ -125,3 +125,37 @@ test("disk sync cannot restore polling after shutdown during a cache read", asyn
 	await flush();
 	assert.equal(h.fetch.mock.callCount(), 1);
 });
+
+test("/usage shows all providers", async (t) => {
+	const h = harness(t);
+	await h.event("session_start");
+	assert.ok(h.commands.has("usage"));
+	const notices: string[] = [];
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	h.fetch.mock.mockImplementation(async () => ({
+		windows: { "5h": 12, weekly: 34 },
+		resets: { "5h": Date.now() + 3600_000, weekly: Date.now() + 86400_000 },
+		plan: "plus",
+	}));
+	await h.commands.get("usage")!.handler("", h.ctx);
+	await flush();
+	const last = notices.at(-1)!;
+	assert.match(last, /Subscription usage — openai-codex/);
+	assert.match(last, /• 5h: 12%/);
+	assert.match(last, /• weekly: 34%/);
+	// Default view covers every provider; unconfigured ones report no data.
+	assert.match(last, /opencode-go/);
+	assert.match(last, /antigravity/);
+});
+
+test("/usage works while hidden without fetching", async (t) => {
+	const h = harness(t, "off");
+	await h.event("session_start");
+	const notices: string[] = [];
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	await h.commands.get("usage")!.handler("", h.ctx);
+	await flush();
+	assert.equal(h.fetch.mock.callCount(), 0);
+	assert.match(notices.at(-1)!, /opencode-go/);
+	assert.match(notices.at(-1)!, /Footer hidden/);
+});
