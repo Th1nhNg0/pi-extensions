@@ -112,6 +112,7 @@ export const ACTION_BADGE_COLORS: Record<PresenceAction, string> = {
 	running: "#30d158",
 	browsing: "#5e5ce6",
 	tools: "#ffd60a",
+	subagents: "#a78bfa",
 	idle: "#ffffff",
 };
 
@@ -124,6 +125,7 @@ const ACTION_PHOSPHOR_ICONS: Record<PresenceAction, string> = {
 	running: "terminal-window",
 	browsing: "globe",
 	tools: "wrench",
+	subagents: "robot",
 	idle: "pause-circle",
 };
 
@@ -193,6 +195,7 @@ export type PresenceAction =
 	| "testing"
 	| "browsing"
 	| "tools"
+	| "subagents"
 	| "idle";
 
 export type PresencePrivacyMode = "strict" | "project" | "developer";
@@ -249,6 +252,7 @@ export interface SessionRecord {
 	lastSeenAt: number;
 	usage: UsageTotals;
 	context?: ContextSnapshot;
+	activeSubagents?: number;
 }
 
 export interface PresenceState {
@@ -333,6 +337,7 @@ export interface PresenceManagerOptions {
 	enableAssets?: boolean;
 	largeImageKey?: string;
 	smallImageKey?: string;
+	initialActiveSubagents?: number;
 }
 
 function defaultLogger(message: string): void {
@@ -483,12 +488,14 @@ export interface AggregateSummary {
 	usage: UsageTotals;
 	projectCount: number;
 	startTimestamp: number;
+	subagentCount?: number;
 }
 
 function summarizeRecords(records: readonly SessionRecord[]): AggregateSummary {
 	const usage = emptyUsageTotals();
 	const projects = new Set<string>();
 	let startTimestamp = Number.POSITIVE_INFINITY;
+	let subagentCount = 0;
 	for (const record of records) {
 		projects.add(record.projectName);
 		startTimestamp = Math.min(startTimestamp, record.startedAt);
@@ -503,11 +510,13 @@ function summarizeRecords(records: readonly SessionRecord[]): AggregateSummary {
 			usage.costComplete &&
 			record.usage.costComplete &&
 			record.usage.cost !== undefined;
+		subagentCount += record.activeSubagents ?? 0;
 	}
 	return {
 		usage,
 		projectCount: projects.size,
 		startTimestamp: Number.isFinite(startTimestamp) ? startTimestamp : Date.now(),
+		subagentCount,
 	};
 }
 
@@ -584,8 +593,26 @@ export function formatPhase(phase: PresencePhase): string {
 export function formatAction(
 	action?: PresenceAction,
 	phase: PresencePhase = "idle",
+	subagents = 0,
 ): string {
 	const effectiveAction = action ?? (phase === "tools" ? "tools" : phase);
+	if (subagents > 0) {
+		if (
+			phase === "idle" ||
+			effectiveAction === "idle" ||
+			effectiveAction === "subagents"
+		) {
+			return `${subagents} subagent${subagents === 1 ? "" : "s"} running`;
+		}
+		return `${formatActionName(effectiveAction, phase)} (${subagents} subagent${subagents === 1 ? "" : "s"})`;
+	}
+	return formatActionName(effectiveAction, phase);
+}
+
+function formatActionName(
+	effectiveAction: PresenceAction,
+	phase: PresencePhase = "idle",
+): string {
 	switch (effectiveAction) {
 		case "thinking":
 			return "Thinking";
@@ -603,6 +630,8 @@ export function formatAction(
 			return "Browsing";
 		case "tools":
 			return "Using tools";
+		case "subagents":
+			return "Running subagents";
 		case "idle":
 			return "Idle";
 		default:
@@ -694,6 +723,15 @@ export function classifyToolAction(
 		return "running";
 	}
 
+	// Subagent delegation tools
+	if (
+		normalized === "subagent" ||
+		normalized.includes("subagent") ||
+		normalized.includes("sub agent")
+	) {
+		return "subagents";
+	}
+
 	return "tools";
 }
 
@@ -704,6 +742,7 @@ const ACTION_PRIORITY: Record<PresenceAction, number> = {
 	searching: 4,
 	reading: 3,
 	running: 2,
+	subagents: 1.5,
 	tools: 1,
 	thinking: 0,
 	idle: 0,
@@ -884,7 +923,11 @@ export function formatPublicMetrics(
 }
 
 export function formatSingleSessionDetails(record: SessionRecord): string {
-	const actionText = formatAction(record.action, record.phase);
+	const actionText = formatAction(
+		record.action,
+		record.phase,
+		record.activeSubagents ?? 0,
+	);
 	const modelText = formatDiscordModelLabel(record.provider, record.modelId);
 	return truncateText(`${actionText} · ${modelText}`);
 }
@@ -933,10 +976,19 @@ export function formatMultiSessionDetails(
 export function formatMultiSessionState(
 	records: readonly SessionRecord[],
 	projectCount: number,
+	subagentCount = 0,
 ): string {
-	const activeCount = records.filter((r) => r.phase !== "idle").length;
-	const activeLabel =
-		activeCount === 0 ? `${records.length} idle` : `${activeCount} active`;
+	const activeCount = records.filter(
+		(r) => r.phase !== "idle" || (r.activeSubagents ?? 0) > 0,
+	).length;
+	let activeLabel: string;
+	if (activeCount === 0) {
+		activeLabel = `${records.length} idle`;
+	} else if (subagentCount > 0) {
+		activeLabel = `${activeCount} active (${subagentCount} subagent${subagentCount === 1 ? "" : "s"})`;
+	} else {
+		activeLabel = `${activeCount} active`;
+	}
 	const modelLabel = summarizeModels(records);
 	const projectLabel = `${projectCount} project${projectCount === 1 ? "" : "s"}`;
 	return truncateText(`${activeLabel} · ${modelLabel} · ${projectLabel}`);
@@ -947,6 +999,7 @@ export function attachAssetsAndButtons(
 	action?: PresenceAction,
 	phase: PresencePhase = "idle",
 	options: ActivityBuildOptions = {},
+	subagents = 0,
 ): void {
 	const clientId = options.clientId ?? DEFAULT_CLIENT_ID;
 	const isDefaultClient = clientId === DEFAULT_CLIENT_ID;
@@ -997,7 +1050,10 @@ export function attachAssetsAndButtons(
 	}
 
 	if (canUseAssets && !smallDisabled) {
-		const effectiveAction = action ?? (phase === "tools" ? "tools" : phase);
+		let effectiveAction = action ?? (phase === "tools" ? "tools" : phase);
+		if (subagents > 0 && (phase === "idle" || effectiveAction === "idle")) {
+			effectiveAction = "subagents";
+		}
 		let smallKey: string =
 			ACTION_BADGE_URLS[effectiveAction] ?? ACTION_BADGE_URLS.tools;
 		if (
@@ -1011,7 +1067,7 @@ export function attachAssetsAndButtons(
 		}
 
 		const smallText =
-			options.smallImageText ?? formatAction(effectiveAction, phase);
+			options.smallImageText ?? formatAction(effectiveAction, phase, subagents);
 
 		if (smallKey.startsWith("http://") || smallKey.startsWith("https://")) {
 			activity.smallImageUrl = smallKey;
@@ -1057,7 +1113,13 @@ export function buildSingleSessionActivity(
 		instance: true,
 	};
 
-	attachAssetsAndButtons(activity, record.action, record.phase, options);
+	attachAssetsAndButtons(
+		activity,
+		record.action,
+		record.phase,
+		options,
+		record.activeSubagents ?? 0,
+	);
 	return activity;
 }
 
@@ -1079,7 +1141,11 @@ export function buildMultiSessionActivity(
 	const summary = summarizeRecords(records);
 	const showCost = options.showCost ?? true;
 	const details = formatMultiSessionDetails(summary, records.length, showCost);
-	const activityState = formatMultiSessionState(records, summary.projectCount);
+	const activityState = formatMultiSessionState(
+		records,
+		summary.projectCount,
+		summary.subagentCount,
+	);
 
 	const activity: PresenceActivity = {
 		details,
@@ -1088,7 +1154,13 @@ export function buildMultiSessionActivity(
 		instance: true,
 	};
 
-	attachAssetsAndButtons(activity, primary.action, primary.phase, options);
+	attachAssetsAndButtons(
+		activity,
+		primary.action,
+		primary.phase,
+		options,
+		primary.activeSubagents ?? 0,
+	);
 	return activity;
 }
 
@@ -1151,8 +1223,8 @@ function orderedSessions(state: PresenceState): SessionRecord[] {
 		? state.sessions[state.publisherId]
 		: undefined;
 	return records.sort((a, b) => {
-		const aActive = a.phase !== "idle";
-		const bActive = b.phase !== "idle";
+		const aActive = a.phase !== "idle" || (a.activeSubagents ?? 0) > 0;
+		const bActive = b.phase !== "idle" || (b.activeSubagents ?? 0) > 0;
 		if (aActive !== bActive) return aActive ? -1 : 1;
 		if (!aActive && a.sessionId === publisher?.sessionId) return -1;
 		if (!bActive && b.sessionId === publisher?.sessionId) return 1;
@@ -1272,6 +1344,7 @@ const validActions = new Set<string>([
 	"testing",
 	"browsing",
 	"tools",
+	"subagents",
 	"idle",
 ]);
 
@@ -1292,6 +1365,7 @@ function parseSessionRecord(value: unknown): SessionRecord | undefined {
 	const startedAt = finiteNumber(record.startedAt);
 	const lastSeenAt = finiteNumber(record.lastSeenAt);
 	const usage = parseUsage(record.usage);
+	const activeSubagents = finiteNonNegative(record.activeSubagents);
 	if (
 		!sessionId ||
 		projectName === undefined ||
@@ -1313,6 +1387,9 @@ function parseSessionRecord(value: unknown): SessionRecord | undefined {
 		lastSeenAt: lastSeenAt as number,
 		usage,
 		context: parseContext(record.context),
+		...(activeSubagents !== undefined && activeSubagents > 0
+			? { activeSubagents }
+			: {}),
 	};
 }
 
@@ -2000,6 +2077,11 @@ export class DiscordPresenceManager {
 			lastSeenAt: startedAt,
 			usage: cloneUsage(options.initialUsage ?? emptyUsageTotals()),
 			context: options.initialContext ? { ...options.initialContext } : undefined,
+			activeSubagents:
+				options.initialActiveSubagents !== undefined &&
+				options.initialActiveSubagents > 0
+					? Math.floor(options.initialActiveSubagents)
+					: undefined,
 		};
 	}
 
@@ -2100,6 +2182,17 @@ export class DiscordPresenceManager {
 	setContextUsage(context: ContextSnapshot | undefined): Promise<void> {
 		this.record.context = context ? { ...context } : undefined;
 		return this.enqueueRegistryUpdate();
+	}
+	setActiveSubagents(count: number): Promise<void> {
+		const safeCount = Math.max(0, Math.floor(count));
+		const currentCount = this.record.activeSubagents ?? 0;
+		if (currentCount === safeCount) return Promise.resolve();
+		this.record.activeSubagents = safeCount > 0 ? safeCount : undefined;
+		return this.enqueueRegistryUpdate();
+	}
+
+	getActiveSubagents(): number {
+		return this.record.activeSubagents ?? 0;
 	}
 
 	/** Force a state read; useful for diagnostics and deterministic tests. */
@@ -2476,7 +2569,11 @@ function formatDuration(ms: number): string {
 
 function formatDiagnosticSession(record: SessionRecord, now: number): string {
 	const model = formatModelLabel(record.provider, record.modelId);
-	const action = formatAction(record.action, record.phase);
+	const action = formatAction(
+		record.action,
+		record.phase,
+		record.activeSubagents ?? 0,
+	);
 	const context =
 		record.context?.percent === null || record.context?.percent === undefined
 			? "ctx ?"
@@ -2486,8 +2583,183 @@ function formatDiagnosticSession(record: SessionRecord, now: number): string {
 	return `${project} · ${model} · ${action} · ${formatTokenCount(record.usage.total)} tok (${breakdown}) · ${formatCost(record.usage)} · ${context} · ${formatDuration(now - record.startedAt)}`;
 }
 
+export const SUBAGENT_ASYNC_STARTED_EVENT = "subagent:async-started";
+export const SUBAGENT_ASYNC_COMPLETE_EVENT = "subagent:async-complete";
+export const SUBAGENT_RPC_PROTOCOL_VERSION = 1;
+export const SUBAGENT_RPC_REQUEST_EVENT = "subagents:rpc:v1:request";
+export const SUBAGENT_RPC_READY_EVENT = "subagents:rpc:v1:ready";
+export const SUBAGENT_RPC_REPLY_EVENT_PREFIX = "subagents:rpc:v1:reply:";
+
+export interface SubagentTrackerEventBus {
+	on(event: string, handler: (data: unknown) => void): (() => void) | void;
+	emit(event: string, data: unknown): void;
+}
+
+export interface SubagentTrackerOptions {
+	events?: SubagentTrackerEventBus;
+	sessionId: string;
+	onCountChange?: (count: number) => void | Promise<void>;
+	logger?: (message: string) => void;
+}
+
+export class SubagentTracker {
+	private readonly events?: SubagentTrackerEventBus;
+	private readonly sessionId: string;
+	private readonly onCountChange?: (count: number) => void | Promise<void>;
+	private readonly logger: (message: string) => void;
+	private activeAsyncRuns = new Set<string>();
+	private activeForegroundCalls = new Set<string>();
+	private rpcActiveCount: number | undefined;
+	private installed = false;
+	private unsubscribers: Array<() => void> = [];
+	private lastNotifiedCount = 0;
+
+	constructor(options: SubagentTrackerOptions) {
+		this.events = options.events;
+		this.sessionId = options.sessionId;
+		this.onCountChange = options.onCountChange;
+		this.logger = options.logger ?? defaultLogger;
+		this.subscribeEvents();
+	}
+
+	private subscribeEvents(): void {
+		if (!this.events) return;
+
+		const unsubStart = this.events.on(SUBAGENT_ASYNC_STARTED_EVENT, (data) => {
+			if (!data || typeof data !== "object") return;
+			const ev = data as { id?: string; runId?: string; sessionId?: string };
+			const id = ev.id ?? ev.runId;
+			if (!id || typeof id !== "string") return;
+			if (ev.sessionId && this.sessionId && ev.sessionId !== this.sessionId) return;
+			this.installed = true;
+			this.activeAsyncRuns.add(id);
+			this.rpcActiveCount = undefined;
+			this.emitCount();
+		});
+		if (typeof unsubStart === "function") this.unsubscribers.push(unsubStart);
+
+		const unsubEnd = this.events.on(SUBAGENT_ASYNC_COMPLETE_EVENT, (data) => {
+			if (!data || typeof data !== "object") return;
+			const ev = data as { id?: string; runId?: string };
+			const id = ev.runId ?? ev.id;
+			if (!id || typeof id !== "string") return;
+			if (this.activeAsyncRuns.delete(id)) {
+				this.rpcActiveCount = undefined;
+				this.emitCount();
+			}
+		});
+		if (typeof unsubEnd === "function") this.unsubscribers.push(unsubEnd);
+
+		const unsubReady = this.events.on(SUBAGENT_RPC_READY_EVENT, () => {
+			this.installed = true;
+			this.queryRpcStatus();
+		});
+		if (typeof unsubReady === "function") this.unsubscribers.push(unsubReady);
+	}
+
+	onToolExecutionStart(toolCallId: string, toolName?: string): void {
+		if (!toolName) return;
+		const normalized = toolName.trim().toLowerCase();
+		if (
+			normalized === "subagent" ||
+			normalized.includes("subagent") ||
+			normalized.includes("sub-agent")
+		) {
+			this.installed = true;
+			this.activeForegroundCalls.add(toolCallId);
+			this.emitCount();
+		}
+	}
+
+	onToolExecutionEnd(toolCallId: string): void {
+		if (this.activeForegroundCalls.delete(toolCallId)) {
+			this.emitCount();
+		}
+	}
+
+	markInstalled(): void {
+		this.installed = true;
+	}
+
+	isInstalled(): boolean {
+		return this.installed;
+	}
+
+	queryRpcStatus(): void {
+		if (!this.events) return;
+		const requestId = randomUUID();
+		const replyEvent = `${SUBAGENT_RPC_REPLY_EVENT_PREFIX}${requestId}`;
+		let unsub: (() => void) | undefined;
+		const timer = setTimeout(() => {
+			unsub?.();
+		}, 4000);
+		timer.unref?.();
+
+		const unlisten = this.events.on(replyEvent, (reply) => {
+			clearTimeout(timer);
+			unsub?.();
+			if (!reply || typeof reply !== "object") return;
+			const res = reply as {
+				ok?: boolean;
+				result?: { fleet?: { totalActive?: number } };
+			};
+			if (
+				res.ok &&
+				res.result?.fleet &&
+				typeof res.result.fleet.totalActive === "number"
+			) {
+				this.installed = true;
+				const totalActive = Math.max(0, Math.floor(res.result.fleet.totalActive));
+				this.rpcActiveCount = totalActive;
+				this.emitCount();
+			}
+		});
+		if (typeof unlisten === "function") {
+			unsub = unlisten;
+		}
+
+		try {
+			this.events.emit(SUBAGENT_RPC_REQUEST_EVENT, {
+				version: SUBAGENT_RPC_PROTOCOL_VERSION,
+				requestId,
+				method: "status",
+				params: { action: "status" },
+			});
+		} catch {
+			clearTimeout(timer);
+			unsub?.();
+		}
+	}
+
+	getTotalActiveCount(): number {
+		const tracked = this.activeAsyncRuns.size + this.activeForegroundCalls.size;
+		if (this.rpcActiveCount !== undefined) {
+			return Math.max(tracked, this.rpcActiveCount);
+		}
+		return tracked;
+	}
+
+	private emitCount(): void {
+		const count = this.getTotalActiveCount();
+		if (count !== this.lastNotifiedCount) {
+			this.lastNotifiedCount = count;
+			void this.onCountChange?.(count);
+		}
+	}
+
+	dispose(): void {
+		for (const unsub of this.unsubscribers) unsub();
+		this.unsubscribers = [];
+		this.activeAsyncRuns.clear();
+		this.activeForegroundCalls.clear();
+		this.rpcActiveCount = undefined;
+		this.lastNotifiedCount = 0;
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	let manager: DiscordPresenceManager | undefined;
+	let subagentTracker: SubagentTracker | undefined;
 	let disabledReason: string | undefined;
 	let agentActive = false;
 	const activeTools = new Map<string, PresenceAction>();
@@ -2496,9 +2768,12 @@ export default function (pi: ExtensionAPI) {
 	async function handleStatus(
 		ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1],
 	) {
-		const text = manager
+		let text = manager
 			? await manager.getDiagnosticText()
 			: `Discord presence: ${disabledReason ?? "not started"}`;
+		if (subagentTracker?.isInstalled()) {
+			text += `\nSubagents integration: active (${subagentTracker.getTotalActiveCount()} running)`;
+		}
 		ctx.ui.notify(
 			text,
 			manager?.getStatus() === "connected" ? "info" : "warning",
@@ -2631,6 +2906,7 @@ export default function (pi: ExtensionAPI) {
 			`• Buttons: ${buttons ? "enabled" : "disabled"}`,
 			`• Large Image: ${largeImg}`,
 			`• Small Images: ${smallImg}`,
+			`• Subagents: ${subagentTracker?.isInstalled() ? `detected (${subagentTracker.getTotalActiveCount()} running)` : "not detected"}`,
 			`• Preferences file: ${DEFAULT_PREFS_PATH}`,
 			"",
 			"Commands:",
@@ -2771,6 +3047,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		const sessionStartedAt = Date.now();
+		subagentTracker?.dispose();
+		subagentTracker = undefined;
 		if (manager) await manager.stop();
 		manager = undefined;
 		disabledReason = undefined;
@@ -2832,6 +3110,24 @@ export default function (pi: ExtensionAPI) {
 			smallImageKey: process.env[SMALL_IMAGES_ENV] ?? prefs.smallImages,
 		});
 		void manager.start();
+
+		const sessionManagerId =
+			ctx.sessionManager?.getSessionFile?.() ??
+			ctx.sessionManager?.getSessionId?.() ??
+			manager.getSessionId();
+
+		subagentTracker = new SubagentTracker({
+			events: pi.events,
+			sessionId: sessionManagerId,
+			onCountChange: async (count) => {
+				await manager?.setActiveSubagents(count);
+			},
+		});
+
+		if (pi.getAllTools?.().some((t) => t.name === "subagent")) {
+			subagentTracker.markInstalled();
+			subagentTracker.queryRpcStatus();
+		}
 	});
 
 	pi.on("model_select", async (event) => {
@@ -2864,8 +3160,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_start", async (event) => {
-		const action = classifyToolAction(event?.toolName);
 		const callId = event?.toolCallId ?? `anon-${++anonymousToolCounter}`;
+		subagentTracker?.onToolExecutionStart(callId, event?.toolName);
+		const action = classifyToolAction(event?.toolName);
 		activeTools.set(callId, action);
 		const currentAction = pickHighestPriorityAction(activeTools.values());
 		await manager?.setPhase("tools", currentAction);
@@ -2873,10 +3170,14 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_execution_end", async (event) => {
 		if (event?.toolCallId && activeTools.has(event.toolCallId)) {
+			subagentTracker?.onToolExecutionEnd(event.toolCallId);
 			activeTools.delete(event.toolCallId);
 		} else if (activeTools.size > 0) {
 			const firstKey = activeTools.keys().next().value;
-			if (firstKey !== undefined) activeTools.delete(firstKey);
+			if (firstKey !== undefined) {
+				subagentTracker?.onToolExecutionEnd(firstKey);
+				activeTools.delete(firstKey);
+			}
 		}
 
 		if (activeTools.size > 0) {
@@ -2892,11 +3193,14 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_settled", async (_event, ctx) => {
 		agentActive = false;
 		activeTools.clear();
+		subagentTracker?.queryRpcStatus();
 		await manager?.setPhase("idle", "idle");
 		await manager?.setContextUsage(normalizeContextUsage(ctx.getContextUsage()));
 	});
 
 	pi.on("session_shutdown", async () => {
+		subagentTracker?.dispose();
+		subagentTracker = undefined;
 		await manager?.stop();
 		manager = undefined;
 		agentActive = false;

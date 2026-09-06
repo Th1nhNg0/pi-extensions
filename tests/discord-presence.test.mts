@@ -54,6 +54,7 @@ import {
 	resolveDiscordTransportMode,
 	summarizeModels,
 	writePrefs,
+	SubagentTracker,
 	default as discordPresenceExtension,
 } from "../extensions/discord-presence.ts";
 
@@ -307,6 +308,10 @@ test("classifyToolAction maps tool names safely and sanitizes categories", () =>
 	assert.equal(classifyToolAction("powershell"), "running");
 	assert.equal(classifyToolAction("cmd"), "running");
 	assert.equal(classifyToolAction("terminal"), "running");
+	// Subagent delegation tools
+	assert.equal(classifyToolAction("subagent"), "subagents");
+	assert.equal(classifyToolAction("subagents"), "subagents");
+	assert.equal(classifyToolAction("run_subagent"), "subagents");
 
 	// Unknown / fallback tools
 	assert.equal(classifyToolAction("unknown_tool"), "tools");
@@ -749,6 +754,7 @@ test("default action badges use Phosphor Duotone icons and distinct colors", () 
 		running: "terminal-window",
 		browsing: "globe",
 		tools: "wrench",
+		subagents: "robot",
 		idle: "pause-circle",
 	};
 
@@ -890,6 +896,14 @@ test("formatPhase and formatAction return human readable labels", () => {
 	assert.equal(formatAction("browsing"), "Browsing");
 	assert.equal(formatAction("tools"), "Using tools");
 	assert.equal(formatAction("idle"), "Idle");
+	assert.equal(formatAction("subagents"), "Running subagents");
+	assert.equal(formatAction("idle", "idle", 0), "Idle");
+	assert.equal(formatAction("idle", "idle", 1), "1 subagent running");
+	assert.equal(formatAction("idle", "idle", 2), "2 subagents running");
+	assert.equal(formatAction("thinking", "thinking", 1), "Thinking (1 subagent)");
+	assert.equal(formatAction("thinking", "thinking", 2), "Thinking (2 subagents)");
+	assert.equal(formatAction("editing", "tools", 3), "Editing (3 subagents)");
+	assert.equal(formatAction("subagents", "tools", 2), "2 subagents running");
 	assert.equal(formatAction(undefined, "thinking"), "Thinking");
 });
 
@@ -968,6 +982,45 @@ test("pure formatting helpers format single and multi session components", () =>
 	assert.equal(
 		formatMultiSessionState(records, 2),
 		"1 active · GPT-5.6 · 2 projects",
+	);
+	assert.equal(
+		formatMultiSessionState(records, 2, 3),
+		"1 active (3 subagents) · GPT-5.6 · 2 projects",
+	);
+
+	const idleRecords = [
+		makeRecord("s1", 100, { phase: "idle", action: "idle" }),
+		makeRecord("s2", 200, { phase: "idle", action: "idle", activeSubagents: 2 }),
+	];
+	assert.equal(
+		formatMultiSessionState(idleRecords, 2, 2),
+		"1 active (2 subagents) · Pi · 2 projects",
+	);
+
+	const idleWithSubagents = makeRecord("sub-1", 100, {
+		projectName: "my-project",
+		provider: "anthropic",
+		modelId: "claude-sonnet-4",
+		phase: "idle",
+		action: "idle",
+		activeSubagents: 2,
+	});
+	assert.equal(
+		formatSingleSessionDetails(idleWithSubagents),
+		"2 subagents running · Claude Sonnet 4",
+	);
+
+	const activeWithSubagents = makeRecord("sub-2", 100, {
+		projectName: "my-project",
+		provider: "anthropic",
+		modelId: "claude-sonnet-4",
+		phase: "thinking",
+		action: "thinking",
+		activeSubagents: 1,
+	});
+	assert.equal(
+		formatSingleSessionDetails(activeWithSubagents),
+		"Thinking (1 subagent) · Claude Sonnet 4",
 	);
 });
 
@@ -1345,4 +1398,215 @@ test("publisher reloads shared privacy after a standby session changes it", asyn
 	await first.refresh();
 	assert.equal(first.getPrivacyMode(), "strict");
 	assert.doesNotMatch(JSON.stringify(transport.activities.at(-1)), /private-project/);
+});
+
+test("buildSingleSessionActivity renders robot badge and details when subagents are running", () => {
+	const idleWithSubagents = makeRecord("sub-idle", 100, {
+		projectName: "pi-repo",
+		provider: "anthropic",
+		modelId: "claude-sonnet-4",
+		phase: "idle",
+		action: "idle",
+		activeSubagents: 2,
+	});
+	const idleActivity = buildSingleSessionActivity(idleWithSubagents);
+	assert.equal(idleActivity.details, "2 subagents running · Claude Sonnet 4");
+	assert.equal(idleActivity.smallImageKey, ACTION_BADGE_URLS.subagents);
+	assert.equal(idleActivity.smallImageText, "2 subagents running");
+
+	const thinkingWithSubagents = makeRecord("sub-thinking", 100, {
+		projectName: "pi-repo",
+		provider: "anthropic",
+		modelId: "claude-sonnet-4",
+		phase: "thinking",
+		action: "thinking",
+		activeSubagents: 1,
+	});
+	const thinkingActivity = buildSingleSessionActivity(thinkingWithSubagents);
+	assert.equal(thinkingActivity.details, "Thinking (1 subagent) · Claude Sonnet 4");
+	assert.equal(thinkingActivity.smallImageKey, ACTION_BADGE_URLS.thinking);
+	assert.equal(thinkingActivity.smallImageText, "Thinking (1 subagent)");
+});
+
+test("SubagentTracker tracks async lifecycle and foreground tool executions", () => {
+	class MockBus {
+		private listeners = new Map<string, Array<(data: unknown) => void>>();
+		emitted: Array<{ event: string; data: unknown }> = [];
+
+		on(event: string, handler: (data: unknown) => void) {
+			let list = this.listeners.get(event);
+			if (!list) {
+				list = [];
+				this.listeners.set(event, list);
+			}
+			list.push(handler);
+			return () => {
+				const idx = list?.indexOf(handler) ?? -1;
+				if (idx >= 0) list?.splice(idx, 1);
+			};
+		}
+
+		emit(event: string, data: unknown) {
+			this.emitted.push({ event, data });
+			const list = this.listeners.get(event);
+			if (list) {
+				for (const handler of [...list]) handler(data);
+			}
+		}
+	}
+
+	const bus = new MockBus();
+	const counts: number[] = [];
+	const tracker = new SubagentTracker({
+		events: bus,
+		sessionId: "sess-1",
+		onCountChange: (c) => counts.push(c),
+	});
+
+	assert.equal(tracker.getTotalActiveCount(), 0);
+	assert.equal(tracker.isInstalled(), false);
+
+	// Async start for current session
+	bus.emit("subagent:async-started", { id: "job-1", sessionId: "sess-1" });
+	assert.equal(tracker.getTotalActiveCount(), 1);
+	assert.equal(tracker.isInstalled(), true);
+	assert.deepEqual(counts, [1]);
+
+	// Another async start for current session
+	bus.emit("subagent:async-started", { id: "job-2", sessionId: "sess-1" });
+	assert.equal(tracker.getTotalActiveCount(), 2);
+	assert.deepEqual(counts, [1, 2]);
+
+	// Async start for different session should be ignored
+	bus.emit("subagent:async-started", { id: "job-3", sessionId: "other-session" });
+	assert.equal(tracker.getTotalActiveCount(), 2);
+	assert.deepEqual(counts, [1, 2]);
+
+	// Foreground tool execution for subagent
+	tracker.onToolExecutionStart("tool-call-1", "subagent");
+	assert.equal(tracker.getTotalActiveCount(), 3);
+	assert.deepEqual(counts, [1, 2, 3]);
+
+	// Foreground tool execution end
+	tracker.onToolExecutionEnd("tool-call-1");
+	assert.equal(tracker.getTotalActiveCount(), 2);
+	assert.deepEqual(counts, [1, 2, 3, 2]);
+
+	// Complete first async job
+	bus.emit("subagent:async-complete", { runId: "job-1" });
+	assert.equal(tracker.getTotalActiveCount(), 1);
+	assert.deepEqual(counts, [1, 2, 3, 2, 1]);
+
+	// Complete second async job
+	bus.emit("subagent:async-complete", { id: "job-2" });
+	assert.equal(tracker.getTotalActiveCount(), 0);
+	assert.deepEqual(counts, [1, 2, 3, 2, 1, 0]);
+
+	tracker.dispose();
+});
+
+test("SubagentTracker reconciles via RPC status request", () => {
+	class MockBus {
+		private listeners = new Map<string, Array<(data: unknown) => void>>();
+		emitted: Array<{ event: string; data: unknown }> = [];
+
+		on(event: string, handler: (data: unknown) => void) {
+			let list = this.listeners.get(event);
+			if (!list) {
+				list = [];
+				this.listeners.set(event, list);
+			}
+			list.push(handler);
+			return () => {
+				const idx = list?.indexOf(handler) ?? -1;
+				if (idx >= 0) list?.splice(idx, 1);
+			};
+		}
+
+		emit(event: string, data: unknown) {
+			this.emitted.push({ event, data });
+			const list = this.listeners.get(event);
+			if (list) {
+				for (const handler of [...list]) handler(data);
+			}
+		}
+	}
+
+	const bus = new MockBus();
+	const counts: number[] = [];
+	const tracker = new SubagentTracker({
+		events: bus,
+		sessionId: "sess-rpc",
+		onCountChange: (c) => counts.push(c),
+	});
+
+	tracker.queryRpcStatus();
+	assert.equal(bus.emitted.length, 1);
+	assert.equal(bus.emitted[0].event, "subagents:rpc:v1:request");
+	const req = bus.emitted[0].data as { requestId: string; method: string };
+	assert.equal(req.method, "status");
+
+	// Deliver RPC reply
+	bus.emit(`subagents:rpc:v1:reply:${req.requestId}`, {
+		ok: true,
+		result: { fleet: { totalActive: 4 } },
+	});
+
+	assert.equal(tracker.getTotalActiveCount(), 4);
+	assert.equal(tracker.isInstalled(), true);
+	assert.deepEqual(counts, [4]);
+
+	tracker.dispose();
+});
+
+test("DiscordPresenceManager setActiveSubagents updates presence and activity", async () => {
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID,
+		projectName: "subagent-test",
+		stateStore,
+		createTransport: () => transport,
+		logger: () => {},
+		enableAssets: true,
+	});
+
+	await manager.start();
+	assert.equal(manager.getActiveSubagents(), 0);
+	assert.match(transport.activities.at(-1)?.details ?? "", /Idle/);
+	assert.equal(transport.activities.at(-1)?.smallImageKey, ACTION_BADGE_URLS.idle);
+
+	// Update subagents to 2 while session is idle
+	await manager.setActiveSubagents(2);
+	await manager.refresh();
+	assert.equal(manager.getActiveSubagents(), 2);
+	assert.match(transport.activities.at(-1)?.details ?? "", /2 subagents running/);
+	assert.equal(transport.activities.at(-1)?.smallImageKey, ACTION_BADGE_URLS.subagents);
+	assert.equal(transport.activities.at(-1)?.smallImageText, "2 subagents running");
+
+	// Subagents complete -> count becomes 0
+	await manager.setActiveSubagents(0);
+	await manager.refresh();
+	assert.equal(manager.getActiveSubagents(), 0);
+	assert.match(transport.activities.at(-1)?.details ?? "", /Idle/);
+	assert.equal(transport.activities.at(-1)?.smallImageKey, ACTION_BADGE_URLS.idle);
+	assert.equal(transport.activities.at(-1)?.smallImageText, "Idle");
+	await manager.stop();
+});
+
+test("FilePresenceStateStore serializes and restores activeSubagents", async () => {
+	const directory = await mkdtemp(join(os.tmpdir(), "pi-presence-subagent-test-"));
+	const path = join(directory, "state.json");
+	const store = new FilePresenceStateStore(path);
+
+	const record = makeRecord("session-with-subagents", 100, {
+		projectName: "test-proj",
+		activeSubagents: 3,
+	});
+
+	await store.upsert(record);
+	const restored = await store.read();
+	assert.equal(restored.sessions["session-with-subagents"]?.activeSubagents, 3);
+
+	await rm(directory, { recursive: true, force: true });
 });
