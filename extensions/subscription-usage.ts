@@ -10,7 +10,8 @@
  *   Peak ~2h · R: ░░░░░░ 4% ~4h                    ← DeepSeek peak hours
  *   5h: ░░░░░░ 1% ~4h · W: ░░░░░░ 0% ~6d
  *
- * `/usage-toggle [bars|percent|off]` cycles bars → bare percentages →
+ * `/usage` shows the detailed readout for all providers;
+ * `/usage toggle [bars|percent|off]` cycles bars → bare percentages →
  * hidden (or jumps straight to the given mode); the choice persists in
  * ~/.pi/agent/subscription-usage-prefs.json.
  *
@@ -1210,7 +1211,7 @@ export default function (pi: ExtensionAPI) {
 		return jitter(INTERVAL_MS);
 	}
 
-	// `hard` (manual /usage-refresh) also bypasses the MIN_FETCH_GAP_MS
+	// `hard` (manual /usage refresh) also bypasses the MIN_FETCH_GAP_MS
 	// burst guard, so one keystroke always performs a live provider request.
 	async function refresh(
 		cfg: ProviderCfg,
@@ -1264,7 +1265,7 @@ export default function (pi: ExtensionAPI) {
 
 			// Even on forced poke, if disk was updated within MIN_FETCH_GAP_MS
 			// (e.g. another session just fetched 2s ago), reuse it to avoid a
-			// duplicate burst request. Manual /usage-refresh (hard) skips this.
+			// duplicate burst request. Manual /usage refresh (hard) skips this.
 			if (!hard && now - state.lastFetch < MIN_FETCH_GAP_MS && state.lastData) {
 				const ui = safeUi(ctx);
 				if (ui) {
@@ -1381,135 +1382,162 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * `/usage-toggle [bars|percent|off]` — cycle bars → percent → off, or
-	 * jump straight to the given mode. The choice persists across sessions.
+	 * Shared `/usage` subcommand handlers — the single `usage` command
+	 * registered below dispatches to these, so every usage control lives
+	 * under one `/usage` command (like `/discord`).
 	 */
-	pi.registerCommand("usage-toggle", {
-		description:
-			"Cycle subscription usage display: bars → percent → off (or set directly)",
-		getArgumentCompletions: (prefix) => {
-			const items = [
-				{
-					value: "bars",
-					label: "bars",
-					description: "Visual quota progress bars",
-				},
-				{
-					value: "percent",
-					label: "percent",
-					description: "Compact percentage numbers",
-				},
-				{
-					value: "off",
-					label: "off",
-					description: "Hide usage readout completely",
-				},
-			];
-			const filtered = items.filter((item) =>
-				item.value.startsWith(prefix.trimStart().toLowerCase()),
-			);
-			return filtered.length > 0 ? filtered : null;
-		},
-		handler: async (args, ctx) => {
-			let next: UsageMode;
-			const arg = args.trim().toLowerCase();
-			if (arg) {
-				const parsed = normalizeUsageMode(arg);
-				if (!parsed) {
-					ctx.ui.notify(
-						`Unknown mode "${args.trim()}". Options: ${USAGE_MODES.join(", ")}`,
-						"warning",
-					);
-					return;
-				}
-				next = parsed;
-			} else {
-				// Cycle: bars → percent → off → bars
-				next = USAGE_MODES[(USAGE_MODES.indexOf(mode) + 1) % USAGE_MODES.length];
-			}
+	type UsageCmdCtx = Parameters<
+		Parameters<typeof pi.registerCommand>[1]["handler"]
+	>[1];
 
-			mode = next;
-			await savePrefs({ mode });
-
-			if (next === "off") {
-				// Hide: drop statuses and stop every timer/fetch for this session.
-				for (const c of cfgs) clear(ctx, c.id);
+	/** `/usage toggle [bars|percent|off]` — cycle the footer style or set it directly. */
+	async function handleUsageToggle(args: string, ctx: UsageCmdCtx): Promise<void> {
+		let next: UsageMode;
+		const arg = args.trim().toLowerCase();
+		if (arg) {
+			const parsed = normalizeUsageMode(arg);
+			if (!parsed) {
 				ctx.ui.notify(
-					"Subscription usage hidden (/usage-toggle restores it)",
-					"info",
-				);
-				return;
-			}
-
-			// Re-render from cached data so the footer updates immediately.
-			const model = safeModel(ctx);
-			const cfg = cfgs.find((c) => c.id === model?.provider);
-			const ui = safeUi(ctx);
-			const state = cfg ? cache.get(cfg.id) : undefined;
-			if (cfg && ui && state?.lastData) {
-				state.lastText = renderText(cfg, state.lastData, ui, model?.id);
-				renderUi(ui, cfg.id, state.lastText);
-				// Leaving "off" killed this provider's timer — re-arm it.
-				if (!state.timer)
-					arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
-			} else if (cfg && ui) {
-				// Nothing usable cached (e.g. first reveal after hiding) — fetch now.
-				poke(cfg, ctx, true);
-			}
-			ctx.ui.notify(`Subscription usage style: ${next}`, "info");
-		},
-	});
-
-	/**
-	 * `/usage-refresh` — force a live refetch for the active provider right
-	 * now, bypassing the cooldown and burst guards. Useful when the source
-	 * API lags (e.g. Antigravity quota summary right after a reset) and you
-	 * want to rule out client-side staleness in one keystroke.
-	 */
-	pi.registerCommand("usage-refresh", {
-		description:
-			"Force-refresh subscription usage now, bypassing the fetch cooldown",
-		handler: async (_args, ctx) => {
-			if (mode === "off") {
-				ctx.ui.notify(
-					"Subscription usage is hidden; use /usage-toggle to enable refreshes",
-					"info",
-				);
-				return;
-			}
-			const model = safeModel(ctx);
-			const cfg = cfgs.find((c) => c.id === model?.provider);
-			if (!cfg) {
-				ctx.ui.notify(
-					`No usage provider for "${model?.provider ?? "unknown"}"`,
+					`Unknown mode "${args.trim()}". Options: ${USAGE_MODES.join(", ")}`,
 					"warning",
 				);
 				return;
 			}
-			const outcome = await refresh(cfg, ctx, true, true);
-			const s = cache.get(cfg.id);
-			const current = safeModel(ctx);
-			if (s && safeUi(ctx))
-				arm(cfg, ctx, nextDelay(s, Date.now(), current?.id, cfg.id));
-			ctx.ui.notify(
-				outcome === "fetched"
-					? `Usage refreshed for ${cfg.id}`
-					: `Usage refresh finished from cache for ${cfg.id}`,
-				"info",
-			);
-		},
-	});
+			next = parsed;
+		} else {
+			// Cycle: bars → percent → off → bars
+			next = USAGE_MODES[(USAGE_MODES.indexOf(mode) + 1) % USAGE_MODES.length];
+		}
+
+		mode = next;
+		await savePrefs({ mode });
+
+		if (next === "off") {
+			// Hide: drop statuses and stop every timer/fetch for this session.
+			for (const c of cfgs) clear(ctx, c.id);
+			ctx.ui.notify("Subscription usage hidden (/usage toggle restores it)", "info");
+			return;
+		}
+
+		// Re-render from cached data so the footer updates immediately.
+		const model = safeModel(ctx);
+		const cfg = cfgs.find((c) => c.id === model?.provider);
+		const ui = safeUi(ctx);
+		const state = cfg ? cache.get(cfg.id) : undefined;
+		if (cfg && ui && state?.lastData) {
+			state.lastText = renderText(cfg, state.lastData, ui, model?.id);
+			renderUi(ui, cfg.id, state.lastText);
+			// Leaving "off" killed this provider's timer — re-arm it.
+			if (!state.timer)
+				arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
+		} else if (cfg && ui) {
+			// Nothing usable cached (e.g. first reveal after hiding) — fetch now.
+			poke(cfg, ctx, true);
+		}
+		ctx.ui.notify(`Subscription usage style: ${next}`, "info");
+	}
 
 	/**
-	 * `/usage` — show every usage window for all providers as a detailed
-	 * readout. Unlike the one-line footer, this lists all buckets with
-	 * percents, bars, reset countdowns, absolute reset times, plan, and
-	 * freshness. Only the active provider is live-fetched; the rest render
-	 * from cache. Works even while the footer is hidden (`off`).
+	 * `/usage refresh` — force a live refetch for the active provider right
+	 * now, bypassing the cooldown and burst guards. Useful when the source
+	 * API lags (e.g. Antigravity quota summary right after a reset) and you
+	 * want to rule out client-side staleness in one keystroke.
+	 */
+	async function handleUsageRefresh(_args: string, ctx: UsageCmdCtx): Promise<void> {
+		if (mode === "off") {
+			ctx.ui.notify(
+				"Subscription usage is hidden; use /usage toggle to enable refreshes",
+				"info",
+			);
+			return;
+		}
+		const model = safeModel(ctx);
+		const cfg = cfgs.find((c) => c.id === model?.provider);
+		if (!cfg) {
+			ctx.ui.notify(`No usage provider for "${model?.provider ?? "unknown"}"`, "warning");
+			return;
+		}
+		const outcome = await refresh(cfg, ctx, true, true);
+		const s = cache.get(cfg.id);
+		const current = safeModel(ctx);
+		if (s && safeUi(ctx))
+			arm(cfg, ctx, nextDelay(s, Date.now(), current?.id, cfg.id));
+		ctx.ui.notify(
+			outcome === "fetched"
+				? `Usage refreshed for ${cfg.id}`
+				: `Usage refresh finished from cache for ${cfg.id}`,
+			"info",
+		);
+	}
+
+	/**
+	 * Single `/usage` command: bare `/usage` shows the detailed readout;
+	 * `/usage toggle [bars|percent|off]` cycles the footer style;
+	 * `/usage refresh` force-refetches the active provider now.
 	 */
 	pi.registerCommand("usage", {
-		description: "Show detailed subscription usage for all providers",
-		handler: async (_args, ctx) => {
+		description: "Show subscription usage (/usage | toggle | refresh)",
+		getArgumentCompletions: (prefix) => {
+			const trimmed = prefix.trimStart();
+			const spaceIndex = trimmed.indexOf(" ");
+			if (spaceIndex === -1) {
+				const subcommands = [
+					{ value: "toggle", label: "toggle", description: "Cycle footer style: bars → percent → off" },
+					{ value: "refresh", label: "refresh", description: "Force-refresh the active provider now" },
+					{ value: "help", label: "help", description: "Show usage help" },
+				];
+				const filtered = subcommands.filter((sub) =>
+					sub.value.startsWith(trimmed.toLowerCase()),
+				);
+				return filtered.length > 0 ? filtered : null;
+			}
+			const sub = trimmed.slice(0, spaceIndex).toLowerCase();
+			const rest = trimmed.slice(spaceIndex + 1).trimStart().toLowerCase();
+			if (sub === "toggle") {
+				const modes = ["bars", "percent", "off"].map((m) => ({
+					value: `toggle ${m}`,
+					label: `toggle ${m}`,
+					description: `Set footer style to ${m}`,
+				}));
+				const filtered = modes.filter((item) => item.value.startsWith(`toggle ${rest}`));
+				return filtered.length > 0 ? filtered : null;
+			}
+			return null;
+		},
+		handler: async (args, ctx) => {
+			const trimmed = args.trim();
+			const spaceIndex = trimmed.indexOf(" ");
+			const sub = (spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex)).toLowerCase();
+			const rest = spaceIndex === -1 ? "" : trimmed.slice(spaceIndex + 1).trim();
+			switch (sub) {
+				case "":
+					break;
+				case "toggle":
+					await handleUsageToggle(rest, ctx);
+					return;
+				case "refresh":
+					await handleUsageRefresh(rest, ctx);
+					return;
+				case "help":
+					ctx.ui.notify(
+						[
+							"Subscription usage commands:",
+							"• /usage — detailed usage for all providers",
+							"• /usage toggle [bars|percent|off] — cycle or set footer style",
+							"• /usage refresh — force-refresh the active provider now",
+						].join("\n"),
+						"info",
+					);
+					return;
+				default:
+					ctx.ui.notify(
+						`Unknown subcommand "${sub}". Usage: /usage | toggle [bars|percent|off] | refresh`,
+						"warning",
+					);
+					return;
+			}
+
+			// Bare `/usage`: detailed readout for all providers.
 			const model = safeModel(ctx);
 			const activeCfg = cfgs.find((c) => c.id === model?.provider);
 			// One live fetch for the active provider; the rest render from cache
@@ -1549,7 +1577,7 @@ export default function (pi: ExtensionAPI) {
 						: `${cfg.id}: no usage data yet`,
 				);
 			}
-			const hiddenHint = mode === "off" ? "\n(Footer hidden — /usage-toggle to restore it)" : "";
+			const hiddenHint = mode === "off" ? "\n(Footer hidden — /usage toggle to restore it)" : "";
 			ctx.ui.notify(sections.join("\n\n") + hiddenHint, "info");
 		},
 	});

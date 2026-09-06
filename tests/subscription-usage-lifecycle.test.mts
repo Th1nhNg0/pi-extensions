@@ -84,7 +84,7 @@ test("scheduled retries recover after failure while event pokes respect backoff"
 test("manual refresh while hidden does not fetch, render, or start polling", async (t) => {
 	const h = harness(t, "off");
 	await h.event("session_start");
-	await h.commands.get("usage-refresh")!.handler("", h.ctx);
+	await h.commands.get("usage")!.handler("refresh", h.ctx);
 	await flush();
 	assert.equal(h.fetch.mock.callCount(), 0);
 	assert.equal(h.statuses.size, 0);
@@ -98,7 +98,7 @@ test("hiding usage discards an outstanding provider result", async (t) => {
 	let finish!: (data: { windows: Record<string, number> }) => void;
 	h.fetch.mock.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
 	await h.event("session_start");
-	await h.commands.get("usage-toggle")!.handler("off", h.ctx);
+	await h.commands.get("usage")!.handler("toggle off", h.ctx);
 	finish({ windows: { "5h": 12 } });
 	await flush();
 	assert.equal(h.statuses.get("openai-codex"), undefined);
@@ -158,4 +158,41 @@ test("/usage works while hidden without fetching", async (t) => {
 	assert.equal(h.fetch.mock.callCount(), 0);
 	assert.match(notices.at(-1)!, /opencode-go/);
 	assert.match(notices.at(-1)!, /Footer hidden/);
+});
+
+test("/usage toggle cycles footer style", async (t) => {
+	const h = harness(t);
+	await h.event("session_start");
+	const notices: string[] = [];
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	await h.commands.get("usage")!.handler("toggle", h.ctx);
+	await flush();
+	assert.match(notices.at(-1)!, /Subscription usage style: percent/);
+	await h.commands.get("usage")!.handler("toggle bars", h.ctx);
+	await flush();
+	assert.match(notices.at(-1)!, /Subscription usage style: bars/);
+});
+
+test("/usage refresh force-fetches the active provider", async (t) => {
+	const h = harness(t);
+	await h.event("session_start");
+	assert.equal(h.fetch.mock.callCount(), 1);
+	const notices: string[] = [];
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	await h.commands.get("usage")!.handler("refresh", h.ctx);
+	await flush();
+	assert.equal(h.fetch.mock.callCount(), 2);
+	assert.match(notices.at(-1)!, /Usage refreshed for openai-codex/);
+});
+
+test("/usage help and unknown subcommands notify", async (t) => {
+	const h = harness(t);
+	await h.event("session_start");
+	const notices: string[] = [];
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	await h.commands.get("usage")!.handler("help", h.ctx);
+	await h.commands.get("usage")!.handler("bogus", h.ctx);
+	await flush();
+	assert.match(notices[0], /\/usage toggle/);
+	assert.match(notices[1], /Unknown subcommand/);
 });

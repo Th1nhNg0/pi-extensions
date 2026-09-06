@@ -47,13 +47,13 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 * **Safe Rendering:** Malformed provider values are ignored and percentages are bounded to `0–100%` before they reach the status line.
 * **Stale-Request Protection:** Overlapping refreshes are coalesced, and results from a replaced session/model are discarded.
 
-#### Display Toggle
+#### Commands
 
-`/usage-toggle` cycles the status line through three modes: bar cells (`bars`) → bare percentages (`percent`) → hidden (`off`). Pass a mode to jump straight to it, e.g. `/usage-toggle percent`. While hidden, no status is shown and no provider requests are made; toggling back re-renders (or refetches) immediately. The choice persists across sessions in `~/.pi/agent/subscription-usage-prefs.json`.
+All controls live under one `/usage` command:
 
-Use `/usage-refresh` to request fresh usage immediately, bypassing cooldowns. When the display is `off`, this command makes no requests; enable it with `/usage-toggle` first. Automatic retries recover from temporary provider failures without needing a model switch or reload.
-
-Use `/usage` to show every window for **all** providers as a detailed readout (percents, bars, reset countdowns + absolute reset times, plan, and freshness). Only the active provider is live-fetched; the rest render from cache. It works even while the footer is hidden.
+- `/usage` shows every window for **all** providers as a detailed readout (percents, bars, reset countdowns + absolute reset times, plan, and freshness). Only the active provider is live-fetched; the rest render from cache. It works even while the footer is hidden.
+- `/usage toggle` cycles the status line through three modes: bar cells (`bars`) → bare percentages (`percent`) → hidden (`off`). Pass a mode to jump straight to it, e.g. `/usage toggle percent`. While hidden, no status is shown and no provider requests are made; toggling back re-renders (or refetches) immediately. The choice persists across sessions in `~/.pi/agent/subscription-usage-prefs.json`.
+- `/usage refresh` requests fresh usage immediately, bypassing cooldowns. When the display is `off`, this command makes no requests; enable it with `/usage toggle` first. Automatic retries recover from temporary provider failures without needing a model switch or reload.
 
 ```text
 Subscription usage — openai-codex (plus) • gpt-5
