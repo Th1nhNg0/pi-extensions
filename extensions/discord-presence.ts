@@ -326,6 +326,8 @@ export interface PresenceManagerOptions {
 	retryBaseMs?: number;
 	retryCapMs?: number;
 	privacyMode?: PresencePrivacyMode;
+	/** Reload shared privacy policy before publishing (including standby changes). */
+	readPrivacyMode?: () => Promise<PresencePrivacyMode>;
 	showCost?: boolean;
 	enableButtons?: boolean;
 	enableAssets?: boolean;
@@ -1941,6 +1943,7 @@ export class DiscordPresenceManager {
 	private readonly retryBaseMs: number;
 	private readonly retryCapMs: number;
 	private privacyMode: PresencePrivacyMode;
+	private readonly readPrivacyMode?: () => Promise<PresencePrivacyMode>;
 	private showCost: boolean;
 	private enableButtons?: boolean;
 	private enableAssets?: boolean;
@@ -1979,6 +1982,7 @@ export class DiscordPresenceManager {
 		this.retryCapMs = options.retryCapMs ?? RETRY_CAP_MS;
 		this.privacyMode =
 			options.privacyMode ?? parsePrivacyMode(process.env[PRIVACY_ENV]);
+		this.readPrivacyMode = options.readPrivacyMode;
 		this.showCost = options.showCost ?? true;
 		this.enableButtons = options.enableButtons;
 		this.enableAssets = options.enableAssets;
@@ -2055,7 +2059,11 @@ export class DiscordPresenceManager {
 	}
 
 	async start(): Promise<void> {
-		if (this.started || this.disposed) return;
+		if (this.started || (this.disposed && this.status !== "stopped")) return;
+		// A completed stop is reversible for /discord toggle on. Never restart
+		// while stop() is still draining queues and releasing ownership.
+		this.disposed = false;
+		this.retryAttempt = 0;
 		this.started = true;
 		this.status = "starting";
 		await this.enqueueRegistryUpdate();
@@ -2281,6 +2289,10 @@ export class DiscordPresenceManager {
 						return false;
 					}
 					await assertOwnership();
+					if (this.readPrivacyMode) {
+						this.privacyMode = await this.readPrivacyMode();
+						await assertOwnership();
+					}
 					const activity = buildAggregateActivity(state, {
 						privacyMode: this.privacyMode,
 						showCost: this.showCost,
@@ -2327,6 +2339,8 @@ export class DiscordPresenceManager {
 		if (this.disposed || !this.started || !this.publisher) return false;
 		if (this.transport?.isConnected()) return true;
 		if (this.connectionPromise) return this.connectionPromise;
+		// Heartbeats and tool updates must not bypass a pending reconnect delay.
+		if (this.retryTimer) return false;
 
 		const promise = this.openTransport();
 		this.connectionPromise = promise;
@@ -2810,6 +2824,8 @@ export default function (pi: ExtensionAPI) {
 			initialUsage,
 			initialContext,
 			privacyMode,
+			readPrivacyMode: async () =>
+				(await readPrefs()).privacyMode ?? parsePrivacyMode(process.env[PRIVACY_ENV]),
 			showCost,
 			enableButtons,
 			largeImageKey: process.env[LARGE_IMAGE_ENV] ?? prefs.largeImage,

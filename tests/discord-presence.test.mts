@@ -1267,3 +1267,82 @@ test("extension registers only unified 'discord' command and no redundant alias"
 	);
 	assert.deepEqual(registeredCommands, ["discord"]);
 });
+
+test("presence can restart after a completed stop", async (t) => {
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID, projectName: "restart", stateStore,
+		createTransport: () => transport, logger: () => {},
+	});
+	t.after(() => manager.stop());
+	await manager.start();
+	await manager.stop();
+	assert.equal(Object.keys(stateStore.state.sessions).length, 0);
+	await manager.setPhase("thinking");
+	await manager.start();
+	assert.equal(manager.getStatus(), "connected");
+	assert.equal(transport.connectCount, 2);
+	assert.equal(Object.keys(stateStore.state.sessions).length, 1);
+	assert.match(transport.activities.at(-1)?.details ?? "", /Thinking/);
+});
+
+test("heartbeat and phase updates respect reconnect backoff", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	transport.connect = async () => {
+		transport.connectCount++;
+		throw new Error("Discord is offline");
+	};
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID, projectName: "retry", stateStore,
+		createTransport: () => transport, logger: () => {},
+		heartbeatMs: 1_000, retryBaseMs: 10_000, retryCapMs: 60_000,
+	});
+	t.after(() => manager.stop());
+	await manager.start();
+	assert.equal(transport.connectCount, 1);
+	t.mock.timers.tick(5_000);
+	await manager.setPhase("thinking");
+	await manager.refresh();
+	assert.equal(transport.connectCount, 1);
+	t.mock.timers.tick(5_000);
+	await manager.refresh();
+	assert.equal(transport.connectCount, 2);
+	t.mock.timers.tick(10_000);
+	await manager.setPhase("tools", "editing");
+	await manager.refresh();
+	assert.equal(transport.connectCount, 2);
+	t.mock.timers.tick(10_000);
+	await manager.refresh();
+	assert.equal(transport.connectCount, 3);
+});
+
+test("publisher reloads shared privacy after a standby session changes it", async (t) => {
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	let privacyMode: "project" | "strict" = "project";
+	const first = new DiscordPresenceManager({
+		clientId: CLIENT_ID, projectName: "private-project", startedAt: 1_000,
+		privacyMode, readPrivacyMode: async () => privacyMode, stateStore,
+		createTransport: () => transport, logger: () => {},
+	});
+	const second = new DiscordPresenceManager({
+		clientId: CLIENT_ID, projectName: "standby", startedAt: 2_000,
+		privacyMode, readPrivacyMode: async () => privacyMode, stateStore,
+		createTransport: () => new MockTransport(), logger: () => {},
+	});
+	t.after(async () => { await second.stop(); await first.stop(); });
+	await first.start();
+	assert.match(transport.activities.at(-1)?.state ?? "", /private-project/);
+	await second.start();
+	assert.equal(second.getStatus(), "standby");
+	// The command persists preferences before refreshing the invoking manager.
+	privacyMode = "strict";
+	await second.setPrivacyMode("strict");
+	await second.stop();
+	await first.refresh();
+	assert.equal(first.getPrivacyMode(), "strict");
+	assert.doesNotMatch(JSON.stringify(transport.activities.at(-1)), /private-project/);
+});

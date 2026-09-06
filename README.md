@@ -51,6 +51,8 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 
 `/usage-toggle` cycles the status line through three modes: bar cells (`bars`) → bare percentages (`percent`) → hidden (`off`). Pass a mode to jump straight to it, e.g. `/usage-toggle percent`. While hidden, no status is shown and no provider requests are made; toggling back re-renders (or refetches) immediately. The choice persists across sessions in `~/.pi/agent/subscription-usage-prefs.json`.
 
+Use `/usage-refresh` to request fresh usage immediately, bypassing cooldowns. When the display is `off`, this command makes no requests; enable it with `/usage-toggle` first. Automatic retries recover from temporary provider failures without needing a model switch or reload.
+
 ---
 
 ### 2. `discord-presence` (`extensions/discord-presence.ts`)
@@ -178,6 +180,8 @@ export PI_DISCORD_NPIPERELAY=/mnt/c/Users/<windows-user>/bin/npiperelay.exe
 Keep Discord Desktop running on Windows, restart Pi, and run `/discord status`. Set `PI_DISCORD_TRANSPORT=ipc` only when Discord is running inside Linux instead.
 
 Multiple Pi sessions share a registry at `~/.pi/agent/discord-presence-state.json`. One session publishes the aggregate activity while the others send heartbeats. If the publisher exits, another active session takes over; stale sessions are removed automatically. Usage totals include assistant/tool results plus compaction and branch-summary calls. Registry locks renew their lease during long operations, and only the newest pending Discord activity is published, keeping rapid tool/phase updates responsive without replaying stale states.
+
+The publisher reloads saved privacy preferences before each publish, so changes made from a standby session apply on the next publisher update (normally within one heartbeat). Reconnection attempts respect exponential backoff even during tool activity, and an off→on toggle restarts a stopped presence manager.
 
 ---
 

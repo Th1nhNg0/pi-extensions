@@ -989,9 +989,14 @@ export default function (pi: ExtensionAPI) {
 		const cfg = cfgs.find((c) => c.id === activeProvider);
 		if (!cfg) return;
 
+		const state = cache.get(cfg.id);
+		if (!state) return;
+		const requestId = state.requestId;
 		const disk = (await loadDiskCache())[cfg.id];
+		// A delayed disk read must not revive a cleared provider or overwrite
+		// a newer request after a model switch, hide, or session shutdown.
+		if (cache.get(cfg.id) !== state || state.requestId !== requestId) return;
 		if (!disk?.data || !Number.isFinite(disk.fetchedAt)) return;
-		const state = cache.get(cfg.id) ?? freshState();
 		if (disk.fetchedAt > state.lastFetch) {
 			state.lastFetch = disk.fetchedAt;
 			state.lastData = disk.data;
@@ -1018,12 +1023,18 @@ export default function (pi: ExtensionAPI) {
 		cacheSyncTimer.unref?.();
 	}
 
+	function onDiskCacheChange(curr: fs.Stats, prev: fs.Stats): void {
+		if (curr.mtimeMs !== prev.mtimeMs) scheduleDiskSync();
+	}
+
 	function startDiskCacheWatcher(): void {
 		if (cacheWatcherActive) return;
 		try {
-			fs.watchFile(CACHE_PATH, { interval: 1000 }, (curr, prev) => {
-				if (curr.mtimeMs !== prev.mtimeMs) scheduleDiskSync();
-			});
+			fs.watchFile(
+				CACHE_PATH,
+				{ interval: 1000, persistent: false },
+				onDiskCacheChange,
+			);
 			cacheWatcherActive = true;
 		} catch {
 			// Ignore watch error if the cache path is not accessible yet.
@@ -1033,7 +1044,7 @@ export default function (pi: ExtensionAPI) {
 	function stopDiskCacheWatcher(): void {
 		if (!cacheWatcherActive) return;
 		try {
-			fs.unwatchFile(CACHE_PATH);
+			fs.unwatchFile(CACHE_PATH, onDiskCacheChange);
 		} catch {
 			// Ignore unwatch failure during shutdown.
 		}
@@ -1041,8 +1052,6 @@ export default function (pi: ExtensionAPI) {
 		if (cacheSyncTimer) clearTimeout(cacheSyncTimer);
 		cacheSyncTimer = undefined;
 	}
-
-	startDiskCacheWatcher();
 
 	/**
 	 * Return ctx.ui, or undefined when the session ctx is stale — i.e. the
@@ -1116,6 +1125,7 @@ export default function (pi: ExtensionAPI) {
 		ctx: StatusCtx,
 		force: boolean,
 		hard = false,
+		scheduled = false,
 	): Promise<"fetched" | "cached"> {
 		const state = cache.get(cfg.id) ?? freshState();
 		cache.set(cfg.id, state);
@@ -1147,6 +1157,7 @@ export default function (pi: ExtensionAPI) {
 			const resetSoon = reset !== undefined && reset - now < COOLDOWN_MS;
 			if (
 				!force &&
+				!scheduled &&
 				state.lastText !== undefined &&
 				(now - state.lastFetch < COOLDOWN_MS ||
 					(state.failStreak > 0 && !resetSoon))
@@ -1223,7 +1234,9 @@ export default function (pi: ExtensionAPI) {
 				// Bail if the session is gone or this exact provider state was
 				// cleared (e.g. the model switched away and back).
 				if (!safeUi(ctx) || cache.get(cfg.id) !== state) return;
-				await refresh(cfg, ctx, false);
+				// The timer already waited out backoff/reset delay. Only event pokes
+				// use the cooldown gate; scheduled retries must be allowed to recover.
+				await refresh(cfg, ctx, false, false, true);
 				if (!safeUi(ctx) || cache.get(cfg.id) !== state) return;
 				const model = safeModel(ctx);
 				arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
@@ -1365,6 +1378,13 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Force-refresh subscription usage now, bypassing the fetch cooldown",
 		handler: async (_args, ctx) => {
+			if (mode === "off") {
+				ctx.ui.notify(
+					"Subscription usage is hidden; use /usage-toggle to enable refreshes",
+					"info",
+				);
+				return;
+			}
 			const model = safeModel(ctx);
 			const cfg = cfgs.find((c) => c.id === model?.provider);
 			if (!cfg) {
@@ -1379,10 +1399,6 @@ export default function (pi: ExtensionAPI) {
 			const current = safeModel(ctx);
 			if (s && safeUi(ctx))
 				arm(cfg, ctx, nextDelay(s, Date.now(), current?.id, cfg.id));
-			if (mode === "off") {
-				ctx.ui.notify(`Usage refreshed for ${cfg.id} (display is off)`, "info");
-				return;
-			}
 			ctx.ui.notify(
 				outcome === "fetched"
 					? `Usage refreshed for ${cfg.id}`
