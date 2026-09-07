@@ -292,6 +292,7 @@ export interface SessionRecord {
 	projectName: string;
 	provider?: string;
 	modelId?: string;
+	thinkingLevel?: string;
 	phase: PresencePhase;
 	action?: PresenceAction;
 	startedAt: number;
@@ -383,6 +384,7 @@ export interface PresenceManagerOptions {
 	projectName: string;
 	provider?: string;
 	modelId?: string;
+	thinkingLevel?: string;
 	startedAt?: number;
 	initialUsage?: UsageTotals;
 	initialContext?: ContextSnapshot;
@@ -841,12 +843,46 @@ export function pickHighestPriorityAction(
 	return highestPriority >= 0 ? bestAction : "tools";
 }
 
-/** Diagnostic full model label (e.g. `openai-codex/gpt-5`). */
-export function formatModelLabel(provider?: string, modelId?: string): string {
-	const label =
+/** Determine whether a model supports reasoning/thinking mode. */
+export function isReasoningSupported(model?: {
+	reasoning?: boolean;
+	thinkingLevelMap?: unknown;
+	id?: string;
+}): boolean {
+	if (!model) return false;
+	if (typeof model.reasoning === "boolean") return model.reasoning;
+	if (model.thinkingLevelMap && typeof model.thinkingLevelMap === "object") {
+		return Object.keys(model.thinkingLevelMap).length > 0;
+	}
+	const id = model.id?.toLowerCase() ?? "";
+	if (
+		id.includes("claude-3-7") ||
+		id.includes("claude-4") ||
+		id.includes("claude-opus") ||
+		id.includes("claude-sonnet") ||
+		id.startsWith("o1") ||
+		id.startsWith("o3") ||
+		id.startsWith("o4") ||
+		id.includes("gemini-2.5-pro") ||
+		id.includes("deepseek-r1")
+	) {
+		return true;
+	}
+	return false;
+}
+
+/** Diagnostic full model label (e.g. `openai-codex/gpt-5` or `openai-codex/gpt-5 (high)`). */
+export function formatModelLabel(
+	provider?: string,
+	modelId?: string,
+	thinkingLevel?: string,
+): string {
+	const base =
 		provider && modelId
 			? `${provider}/${modelId}`
 			: (modelId ?? provider ?? "Pi");
+	const effectiveThinking = thinkingLevel?.trim().toLowerCase();
+	const label = effectiveThinking ? `${base} (${effectiveThinking})` : base;
 	return truncateText(label, 96);
 }
 
@@ -935,14 +971,32 @@ function formatModelWords(value: string, _capitalizeFirst = true): string {
 		.join(" ");
 }
 
+const VALID_THINKING_LEVELS = new Set([
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+]);
+
 /** Human-readable model label for Discord Rich Presence. */
 export function formatDiscordModelLabel(
 	provider?: string,
 	modelId?: string,
+	thinkingLevel?: string,
 ): string {
+	let effectiveThinking = thinkingLevel?.trim().toLowerCase();
+
 	if (!modelId?.trim()) {
-		if (!provider?.trim()) return "Pi";
-		return formatProviderFallback(provider);
+		const baseLabel = !provider?.trim()
+			? "Pi"
+			: formatProviderFallback(provider);
+		if (effectiveThinking) {
+			return truncateText(`${baseLabel} (${effectiveThinking})`, 48);
+		}
+		return baseLabel;
 	}
 
 	let raw = modelId.trim();
@@ -950,28 +1004,52 @@ export function formatDiscordModelLabel(
 		raw = raw.slice(raw.lastIndexOf("/") + 1).trim();
 	}
 
-	// Preserve openai o-series models (e.g. o1, o3, o3-mini, o4-mini, o1-preview)
-	if (/^o\d(-[a-z0-9]+)?$/i.test(raw)) {
-		return raw.toLowerCase();
-	}
-
-	// Convert version numbers separated by dashes (e.g. 4-1 -> 4.1, 3-7 -> 3.7, 2-5 -> 2.5)
-	const transformed = raw.replace(
-		/(?<=[a-zA-Z]|^)-(\d+)-(\d+)(?=-|[a-zA-Z]|$)/g,
-		"-$1.$2",
-	);
-
-	for (const [pattern, prefix] of KNOWN_PREFIXES) {
-		if (pattern.test(transformed)) {
-			const rest = transformed.replace(pattern, "");
-			if (prefix.endsWith("-")) {
-				return truncateText(`${prefix}${formatModelWords(rest, false)}`, 48);
+	// Extract inline thinking level if present (e.g. claude-3-7-sonnet:high)
+	const colonIndex = raw.lastIndexOf(":");
+	if (colonIndex > 0) {
+		const suffix = raw.slice(colonIndex + 1).toLowerCase();
+		if (VALID_THINKING_LEVELS.has(suffix)) {
+			if (!effectiveThinking) {
+				effectiveThinking = suffix;
 			}
-			return truncateText(`${prefix}${formatModelWords(rest, true)}`, 48);
+			raw = raw.slice(0, colonIndex);
 		}
 	}
 
-	return truncateText(formatModelWords(transformed, true), 48);
+	let baseLabel = "";
+	// Preserve openai o-series models (e.g. o1, o3, o3-mini, o4-mini, o1-preview)
+	if (/^o\d(-[a-z0-9]+)?$/i.test(raw)) {
+		baseLabel = raw.toLowerCase();
+	} else {
+		// Convert version numbers separated by dashes (e.g. 4-1 -> 4.1, 3-7 -> 3.7, 2-5 -> 2.5)
+		const transformed = raw.replace(
+			/(?<=[a-zA-Z]|^)-(\d+)-(\d+)(?=-|[a-zA-Z]|$)/g,
+			"-$1.$2",
+		);
+
+		let matched = false;
+		for (const [pattern, prefix] of KNOWN_PREFIXES) {
+			if (pattern.test(transformed)) {
+				const rest = transformed.replace(pattern, "");
+				if (prefix.endsWith("-")) {
+					baseLabel = `${prefix}${formatModelWords(rest, false)}`;
+				} else {
+					baseLabel = `${prefix}${formatModelWords(rest, true)}`;
+				}
+				matched = true;
+				break;
+			}
+		}
+
+		if (!matched) {
+			baseLabel = formatModelWords(transformed, true);
+		}
+	}
+
+	if (effectiveThinking) {
+		return truncateText(`${baseLabel} (${effectiveThinking})`, 48);
+	}
+	return truncateText(baseLabel, 48);
 }
 
 export function formatPublicMetrics(
@@ -1006,7 +1084,11 @@ export function formatSingleSessionDetails(record: SessionRecord): string {
 		record.phase,
 		record.activeSubagents ?? 0,
 	);
-	const modelText = formatDiscordModelLabel(record.provider, record.modelId);
+	const modelText = formatDiscordModelLabel(
+		record.provider,
+		record.modelId,
+		record.thinkingLevel,
+	);
 	return truncateText(`${actionText} · ${modelText}`);
 }
 
@@ -1031,7 +1113,9 @@ export function formatSingleSessionState(
 export function summarizeModels(records: readonly SessionRecord[]): string {
 	if (records.length === 0) return "Pi";
 	const labels = new Set(
-		records.map((r) => formatDiscordModelLabel(r.provider, r.modelId)),
+		records.map((r) =>
+			formatDiscordModelLabel(r.provider, r.modelId, r.thinkingLevel),
+		),
 	);
 	if (labels.size === 1) return labels.values().next().value ?? "Pi";
 	return "multiple models";
@@ -1534,6 +1618,8 @@ function parseSessionRecord(value: unknown): SessionRecord | undefined {
 		projectName,
 		provider: typeof record.provider === "string" ? record.provider : undefined,
 		modelId: typeof record.modelId === "string" ? record.modelId : undefined,
+		thinkingLevel:
+			typeof record.thinkingLevel === "string" ? record.thinkingLevel : undefined,
 		phase,
 		action: parseAction(record.action),
 		startedAt: startedAt as number,
@@ -2337,6 +2423,7 @@ export class DiscordPresenceManager {
 			projectName: options.projectName,
 			provider: options.provider,
 			modelId: options.modelId,
+			thinkingLevel: options.thinkingLevel,
 			phase: "idle",
 			action: "idle",
 			startedAt,
@@ -2424,12 +2511,29 @@ export class DiscordPresenceManager {
 		await this.refresh();
 	}
 
-	setModel(provider?: string, modelId?: string): Promise<void> {
-		if (this.record.provider === provider && this.record.modelId === modelId) {
+	setModel(
+		provider?: string,
+		modelId?: string,
+		thinkingLevel?: string,
+	): Promise<void> {
+		if (
+			this.record.provider === provider &&
+			this.record.modelId === modelId &&
+			this.record.thinkingLevel === thinkingLevel
+		) {
 			return this.registryDrain ?? Promise.resolve();
 		}
 		this.record.provider = provider;
 		this.record.modelId = modelId;
+		this.record.thinkingLevel = thinkingLevel;
+		return this.enqueueRegistryUpdate();
+	}
+
+	setThinkingLevel(thinkingLevel?: string): Promise<void> {
+		if (this.record.thinkingLevel === thinkingLevel) {
+			return this.registryDrain ?? Promise.resolve();
+		}
+		this.record.thinkingLevel = thinkingLevel;
 		return this.enqueueRegistryUpdate();
 	}
 
@@ -2947,7 +3051,11 @@ function formatDuration(ms: number): string {
 }
 
 function formatDiagnosticSession(record: SessionRecord, now: number): string {
-	const model = formatModelLabel(record.provider, record.modelId);
+	const model = formatModelLabel(
+		record.provider,
+		record.modelId,
+		record.thinkingLevel,
+	);
 	const action = formatAction(
 		record.action,
 		record.phase,
@@ -3491,11 +3599,18 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 			process.env[BUTTONS_ENV] !== "0" &&
 			prefs.buttons !== false;
 
+		const reasoning = isReasoningSupported(ctx.model);
+		const rawThinking = ctx.thinkingLevel ?? pi.getThinkingLevel?.();
+		const thinkingLevel = reasoning
+			? (rawThinking || "off")
+			: (rawThinking && rawThinking !== "off" ? rawThinking : undefined);
+
 		manager = new DiscordPresenceManager({
 			clientId,
 			projectName,
 			provider: ctx.model?.provider,
 			modelId: ctx.model?.id,
+			thinkingLevel,
 			startedAt: sessionStartedAt,
 			initialUsage,
 			initialContext,
@@ -3528,8 +3643,21 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 		}
 	});
 
-	pi.on("model_select", async (event) => {
-		await manager?.setModel(event.model.provider, event.model.id);
+	pi.on("model_select", async (event, ctx) => {
+		const reasoning = isReasoningSupported(event.model);
+		const rawThinking = ctx.thinkingLevel ?? pi.getThinkingLevel?.();
+		const thinkingLevel = reasoning
+			? (rawThinking || "off")
+			: (rawThinking && rawThinking !== "off" ? rawThinking : undefined);
+		await manager?.setModel(event.model.provider, event.model.id, thinkingLevel);
+	});
+
+	pi.on("thinking_level_select", async (event, ctx) => {
+		const reasoning = isReasoningSupported(ctx.model);
+		const thinkingLevel = reasoning
+			? (event.level || "off")
+			: (event.level && event.level !== "off" ? event.level : undefined);
+		await manager?.setThinkingLevel(thinkingLevel);
 	});
 
 	pi.on("message_end", async (event) => {

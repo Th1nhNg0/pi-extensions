@@ -71,16 +71,18 @@ Publishes a privacy-safe, adaptive Discord Desktop Rich Presence while Pi is run
 #### Single-Session Presence
 
 ```text
-Details: Thinking · GPT-5.6
+Details: Thinking · Claude 3.7 Sonnet (high)
 State:   spring2026 · 42k tok · ctx 38%
 ```
 
 During tool execution:
 
 ```text
-Details: Running tests · GPT-5.6
+Details: Running tests · Claude 3.7 Sonnet (high)
 State:   spring2026 · 47k tok · ctx 41%
 ```
+
+For models supporting reasoning/extended thinking, the active thinking mode level is shown in parentheses after the model name (e.g. `Claude 3.7 Sonnet (high)` or `Claude 3.7 Sonnet (off)` when disabled). Non-reasoning models omit the thinking indicator.
 
 #### Multi-Session Presence
 
@@ -109,21 +111,21 @@ Configure how much metadata is visible in Discord via `/discord privacy [strict|
 * `strict` (**Default**): Hides the project name completely for maximum privacy. Price is included by default when pricing is available.
 
   ```text
-  Thinking · GPT-5.6
+  Thinking · Claude 3.7 Sonnet (high)
   42k tok · ctx 38% · $0.84
   ```
 
 * `project`: Includes the privacy-safe project directory basename.
 
   ```text
-  Thinking · GPT-5.6
+  Thinking · Claude 3.7 Sonnet (high)
   spring2026 · 42k tok · ctx 38% · $0.84
   ```
 
 * `developer`: Explicit developer view including project basename, tokens, context %, and pricing.
 
   ```text
-  Thinking · GPT-5.6
+  Thinking · Claude 3.7 Sonnet (high)
   spring2026 · 42k tok · ctx 38% · $0.84
   ```
 

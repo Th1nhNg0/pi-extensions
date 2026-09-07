@@ -47,6 +47,7 @@ import {
 	normalizeContextUsage,
 	parseClientId,
 	isWslEnvironment,
+	isReasoningSupported,
 	parsePrivacyMode,
 	pickHighestPriorityAction,
 	readPrefs,
@@ -433,6 +434,60 @@ test("formatDiscordModelLabel normalizes popular and custom model names", () => 
 	);
 	assert.equal(formatModelLabel(undefined, "gpt-5"), "gpt-5");
 	assert.equal(formatModelLabel(), "Pi");
+	assert.equal(
+		formatModelLabel("anthropic", "claude-3-7-sonnet", "high"),
+		"anthropic/claude-3-7-sonnet (high)",
+	);
+	assert.equal(
+		formatModelLabel("anthropic", "claude-3-7-sonnet", "off"),
+		"anthropic/claude-3-7-sonnet (off)",
+	);
+
+	// Thinking mode / level formatting
+	assert.equal(
+		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet", "high"),
+		"Claude 3.7 Sonnet (high)",
+	);
+	assert.equal(
+		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet", "off"),
+		"Claude 3.7 Sonnet (off)",
+	);
+	assert.equal(
+		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet", "medium"),
+		"Claude 3.7 Sonnet (medium)",
+	);
+	assert.equal(
+		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet", "low"),
+		"Claude 3.7 Sonnet (low)",
+	);
+	assert.equal(
+		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet", "minimal"),
+		"Claude 3.7 Sonnet (minimal)",
+	);
+	assert.equal(
+		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet", "xhigh"),
+		"Claude 3.7 Sonnet (xhigh)",
+	);
+	assert.equal(
+		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet", "max"),
+		"Claude 3.7 Sonnet (max)",
+	);
+	assert.equal(
+		formatDiscordModelLabel("openai", "o3-mini", "high"),
+		"o3-mini (high)",
+	);
+	assert.equal(
+		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet:high"),
+		"Claude 3.7 Sonnet (high)",
+	);
+	assert.equal(
+		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet", undefined),
+		"Claude 3.7 Sonnet",
+	);
+	assert.equal(
+		formatDiscordModelLabel(undefined, undefined, "high"),
+		"Pi (high)",
+	);
 });
 
 // ---------------------------------------------------------------------------
@@ -449,6 +504,24 @@ test("parsePrivacyMode validates input and defaults to strict", () => {
 	assert.equal(parsePrivacyMode(undefined), "strict");
 	assert.deepEqual(PRIVACY_MODES, ["strict", "project", "developer"]);
 	assert.equal(PRIVACY_ENV, "PI_DISCORD_PRIVACY");
+});
+
+test("isReasoningSupported identifies models with reasoning support", () => {
+	assert.equal(isReasoningSupported({ reasoning: true }), true);
+	assert.equal(isReasoningSupported({ reasoning: false }), false);
+	assert.equal(
+		isReasoningSupported({ thinkingLevelMap: { high: "high" } }),
+		true,
+	);
+	assert.equal(isReasoningSupported({ id: "claude-3-7-sonnet" }), true);
+	assert.equal(isReasoningSupported({ id: "claude-sonnet-4" }), true);
+	assert.equal(isReasoningSupported({ id: "o1-preview" }), true);
+	assert.equal(isReasoningSupported({ id: "o3-mini" }), true);
+	assert.equal(isReasoningSupported({ id: "gemini-2.5-pro" }), true);
+	assert.equal(isReasoningSupported({ id: "deepseek-r1" }), true);
+	assert.equal(isReasoningSupported({ id: "gpt-4o" }), false);
+	assert.equal(isReasoningSupported({ id: "gemini-2.5-flash" }), false);
+	assert.equal(isReasoningSupported(undefined), false);
 });
 
 test("formatPublicMetrics formats tokens, context percentage, and cost by default", () => {
@@ -940,6 +1013,39 @@ test("pure formatting helpers format single and multi session components", () =>
 	});
 
 	assert.equal(formatSingleSessionDetails(record), "Thinking · GPT-5.6");
+	const recordWithThinking = makeRecord("s1", 100, {
+		provider: "anthropic",
+		modelId: "claude-3-7-sonnet",
+		thinkingLevel: "high",
+		phase: "thinking",
+		action: "thinking",
+	});
+	assert.equal(
+		formatSingleSessionDetails(recordWithThinking),
+		"Thinking · Claude 3.7 Sonnet (high)",
+	);
+	const recordWithThinkingOff = makeRecord("s1", 100, {
+		provider: "anthropic",
+		modelId: "claude-3-7-sonnet",
+		thinkingLevel: "off",
+		phase: "idle",
+		action: "idle",
+	});
+	assert.equal(
+		formatSingleSessionDetails(recordWithThinkingOff),
+		"Idle · Claude 3.7 Sonnet (off)",
+	);
+	const recordTestingThinking = makeRecord("s1", 100, {
+		provider: "anthropic",
+		modelId: "claude-3-7-sonnet",
+		thinkingLevel: "high",
+		phase: "tools",
+		action: "testing",
+	});
+	assert.equal(
+		formatSingleSessionDetails(recordTestingThinking),
+		"Running tests · Claude 3.7 Sonnet (high)",
+	);
 	assert.equal(
 		formatSingleSessionState(record, "strict"),
 		"42k tok · ctx 38% · $0.84",
@@ -973,6 +1079,33 @@ test("pure formatting helpers format single and multi session components", () =>
 		]),
 		"multiple models",
 	);
+	const thinkingRecords = [
+		makeRecord("s1", 100, {
+			provider: "anthropic",
+			modelId: "claude-3-7-sonnet",
+			thinkingLevel: "high",
+		}),
+		makeRecord("s2", 200, {
+			provider: "anthropic",
+			modelId: "claude-3-7-sonnet",
+			thinkingLevel: "high",
+		}),
+	];
+	assert.equal(summarizeModels(thinkingRecords), "Claude 3.7 Sonnet (high)");
+
+	const mixedThinkingRecords = [
+		makeRecord("s1", 100, {
+			provider: "anthropic",
+			modelId: "claude-3-7-sonnet",
+			thinkingLevel: "high",
+		}),
+		makeRecord("s2", 200, {
+			provider: "anthropic",
+			modelId: "claude-3-7-sonnet",
+			thinkingLevel: "low",
+		}),
+	];
+	assert.equal(summarizeModels(mixedThinkingRecords), "multiple models");
 
 	const summary = {
 		usage: {
@@ -1330,6 +1463,25 @@ test("extension registers only unified 'discord' command and no redundant alias"
 	assert.deepEqual(registeredCommands, ["discord"]);
 });
 
+test("extension registers thinking_level_select and model_select event handlers", () => {
+	const registeredEvents: string[] = [];
+	const handlers: Record<string, Function> = {};
+	const dummyPi = {
+		registerCommand: () => {},
+		on: (event: string, handler: Function) => {
+			registeredEvents.push(event);
+			handlers[event] = handler;
+		},
+	};
+	discordPresenceExtension(
+		dummyPi as unknown as Parameters<typeof discordPresenceExtension>[0],
+	);
+	assert.ok(registeredEvents.includes("thinking_level_select"));
+	assert.ok(registeredEvents.includes("model_select"));
+	assert.ok(typeof handlers["thinking_level_select"] === "function");
+	assert.ok(typeof handlers["model_select"] === "function");
+});
+
 test("presence can restart after a completed stop", async (t) => {
 	const stateStore = new MemoryStateStore();
 	const transport = new MockTransport();
@@ -1603,6 +1755,61 @@ test("DiscordPresenceManager setActiveSubagents updates presence and activity", 
 	await manager.stop();
 });
 
+test("DiscordPresenceManager setThinkingLevel and setModel updates presence details", async () => {
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID,
+		projectName: "thinking-test",
+		provider: "anthropic",
+		modelId: "claude-3-7-sonnet",
+		thinkingLevel: "high",
+		stateStore,
+		createTransport: () => transport,
+		logger: () => {},
+	});
+
+	await manager.start();
+	assert.equal(
+		transport.activities.at(-1)?.details,
+		"Idle · Claude 3.7 Sonnet (high)",
+	);
+
+	// Change thinking level via setThinkingLevel
+	await manager.setThinkingLevel("low");
+	await manager.refresh();
+	assert.equal(
+		transport.activities.at(-1)?.details,
+		"Idle · Claude 3.7 Sonnet (low)",
+	);
+
+	// Change thinking level to off
+	await manager.setThinkingLevel("off");
+	await manager.refresh();
+	assert.equal(
+		transport.activities.at(-1)?.details,
+		"Idle · Claude 3.7 Sonnet (off)",
+	);
+
+	// Switch model to a model without thinking mode
+	await manager.setModel("openai", "gpt-4o", undefined);
+	await manager.refresh();
+	assert.equal(
+		transport.activities.at(-1)?.details,
+		"Idle · GPT-4o",
+	);
+
+	// Switch model to a reasoning model with thinking level
+	await manager.setModel("openai", "o3-mini", "medium");
+	await manager.refresh();
+	assert.equal(
+		transport.activities.at(-1)?.details,
+		"Idle · o3-mini (medium)",
+	);
+
+	await manager.stop();
+});
+
 test("FilePresenceStateStore serializes and restores activeSubagents", async () => {
 	const directory = await mkdtemp(join(os.tmpdir(), "pi-presence-subagent-test-"));
 	const path = join(directory, "state.json");
@@ -1616,6 +1823,30 @@ test("FilePresenceStateStore serializes and restores activeSubagents", async () 
 	await store.upsert(record);
 	const restored = await store.read();
 	assert.equal(restored.sessions["session-with-subagents"]?.activeSubagents, 3);
+
+	await rm(directory, { recursive: true, force: true });
+});
+
+test("FilePresenceStateStore serializes and restores thinkingLevel", async () => {
+	const directory = await mkdtemp(
+		join(os.tmpdir(), "pi-presence-thinking-test-"),
+	);
+	const path = join(directory, "state.json");
+	const store = new FilePresenceStateStore(path);
+
+	const record = makeRecord("session-with-thinking", 100, {
+		projectName: "test-proj",
+		provider: "anthropic",
+		modelId: "claude-3-7-sonnet",
+		thinkingLevel: "high",
+	});
+
+	await store.upsert(record);
+	const restored = await store.read();
+	assert.equal(
+		restored.sessions["session-with-thinking"]?.thinkingLevel,
+		"high",
+	);
 
 	await rm(directory, { recursive: true, force: true });
 });
