@@ -64,6 +64,7 @@ import {
 	isRegistryLockError,
 	DEFAULT_MIN_PUBLISH_INTERVAL_MS,
 	RATE_LIMIT_BACKOFF_MS,
+	PRESENCE_REASSERT_INTERVAL_MS,
 	WslDiscordIpcTransport,
 	default as discordPresenceExtension,
 } from "../extensions/discord-presence.ts";
@@ -2016,6 +2017,121 @@ test("DiscordPresenceManager handles Discord RPC rate limit error (4002) without
 	// Status should remain connected, transport should NOT be closed or destroyed
 	assert.equal(manager.getStatus(), "connected");
 	assert.equal(transport.closeCount, 0);
+
+	await manager.stop();
+});
+
+test("publisher coalesces rapid updates into one Discord update per Rich Presence window", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID,
+		projectName: "cadence",
+		stateStore,
+		createTransport: () => transport,
+		minPublishIntervalMs: DEFAULT_MIN_PUBLISH_INTERVAL_MS,
+		now: () => Date.now(),
+		logger: () => {},
+	});
+
+	await manager.start();
+	assert.equal(transport.activities.length, 1);
+
+	// A burst of phase changes inside one window must not reach Discord again.
+	for (let i = 0; i < 8; i += 1) {
+		await manager.setPhase("thinking");
+		await manager.setPhase("tools", "editing");
+	}
+	assert.equal(transport.activities.length, 1);
+
+	// After the window elapses only the newest state is published once.
+	t.mock.timers.tick(DEFAULT_MIN_PUBLISH_INTERVAL_MS);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(transport.activities.length, 2);
+	assert.match(transport.activities.at(-1)?.details ?? "", /Editing/);
+
+	await manager.stop();
+});
+
+test("publisher re-asserts unchanged presence after the reassert interval", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID,
+		projectName: "reassert",
+		stateStore,
+		createTransport: () => transport,
+		heartbeatMs: 5_000,
+		minPublishIntervalMs: DEFAULT_MIN_PUBLISH_INTERVAL_MS,
+		now: () => Date.now(),
+		logger: () => {},
+	});
+
+	await manager.start();
+	assert.equal(transport.activities.length, 1);
+
+	// Heartbeats inside the reassert interval must not republish.
+	t.mock.timers.tick(PRESENCE_REASSERT_INTERVAL_MS / 2);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(transport.activities.length, 1);
+
+	// After the reassert interval the unchanged activity is re-sent once.
+	t.mock.timers.tick(PRESENCE_REASSERT_INTERVAL_MS / 2);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(transport.activities.length, 2);
+
+	await manager.stop();
+});
+
+test("rate limit backoff suppresses republishes and escalates on repeat limits", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	let rateLimited = false;
+	const originalSetActivity = transport.setActivity.bind(transport);
+	transport.setActivity = async (activity) => {
+		if (rateLimited) {
+			const err = new Error("rate limited");
+			(err as unknown as { code: number }).code = 4002;
+			throw err;
+		}
+		return originalSetActivity(activity);
+	};
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID,
+		projectName: "rate-limit-backoff",
+		stateStore,
+		createTransport: () => transport,
+		now: () => Date.now(),
+		logger: () => {},
+	});
+
+	await manager.start();
+	assert.equal(transport.activities.length, 1);
+
+	rateLimited = true;
+	await manager.setPhase("thinking");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(manager.getStatus(), "connected");
+	assert.equal(transport.activities.length, 1);
+
+	// The pending update waits for the backoff instead of republishing immediately.
+	await manager.setPhase("tools", "editing");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(transport.activities.length, 1);
+
+	// A second consecutive rate limit doubles the backoff to 30s.
+	t.mock.timers.tick(RATE_LIMIT_BACKOFF_MS);
+	await new Promise((resolve) => setImmediate(resolve));
+	rateLimited = false;
+	t.mock.timers.tick(RATE_LIMIT_BACKOFF_MS * 2 - 1);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(transport.activities.length, 1);
+	t.mock.timers.tick(1);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(transport.activities.length, 2);
 
 	await manager.stop();
 });

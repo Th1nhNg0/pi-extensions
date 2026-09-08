@@ -152,6 +152,7 @@ All presence controls are consolidated under a single clean `/discord` command:
 | `PI_DISCORD_SHOW_COST` | `on` | Set to `off` to hide price from public Discord presence. |
 | `PI_DISCORD_TRANSPORT` | `auto` | `ipc` or `wsl`; WSL auto-selects the `npiperelay.exe` bridge for Windows Discord. |
 | `PI_DISCORD_NPIPERELAY` | `npiperelay.exe` | Optional Windows path/name of the `npiperelay.exe` bridge used from WSL. |
+| `PI_DISCORD_MIN_INTERVAL_MS` | `15000` | Minimum milliseconds between Discord presence updates. Discord accepts about one Rich Presence update per 15 seconds; lower values can make Discord silently clear the presence or close the RPC socket. |
 
 ##### Default Badge Icons
 
@@ -190,7 +191,7 @@ export PI_DISCORD_NPIPERELAY=/mnt/c/Users/<windows-user>/bin/npiperelay.exe
 
 Keep Discord Desktop running on Windows, restart Pi, and run `/discord status`. Set `PI_DISCORD_TRANSPORT=ipc` only when Discord is running inside Linux instead.
 
-Multiple Pi sessions share a registry at `~/.pi/agent/discord-presence-state.json`. One session publishes the aggregate activity while the others send heartbeats. If the publisher exits, another active session takes over; stale sessions are removed automatically. Usage totals include assistant/tool results plus compaction and branch-summary calls. Registry locks renew their lease during long operations, and only the newest pending Discord activity is published, keeping rapid tool/phase updates responsive without replaying stale states.
+Multiple Pi sessions share a registry at `~/.pi/agent/discord-presence-state.json`. One session publishes the aggregate activity while the others send heartbeats. If the publisher exits, another active session takes over; stale sessions are removed automatically. Usage totals include assistant/tool results plus compaction and branch-summary calls. Registry locks renew their lease during long operations, and rapid tool/phase updates are coalesced into the newest pending state, which is published at most once per Discord Rich Presence window (15s). Publishing faster than that makes Discord silently clear the presence, so the cadence is capped by `PI_DISCORD_MIN_INTERVAL_MS` and reconnects keep to Discord's limit of 2 IPC connections per minute.
 
 The publisher reloads saved privacy preferences before each publish, so changes made from a standby session apply on the next publisher update (normally within one heartbeat). Reconnection attempts respect exponential backoff even during tool activity, and an off→on toggle restarts a stopped presence manager.
 

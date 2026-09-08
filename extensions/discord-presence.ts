@@ -51,8 +51,21 @@ export const MIN_INTERVAL_ENV = "PI_DISCORD_MIN_INTERVAL_MS";
 export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
 export const IS_SUBAGENT_ENV = "PI_IS_SUBAGENT";
 
-export const DEFAULT_MIN_PUBLISH_INTERVAL_MS = 2_000;
-export const RATE_LIMIT_BACKOFF_MS = 5_000;
+/**
+ * Discord's Rich Presence server accepts roughly one SET_ACTIVITY update
+ * per 15 seconds. Publishing faster makes Discord silently empty the presence
+ * and can close the RPC socket with close code 4002 (RATELIMITED).
+ * See https://github.com/discord/discord-api-docs/issues/668.
+ */
+export const DEFAULT_MIN_PUBLISH_INTERVAL_MS = 15_000;
+/** Back off at least one Rich Presence window after a rate limit. */
+export const RATE_LIMIT_BACKOFF_MS = 15_000;
+/**
+ * Discord keeps the last activity until it changes or Discord clears it
+ * (for example when another socket with the same client ID disconnects).
+ * Re-assert unchanged activity periodically so a cleared presence recovers.
+ */
+export const PRESENCE_REASSERT_INTERVAL_MS = 60_000;
 
 /** Detect whether the current process is running inside a subagent child run. */
 export function isSubagentEnvironment(
@@ -221,7 +234,12 @@ const LOCK_TIMEOUT_MS = 2_000;
 const LOCK_STALE_MS = 15_000;
 const LOCK_LEASE_REFRESH_MS = Math.max(1_000, Math.floor(LOCK_STALE_MS / 3));
 const LOCK_RETRY_MS = 25;
-const RETRY_BASE_MS = 5_000;
+/**
+ * Discord's RPC server allows 2 IPC connections per minute per client, so
+ * the first reconnect delay must not burn that budget (initial connect plus
+ * the first retry stays at two connections within the first minute).
+ */
+const RETRY_BASE_MS = 30_000;
 const RETRY_CAP_MS = 5 * 60_000;
 const RPC_WRITE_TIMEOUT_MS = 10_000;
 
@@ -1422,6 +1440,8 @@ export function isRateLimitError(error: unknown): boolean {
 	const record = asRecord(error);
 	const code = record?.code;
 	if (code === 4002 || code === "4002") return true;
+	// 5011 is the RPC ERROR code for RATE_LIMITED; 4002 is the close code.
+	if (code === 5011 || code === "5011") return true;
 	const message =
 		typeof record?.message === "string"
 			? record.message.toLowerCase()
@@ -1431,7 +1451,9 @@ export function isRateLimitError(error: unknown): boolean {
 	return (
 		message.includes("rate limit") ||
 		message.includes("rate_limit") ||
-		message.includes("4002")
+		message.includes("ratelimited") ||
+		message.includes("4002") ||
+		message.includes("5011")
 	);
 }
 
@@ -2388,6 +2410,7 @@ export class DiscordPresenceManager {
 	private stopPromise: Promise<void> | undefined;
 	private lastPublishedActivity: PresenceActivity | undefined;
 	private rateLimitBackoffUntil = 0;
+	private consecutiveRateLimits = 0;
 	private publishThrottleTimer: ReturnType<typeof setTimeout> | undefined;
 	constructor(options: PresenceManagerOptions) {
 		this.clientId = options.clientId;
@@ -2635,6 +2658,8 @@ export class DiscordPresenceManager {
 		this.pendingRegistryUpdate = false;
 		this.pendingPresenceState = undefined;
 		this.lastPublishedActivity = undefined;
+		this.consecutiveRateLimits = 0;
+		this.rateLimitBackoffUntil = 0;
 		await this.registryQueue.catch(() => undefined);
 		await this.presenceQueue.catch(() => undefined);
 
@@ -2851,7 +2876,10 @@ export class DiscordPresenceManager {
 						largeImageKey: this.largeImageKey,
 						smallImageKey: this.smallImageKey,
 					});
-					if (isActivityEqual(this.lastPublishedActivity, activity)) {
+					if (
+						isActivityEqual(this.lastPublishedActivity, activity) &&
+						this.now() - this.lastPublishTime < PRESENCE_REASSERT_INTERVAL_MS
+					) {
 						return true;
 					}
 					try {
@@ -2861,10 +2889,18 @@ export class DiscordPresenceManager {
 						);
 						this.lastPublishedActivity = activity;
 						this.lastPublishTime = this.now();
+						this.consecutiveRateLimits = 0;
 						return true;
 					} catch (transportErr) {
 						if (isRateLimitError(transportErr)) {
-							this.rateLimitBackoffUntil = this.now() + RATE_LIMIT_BACKOFF_MS;
+							this.consecutiveRateLimits += 1;
+							this.rateLimitBackoffUntil =
+								this.now() +
+								Math.min(
+									RETRY_CAP_MS,
+									RATE_LIMIT_BACKOFF_MS *
+										2 ** (this.consecutiveRateLimits - 1),
+								);
 							// Do not replace a newer update received while this RPC was pending.
 							this.pendingPresenceState ??= state;
 							return true;
