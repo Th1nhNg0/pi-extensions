@@ -211,7 +211,6 @@ npm:@narumitw/pi-goal
 git:github.com/Th1nhNg0/pi-extensions
 npm:pi-background-tasks
 npm:pi-hashline-edit-pro@latest
-npm:pi-subagents
 ```
 
 To inspect the currently installed packages:
