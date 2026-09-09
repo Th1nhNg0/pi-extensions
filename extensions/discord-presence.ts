@@ -27,13 +27,13 @@ import {
 import os from "node:os";
 import { dirname, join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
-import {
-	Client,
+import { EventEmitter } from "node:events";
+import type {
+	ClientOptions,
+	CommandIncoming,
+	SetActivity,
 	Transport,
-	type ClientOptions,
-	type CommandIncoming,
-	type SetActivity,
-	type TransportOptions,
+	TransportOptions,
 } from "@xhayper/discord-rpc";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -406,7 +406,7 @@ export interface PresenceManagerOptions {
 	startedAt?: number;
 	initialUsage?: UsageTotals;
 	initialContext?: ContextSnapshot;
-	createTransport?: (clientId: string) => DiscordPresenceTransport;
+	createTransport?: (clientId: string) => DiscordPresenceTransport | Promise<DiscordPresenceTransport>;
 	stateStore?: PresenceStateStore;
 	logger?: (message: string) => void;
 	now?: () => number;
@@ -1999,7 +1999,8 @@ function isMissingExecutableError(error: unknown): boolean {
  * Windows executable that copies the pipe bytes to stdin/stdout, so this
  * transport can keep the normal Discord IPC framing and authentication.
  */
-export class WslDiscordIpcTransport extends Transport {
+export class WslDiscordIpcTransport extends EventEmitter {
+	private readonly client: TransportOptions["client"];
 	private readonly relayCommand =
 		process.env[NPIPERELAY_ENV]?.trim() || "npiperelay.exe";
 	private relay: ChildProcess | undefined;
@@ -2084,14 +2085,15 @@ export class WslDiscordIpcTransport extends Transport {
 		return result;
 	}
 	constructor(options: TransportOptions) {
-		super(options);
+		super();
+		this.client = options.client;
 	}
 
-	override get isConnected(): boolean {
+	get isConnected(): boolean {
 		return this.connected;
 	}
 
-	override async connect(): Promise<void> {
+	async connect(): Promise<void> {
 		if (this.connected) return;
 
 		let lastError: unknown;
@@ -2283,7 +2285,7 @@ export class WslDiscordIpcTransport extends Transport {
 		stdin.write(Buffer.concat([packet, payload]));
 	}
 
-	override send(message?: unknown): void {
+	send(message?: unknown): void {
 		try {
 			this.writePacket(message, 1);
 		} catch (error) {
@@ -2291,11 +2293,11 @@ export class WslDiscordIpcTransport extends Transport {
 		}
 	}
 
-	override ping(): void {
+	ping(): void {
 		this.writePacket(randomUUID(), 3);
 	}
 
-	override async close(): Promise<void> {
+	async close(): Promise<void> {
 		const relay = this.relay;
 		this.relay = undefined;
 		this.connected = false;
@@ -2330,13 +2332,24 @@ export class WslDiscordIpcTransport extends Transport {
 	}
 }
 
-export function createDiscordPresenceTransport(
+export async function createDiscordPresenceTransport(
 	clientId: string,
-): DiscordPresenceTransport {
+): Promise<DiscordPresenceTransport> {
 	const transportMode = resolveDiscordTransportMode();
+	// Lazy-load the Discord RPC stack only when a transport is actually needed
+	// (session_start on the elected publisher). A static import would make Pi
+	// pay the module cost on every startup, even when presence is disabled.
+	const { Client } = await import("@xhayper/discord-rpc");
 	const clientOptions: ClientOptions =
 		transportMode === "wsl-relay"
-			? { clientId, transport: { type: WslDiscordIpcTransport } }
+			? {
+					clientId,
+					transport: {
+						type: WslDiscordIpcTransport as unknown as new (
+							options: TransportOptions,
+						) => Transport,
+					},
+				}
 			: { clientId };
 	const client = new Client(clientOptions);
 	const disconnectHandlers = new Set<() => void>();
@@ -2369,7 +2382,7 @@ export class DiscordPresenceManager {
 	private readonly stateStore: PresenceStateStore;
 	private readonly createTransport: (
 		clientId: string,
-	) => DiscordPresenceTransport;
+	) => DiscordPresenceTransport | Promise<DiscordPresenceTransport>;
 	private readonly logger: (message: string) => void;
 	private readonly now: () => number;
 	private readonly heartbeatMs: number;
@@ -2967,7 +2980,7 @@ export class DiscordPresenceManager {
 		await this.closeTransport();
 		let transport: DiscordPresenceTransport;
 		try {
-			transport = this.createTransport(this.clientId);
+			transport = await this.createTransport(this.clientId);
 		} catch (error) {
 			if (!this.transportErrorWarningShown) {
 				const message = error instanceof Error ? error.message : String(error);
