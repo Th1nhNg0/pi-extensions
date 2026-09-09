@@ -18,6 +18,13 @@ import {
 	resetLabel,
 	windowSegment,
 	getDeepSeekPeakInfo,
+	DEEPSEEK_PEAK_WINDOWS,
+	deepseekCfg,
+	deepSeekPeakTag,
+	formatBalance,
+	formatDeepSeekPeakWindows,
+	formatLocalTimeRange,
+	usesDeepSeekPeakPricing,
 	antigravityCfg,
 	opencodeCfg,
 	type CodexUsageResponse,
@@ -349,6 +356,83 @@ test("getDeepSeekPeakInfo accurately classifies UTC peak and off-peak windows", 
 	const info1000 = getDeepSeekPeakInfo(t1000);
 	assert.equal(info1000.isPeak, false);
 	assert.equal(info1000.nextFlipMs, Date.parse("2026-09-07T01:00:00.000Z"));
+});
+
+test("DeepSeek peak windows expose bounds and local ranges", () => {
+	// Windows stay anchored to the UTC clock regardless of local timezone.
+	assert.deepEqual(DEEPSEEK_PEAK_WINDOWS, [[60, 240], [360, 600]]);
+
+	const t0100 = Date.parse("2026-09-06T01:00:00.000Z");
+	const active = getDeepSeekPeakInfo(t0100);
+	assert.equal(active.windowStartMs, t0100);
+	assert.equal(active.windowEndMs, Date.parse("2026-09-06T04:00:00.000Z"));
+
+	const offPeak = getDeepSeekPeakInfo(Date.parse("2026-09-06T10:00:00.000Z"));
+	assert.equal(offPeak.windowStartMs, Date.parse("2026-09-07T01:00:00.000Z"));
+	assert.equal(offPeak.windowEndMs, Date.parse("2026-09-07T04:00:00.000Z"));
+
+	// Local range is a 3-hour span for window 1 and always parses as HH:MM–HH:MM.
+	assert.match(formatLocalTimeRange(active.windowStartMs, active.windowEndMs, t0100), /^\d{2}:\d{2}( [+-]1)?–\d{2}:\d{2}( [+-]1)?$/);
+	const label = formatDeepSeekPeakWindows(t0100);
+	assert.match(label, /01:00–04:00 UTC/);
+	assert.match(label, /06:00–10:00 UTC/);
+	assert.match(label, /\(local\)/);
+});
+
+test("usesDeepSeekPeakPricing covers the DeepSeek API and DeepSeek models", () => {
+	assert.equal(usesDeepSeekPeakPricing("deepseek"), true);
+	assert.equal(usesDeepSeekPeakPricing("opencode-go", "deepseek-v3"), true);
+	assert.equal(usesDeepSeekPeakPricing("opencode-go", "claude-sonnet-4"), false);
+	assert.equal(usesDeepSeekPeakPricing("openai-codex", "gpt-5"), false);
+	assert.equal(usesDeepSeekPeakPricing(undefined, undefined), false);
+});
+
+test("formatBalance renders symbols and falls back to the currency code", () => {
+	assert.equal(formatBalance({ currency: "USD", total: 12.34 }), "$12.34");
+	assert.equal(formatBalance({ currency: "CNY", total: 100 }), "¥100.00");
+	assert.equal(formatBalance({ currency: "SGD", total: 5.5 }), "5.50 SGD");
+});
+
+test("normalizeUsageData keeps balance-only payloads for pay-as-you-go providers", () => {
+	assert.deepEqual(
+		normalizeUsageData({ windows: {}, balance: { currency: "usd", total: 7.5 } }),
+		{ windows: {}, balance: { currency: "USD", total: 7.5 } },
+	);
+	assert.deepEqual(
+		normalizeUsageData({ balance: { currency: "USD", total: 1 } }),
+		{ windows: {}, balance: { currency: "USD", total: 1 } },
+	);
+	// Malformed balances are dropped, and empty payloads still normalize to undefined.
+	assert.equal(normalizeUsageData({ windows: {}, balance: { currency: "USD" } }), undefined);
+	assert.equal(normalizeUsageData({ windows: {}, balance: { total: 5 } }), undefined);
+	assert.equal(normalizeUsageData({ windows: {} }), undefined);
+});
+
+test("deepseekCfg.render shows the local peak window plus the account balance", () => {
+	const rendered = deepseekCfg.render(
+		{ windows: {}, balance: { currency: "USD", total: 12.34 } },
+		mockTheme,
+	);
+	assert.match(rendered, /(Peak|Off-Peak) \d{2}:\d{2}( [+-]1)?–\d{2}:\d{2}( [+-]1)? ~/);
+	assert.match(rendered, /\$12\.34$/);
+	// The peak tag is theme-colored: warning while peak, dim while off-peak.
+	const now = Date.now();
+	const expectedColor = getDeepSeekPeakInfo(now).isPeak ? "warning" : "dim";
+	const colors: string[] = [];
+	deepSeekPeakTag({ fg: (color, text) => { colors.push(color); return text; } }, now);
+	assert.deepEqual(colors, [expectedColor]);
+});
+
+test("formatUsageDetails reports the DeepSeek balance and both peak windows", () => {
+	const text = formatUsageDetails(
+		{ windows: {}, balance: { currency: "USD", total: 3.5 } },
+		"deepseek",
+		{ now: Date.parse("2026-09-06T02:00:00.000Z") },
+	);
+	assert.match(text, /Subscription usage — deepseek/);
+	assert.match(text, /• balance: \$3\.50/);
+	assert.match(text, /• deepseek pool: Peak hours \(.+\) ~2h left/);
+	assert.match(text, /• peak windows: .*01:00–04:00 UTC, 06:00–10:00 UTC/);
 });
 
 test("earliestReset falls back to standard interval if expired reset was already fetched", () => {

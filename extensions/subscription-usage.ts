@@ -7,8 +7,9 @@
  *
  *   ↑1k ↓2k $0.123 12.5%/200k (auto)      kimi-k2 • high
  *   R: ░░░░░░ 4% ~4h · W: ██████ 97% ~8h · M: █████░░░ 62% ~20d
- *   Peak ~2h · R: ░░░░░░ 4% ~4h                    ← DeepSeek peak hours
+ *   Peak 14:00–18:00 ~2h · R: ░░░░░░ 4% ~4h        ← DeepSeek peak hours
  *   5h: ░░░░░░ 1% ~4h · W: ░░░░░░ 0% ~6d
+ *   Off-Peak 02:00–06:00 ~5h · $12.34            ← DeepSeek API balance
  *
  * `/usage` shows the detailed readout for all providers;
  * `/usage toggle [bars|percent|off]` cycles bars → bare percentages →
@@ -17,7 +18,10 @@
  *
  * Each window also shows a compact countdown (~) until it resets. OpenCode
  * reports `resetsAt` (ISO) per window; Codex reports `reset_at` (epoch s);
- * Antigravity reports `resetTime` (ISO) per bucket.
+ * Antigravity reports `resetTime` (ISO) per bucket. DeepSeek bills on two UTC
+ * peak windows (01:00–04:00 and 06:00–10:00), rendered in local time, and
+ * the DeepSeek API provider additionally shows the account balance from
+ * `GET /user/balance`.
  *
  * Fetch strategy (adaptive, no spam):
  * - Fetch on session start, model switch, and right after an agent turn
@@ -148,11 +152,18 @@ async function savePrefs(prefs: UsagePrefs): Promise<void> {
 	}
 }
 
-/** Percentages per window key, plus optional plan info and reset times (ms epoch). */
+/** Account balance for pay-as-you-go providers (e.g. the DeepSeek API). */
+export interface UsageBalance {
+	currency: string;
+	total: number;
+}
+
+/** Percentages per window key, plus optional plan, reset times (ms epoch), and balance. */
 export interface UsageData {
 	windows: Record<string, number>;
 	plan?: string;
 	resets?: Record<string, number>;
+	balance?: UsageBalance;
 }
 
 interface DiskCacheRecord {
@@ -187,19 +198,32 @@ function normalizeResets(value: unknown): Record<string, number> | undefined {
 	return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
+function normalizeBalance(value: unknown): UsageBalance | undefined {
+	const record = asRecord(value);
+	if (!record) return undefined;
+	const currency =
+		typeof record.currency === "string" ? record.currency.trim().toUpperCase() : "";
+	const total = finiteNumber(record.total);
+	if (!currency || total === undefined) return undefined;
+	return { currency, total };
+}
+
 /** Decode provider or disk-cache data before it reaches rendering or scheduling. */
 export function normalizeUsageData(value: unknown): UsageData | undefined {
 	const record = asRecord(value);
 	const windowsRecord = asRecord(record?.windows);
-	if (!windowsRecord) return undefined;
+	const balance = normalizeBalance(record?.balance);
+	if (!windowsRecord && !balance) return undefined;
 
-	const windows = Object.fromEntries(
-		Object.entries(windowsRecord).flatMap(([key, percent]) => {
-			const normalized = normalizePercent(percent);
-			return normalized === undefined ? [] : [[key, normalized] as const];
-		}),
-	) as Record<string, number>;
-	if (Object.keys(windows).length === 0) return undefined;
+	const windows = windowsRecord
+		? (Object.fromEntries(
+				Object.entries(windowsRecord).flatMap(([key, percent]) => {
+					const normalized = normalizePercent(percent);
+					return normalized === undefined ? [] : [[key, normalized] as const];
+				}),
+			) as Record<string, number>)
+		: {};
+	if (Object.keys(windows).length === 0 && !balance) return undefined;
 
 	const plan = typeof record?.plan === "string" ? record.plan.trim() : undefined;
 	const resets = normalizeResets(record?.resets);
@@ -207,6 +231,7 @@ export function normalizeUsageData(value: unknown): UsageData | undefined {
 		windows,
 		...(plan ? { plan } : {}),
 		...(resets ? { resets } : {}),
+		...(balance ? { balance } : {}),
 	};
 }
 
@@ -456,6 +481,21 @@ export function fetchAgeLabel(fetchedAt: number, now = Date.now()): string {
 	return `${d}d ago`;
 }
 
+const CURRENCY_SYMBOLS: Record<string, string> = {
+	USD: "$",
+	CNY: "¥",
+	EUR: "€",
+	GBP: "£",
+	JPY: "¥",
+};
+
+/** Compact balance label, e.g. `$12.34`, or `12.34 SGD` for unknown currencies. */
+export function formatBalance(balance: UsageBalance): string {
+	const amount = balance.total.toFixed(2);
+	const symbol = CURRENCY_SYMBOLS[balance.currency];
+	return symbol ? `${symbol}${amount}` : `${amount} ${balance.currency}`;
+}
+
 /**
  * Full multi-line breakdown of every usage window for a provider.
  *
@@ -498,10 +538,17 @@ export function formatUsageDetails(
 			lines.push(`\u2022 ${key}: ${safe}% ${cells}`);
 		}
 	}
-	if (providerId === "opencode-go" && options.modelId && /deepseek/i.test(options.modelId)) {
+	if (normalized.balance) {
+		lines.push(`\u2022 balance: ${formatBalance(normalized.balance)}`);
+	}
+	if (usesDeepSeekPeakPricing(providerId, options.modelId)) {
 		const peak = getDeepSeekPeakInfo(now);
-		const tag = peak.isPeak ? `Peak hours ${resetLabel(peak.nextFlipMs, now)} left` : `Off-peak ${resetLabel(peak.nextFlipMs, now)} until peak`;
+		const range = formatLocalTimeRange(peak.windowStartMs, peak.windowEndMs, now);
+		const tag = peak.isPeak
+			? `Peak hours (${range}) ${resetLabel(peak.nextFlipMs, now)} left`
+			: `Off-peak ${resetLabel(peak.nextFlipMs, now)} until peak (${range})`;
 		lines.push(`\u2022 deepseek pool: ${tag}`);
+		lines.push(`\u2022 peak windows: ${formatDeepSeekPeakWindows(now)}`);
 	}
 	if (typeof options.fetchedAt === "number" && Number.isFinite(options.fetchedAt) && options.fetchedAt > 0) {
 		lines.push(`Updated ${fetchAgeLabel(options.fetchedAt, now)}`);
@@ -514,41 +561,119 @@ function jitter(ms: number): number {
 }
 
 /**
- * Peak hour windows for DeepSeek models on OpenCode Go (UTC):
- * - 01:00 - 04:00 UTC
- * - 06:00 - 10:00 UTC
+ * DeepSeek bills on a UTC clock: two peak windows per day, with a 50%
+ * off-peak discount during every other hour. Windows are stored as UTC
+ * minutes from midnight so they stay correct across DST changes.
+ */
+export const DEEPSEEK_PEAK_WINDOWS: ReadonlyArray<readonly [number, number]> = [
+	[1 * 60, 4 * 60], // 01:00 - 04:00 UTC
+	[6 * 60, 10 * 60], // 06:00 - 10:00 UTC
+];
+
+/** Local calendar-day index, used to mark windows that cross local midnight. */
+function localDayIndex(ms: number): number {
+	return Math.floor((ms - new Date(ms).getTimezoneOffset() * 60_000) / 86_400_000);
+}
+
+/** `HH:MM` in local time, suffixed with `+1`/`-1` on another local day. */
+function localClock(ms: number, referenceDay: number): string {
+	const date = new Date(ms);
+	const hh = String(date.getHours()).padStart(2, "0");
+	const mm = String(date.getMinutes()).padStart(2, "0");
+	const offset = localDayIndex(ms) - referenceDay;
+	const suffix = offset > 0 ? " +1" : offset < 0 ? " -1" : "";
+	return `${hh}:${mm}${suffix}`;
+}
+
+/** Format an absolute window as a local `HH:MM–HH:MM` range. */
+export function formatLocalTimeRange(startMs: number, endMs: number, now = Date.now()): string {
+	const referenceDay = localDayIndex(now);
+	return `${localClock(startMs, referenceDay)}–${localClock(endMs, referenceDay)}`;
+}
+
+/** `HH:MM` for a UTC minutes-from-midnight value. */
+function utcClock(minutes: number): string {
+	const hh = String(Math.floor(minutes / 60)).padStart(2, "0");
+	const mm = String(minutes % 60).padStart(2, "0");
+	return `${hh}:${mm}`;
+}
+
+/** Both peak windows as local ranges, plus their canonical UTC ranges. */
+export function formatDeepSeekPeakWindows(now = Date.now()): string {
+	const d = new Date(now);
+	const utcMidnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+	const local = DEEPSEEK_PEAK_WINDOWS.map(([start, end]) =>
+		formatLocalTimeRange(utcMidnight + start * 60_000, utcMidnight + end * 60_000, now),
+	).join(", ");
+	const utc = DEEPSEEK_PEAK_WINDOWS.map(
+		([start, end]) => `${utcClock(start)}–${utcClock(end)} UTC`,
+	).join(", ");
+	return `${local} (local) · ${utc}`;
+}
+
+/**
+ * Peak-hour state for DeepSeek's UTC billing windows. `windowStartMs` and
+ * `windowEndMs` describe the active window while peak, or the next window
+ * while off-peak, so callers can render a local range without re-deriving it.
  */
 export function getDeepSeekPeakInfo(now = Date.now()): {
 	isPeak: boolean;
 	nextFlipMs: number;
+	windowStartMs: number;
+	windowEndMs: number;
 } {
 	const d = new Date(now);
 	const utcMins = d.getUTCHours() * 60 + d.getUTCMinutes();
-	const secOffsetMs = d.getUTCSeconds() * 1000 + d.getUTCMilliseconds();
+	const utcMidnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
 
-	// Window 1: 01:00 - 04:00 UTC (60m - 240m)
-	// Window 2: 06:00 - 10:00 UTC (360m - 600m)
-	if (utcMins >= 60 && utcMins < 240) {
-		const remainMs = (240 - utcMins) * 60_000 - secOffsetMs;
-		return { isPeak: true, nextFlipMs: now + Math.max(0, remainMs) };
-	}
-	if (utcMins >= 360 && utcMins < 600) {
-		const remainMs = (600 - utcMins) * 60_000 - secOffsetMs;
-		return { isPeak: true, nextFlipMs: now + Math.max(0, remainMs) };
+	for (const [start, end] of DEEPSEEK_PEAK_WINDOWS) {
+		if (utcMins >= start && utcMins < end) {
+			const windowStartMs = utcMidnight + start * 60_000;
+			const windowEndMs = utcMidnight + end * 60_000;
+			return { isPeak: true, nextFlipMs: windowEndMs, windowStartMs, windowEndMs };
+		}
 	}
 
-	// Off-peak: compute time until next peak window starts
-	let minsUntilPeak: number;
-	if (utcMins < 60) {
-		minsUntilPeak = 60 - utcMins;
-	} else if (utcMins < 360) {
-		minsUntilPeak = 360 - utcMins;
-	} else {
-		// Next peak is tomorrow at 01:00 UTC (1440m in a day + 60m = 1500m)
-		minsUntilPeak = 1500 - utcMins;
+	for (const [start, end] of DEEPSEEK_PEAK_WINDOWS) {
+		if (utcMins < start) {
+			const windowStartMs = utcMidnight + start * 60_000;
+			return {
+				isPeak: false,
+				nextFlipMs: windowStartMs,
+				windowStartMs,
+				windowEndMs: utcMidnight + end * 60_000,
+			};
+		}
 	}
-	const remainMs = minsUntilPeak * 60_000 - secOffsetMs;
-	return { isPeak: false, nextFlipMs: now + Math.max(0, remainMs) };
+
+	// Past the final window: the next peak starts with window 1 tomorrow.
+	const [start, end] = DEEPSEEK_PEAK_WINDOWS[0];
+	const tomorrow = utcMidnight + 86_400_000;
+	const windowStartMs = tomorrow + start * 60_000;
+	return {
+		isPeak: false,
+		nextFlipMs: windowStartMs,
+		windowStartMs,
+		windowEndMs: tomorrow + end * 60_000,
+	};
+}
+
+/** True when the active provider/model bills on DeepSeek's peak-hour windows. */
+export function usesDeepSeekPeakPricing(providerId?: string, modelId?: string): boolean {
+	if (providerId === "deepseek") return true;
+	return Boolean(modelId && /deepseek/i.test(modelId));
+}
+
+/** Theme-colored peak/off-peak tag with the local window and flip countdown. */
+export function deepSeekPeakTag(
+	theme: { fg(color: string, text: string): string },
+	now = Date.now(),
+): string {
+	const peak = getDeepSeekPeakInfo(now);
+	const range = formatLocalTimeRange(peak.windowStartMs, peak.windowEndMs, now);
+	return peak.isPeak
+		? theme.fg("warning", `Peak ${range} ${resetLabel(peak.nextFlipMs, now)}`)
+		: theme.fg("dim", `Off-Peak ${range} ${resetLabel(peak.nextFlipMs, now)}`);
 }
 
 /** Earliest reset deadline across all tracked windows (ms epoch), if any. */
@@ -561,7 +686,7 @@ export function earliestReset(
 	const times = data?.resets
 		? Object.values(data.resets).filter((value) => Number.isFinite(value))
 		: [];
-	if (providerId === "opencode-go" && modelId && /deepseek/i.test(modelId)) {
+	if (usesDeepSeekPeakPricing(providerId, modelId)) {
 		times.push(getDeepSeekPeakInfo(now).nextFlipMs);
 	}
 	return times.length ? Math.min(...times) : undefined;
@@ -645,14 +770,54 @@ export const opencodeCfg: ProviderCfg = {
 		}
 		if (parts.length === 0) return "";
 
-		// DeepSeek pools flip on peak-hour windows; surface that countdown.
-		const isDeepSeek = modelId ? /deepseek/i.test(modelId) : false;
-		if (!isDeepSeek) return joinParts(parts, theme);
-		const peak = getDeepSeekPeakInfo();
-		const tag = peak.isPeak
-			? theme.fg("warning", `Peak ${resetLabel(peak.nextFlipMs)}`)
-			: theme.fg("dim", `Off-Peak ${resetLabel(peak.nextFlipMs)}`);
-		return joinParts([tag, ...parts], theme);
+		// DeepSeek pools flip on peak-hour windows; surface the local window
+		// plus the countdown to the next flip.
+		if (!usesDeepSeekPeakPricing("opencode-go", modelId)) return joinParts(parts, theme);
+		return joinParts([deepSeekPeakTag(theme), ...parts], theme);
+	},
+};
+
+/** DeepSeek API (pay-as-you-go): account balance plus peak/off-peak billing state. */
+export const deepseekCfg: ProviderCfg = {
+	id: "deepseek",
+	async fetchUsage(signal?: AbortSignal) {
+		const rawEnv = process.env.DEEPSEEK_API_KEY?.trim();
+		const cred = rawEnv ? undefined : readStoredCredential("deepseek");
+		const key =
+			(rawEnv && rawEnv.length > 0 ? rawEnv : undefined) ??
+			(cred && cred.type === "api_key" ? cred.key : undefined);
+		if (!key) throw new Error("no API key (DEEPSEEK_API_KEY or auth.json)");
+
+		const res = await fetch("https://api.deepseek.com/user/balance", {
+			headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+			signal: anySignal(signal, AbortSignal.timeout(10_000)),
+		});
+		if (!res.ok) {
+			await res.body?.cancel().catch(() => undefined);
+			throw new Error(`HTTP ${res.status}`);
+		}
+		const json = (await res.json()) as {
+			balance_infos?: Array<{ currency?: unknown; total_balance?: unknown }>;
+		};
+
+		// Prefer USD when the account holds several currencies.
+		const balances = (json.balance_infos ?? []).flatMap((entry) => {
+			const record = asRecord(entry);
+			const currency =
+				typeof record?.currency === "string"
+					? record.currency.trim().toUpperCase()
+					: "";
+			const total = Number.parseFloat(String(record?.total_balance ?? ""));
+			return currency && Number.isFinite(total) ? [{ currency, total }] : [];
+		});
+		const balance = balances.find((entry) => entry.currency === "USD") ?? balances[0];
+		if (!balance) throw new Error("no balance data");
+		return { windows: {}, balance };
+	},
+	render(data, theme) {
+		const parts = [deepSeekPeakTag(theme)];
+		if (data.balance) parts.push(formatBalance(data.balance));
+		return joinParts(parts, theme);
 	},
 };
 
@@ -1080,7 +1245,7 @@ export const antigravityCfg: ProviderCfg = {
 export default function (pi: ExtensionAPI) {
 	const cache = new Map<string, ProviderState>();
 	let currentCtx: StatusCtx | undefined;
-	const cfgs = [opencodeCfg, codexCfg, antigravityCfg];
+	const cfgs = [opencodeCfg, codexCfg, antigravityCfg, deepseekCfg];
 	let mode: UsageMode = loadPrefs().mode;
 
 	function renderUi(
