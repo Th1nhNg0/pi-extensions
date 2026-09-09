@@ -205,10 +205,8 @@ My current user-level Pi package setup:
 npm:pi-web-access
 npm:pi-mcp-adapter
 npm:@juicesharp/rpiv-ask-user-question
-npm:@juicesharp/rpiv-todo
 npm:@ff-labs/pi-fff
 npm:pi-antigravity
-npm:@narumitw/pi-goal
 git:github.com/Th1nhNg0/pi-extensions
 npm:pi-background-tasks
 npm:pi-hashline-edit-pro@latest
