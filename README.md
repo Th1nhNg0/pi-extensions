@@ -13,7 +13,7 @@ Adds a minimal usage readout to Pi's footer status line — directly below the m
 #### Supported Providers
 
 * **Antigravity Pro** (Gemini & 3rd-party/Claude quotas with 5h rolling & weekly buckets)
-* **OpenAI Codex** (Plus/Team/Pro plan 5h rolling & weekly quota windows)
+* **OpenAI Codex** (Plus/Team/Pro plan 5h rolling & weekly quota windows, plus banked rate-limit resets)
 * **OpenCode Go** (Rolling, Weekly, and Monthly limits, plus DeepSeek peak/off-peak indicator)
 * **DeepSeek API** (Account balance from `/user/balance`, plus peak/off-peak billing windows shown in your local time)
 
@@ -27,7 +27,7 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 | :--- | :--- |
 | **Antigravity Pro (Gemini)** | `5h: ░░░░░░ 0% ~4h · W: █████▌░ 79% ~4d` |
 | **Antigravity Pro (Claude/GPT)** | `5h: ░░░░░░ 0% ~4h · W: ████░░░ 61% ~6d` |
-| **OpenAI Codex** | `5h: ░░░░░░ 1% ~4h · W: ███░░░ 51% ~3d` |
+| **OpenAI Codex** | `5h: ░░░░░░ 1% ~4h · W: ███░░░ 51% ~3d · 3 resets left` |
 | **OpenCode Go** | `Peak 13:00–17:00 ~2h · R: ░░░░░░ 2% ~3h · W: ██░░░░ 44% ~3d · M: ██████ 98% ~14d` |
 | **DeepSeek API** | `Off-Peak 08:00–11:00 ~5h · $12.34` |
 | **Any (percent style)** | `R 2% ~3h · W 44% ~3d · M 98% ~14d` |
@@ -39,6 +39,7 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 * `~` : Countdown until the next quota reset (e.g. `~4h`, `~3d`)
 * `Peak` / `Off-Peak` : DeepSeek billing state. Windows are `01:00–04:00` and `06:00–10:00` UTC, converted to your local time; `+1`/`-1` marks a window that crosses local midnight. Off-peak hours are billed at 50%.
 * `$12.34` : DeepSeek API account balance (`GET /user/balance`), shown for pay-as-you-go accounts.
+* `3 resets left` : Banked rate-limit resets available for OpenAI Codex subscriptions.
 
 ---
 
@@ -62,6 +63,7 @@ All controls live under one `/usage` command:
 Subscription usage — openai-codex (plus) • gpt-5
 • 5h: 1% ░░░░░░ — resets ~4h (2026-09-06 16:00 UTC)
 • weekly: 51% ███░░░ — resets ~3d (2026-09-09 12:00 UTC)
+• resets: 3 left
 Updated 5m ago
 ```
 

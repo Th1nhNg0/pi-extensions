@@ -57,6 +57,25 @@ test("usage payload normalization clamps percentages and drops malformed data", 
 			resets: { okay: 1_000 },
 		},
 	);
+	assert.deepEqual(
+		normalizeUsageData({
+			windows: { okay: 10 },
+			resetsLeft: 3,
+		}),
+		{
+			windows: { okay: 10 },
+			resetsLeft: 3,
+		},
+	);
+	assert.deepEqual(
+		normalizeUsageData({
+			windows: { okay: 10 },
+			resetsLeft: -1,
+		}),
+		{
+			windows: { okay: 10 },
+		},
+	);
 	assert.equal(
 		normalizeUsageData({ windows: { invalid: Number.NaN } }),
 		undefined,
@@ -167,6 +186,25 @@ test("parseCodexUsage handles windows missing limit_window_seconds", () => {
 	});
 });
 
+test("parseCodexUsage parses rate_limit_reset_credits", () => {
+	const response: CodexUsageResponse = {
+		plan_type: "plus",
+		rate_limit: {
+			primary_window: {
+				used_percent: 6,
+				limit_window_seconds: 18000,
+				reset_at: 1788991060,
+			},
+		},
+		rate_limit_reset_credits: {
+			available_count: 3,
+			applicable_available_count: 0,
+		},
+	};
+	const parsed = parseCodexUsage(response);
+	assert.equal(parsed.resetsLeft, 3);
+});
+
 test("parseCodexUsage throws on empty response", () => {
 	assert.throws(() => parseCodexUsage({}), /no usage data/);
 });
@@ -210,6 +248,33 @@ test("codexCfg.render handles weekly-only window", () => {
 	const rendered = codexCfg.render(data, mockTheme);
 	assert.match(rendered, /^W: █████░\s+75%/);
 	assert.doesNotMatch(rendered, /5h:/);
+});
+
+test("codexCfg.render displays banked resets when available", () => {
+	const data: UsageData = {
+		plan: "plus",
+		windows: { "5h": 6, weekly: 16 },
+		resetsLeft: 3,
+	};
+	const renderedBars = codexCfg.render(data, mockTheme);
+	assert.match(renderedBars, /· 3 resets left$/);
+
+	const renderedPercent = codexCfg.render(data, mockTheme, undefined, "percent");
+	assert.match(renderedPercent, /· 3 resets left$/);
+
+	const singleReset: UsageData = {
+		plan: "plus",
+		windows: { "5h": 6 },
+		resetsLeft: 1,
+	};
+	assert.match(codexCfg.render(singleReset, mockTheme), /· 1 reset left$/);
+
+	const zeroResets: UsageData = {
+		plan: "plus",
+		windows: { "5h": 6 },
+		resetsLeft: 0,
+	};
+	assert.doesNotMatch(codexCfg.render(zeroResets, mockTheme), /reset/);
 });
 
 test("windowSegment renders bars and percent styles", () => {
@@ -324,6 +389,26 @@ test("formatUsageDetails handles missing resets and empty data", () => {
 	assert.match(text, /Subscription usage — opencode-go/);
 	assert.match(text, /• rolling: 2% ░░░░░░/);
 	assert.equal(formatUsageDetails({ windows: {} }, "openai-codex"), "openai-codex: no usage data");
+});
+
+test("formatUsageDetails lists resets left when present", () => {
+	const text = formatUsageDetails(
+		{
+			windows: { "5h": 6, weekly: 16 },
+			resetsLeft: 3,
+		},
+		"openai-codex",
+	);
+	assert.match(text, /• resets: 3 left/);
+
+	const textZero = formatUsageDetails(
+		{
+			windows: { "5h": 6 },
+			resetsLeft: 0,
+		},
+		"openai-codex",
+	);
+	assert.match(textZero, /• resets: 0 left/);
 });
 
 test("getDeepSeekPeakInfo accurately classifies UTC peak and off-peak windows", () => {

@@ -164,6 +164,7 @@ export interface UsageData {
 	plan?: string;
 	resets?: Record<string, number>;
 	balance?: UsageBalance;
+	resetsLeft?: number;
 }
 
 interface DiskCacheRecord {
@@ -208,6 +209,11 @@ function normalizeBalance(value: unknown): UsageBalance | undefined {
 	return { currency, total };
 }
 
+function normalizeResetsLeft(value: unknown): number | undefined {
+	const count = finiteNumber(value);
+	return count !== undefined && count >= 0 ? Math.floor(count) : undefined;
+}
+
 /** Decode provider or disk-cache data before it reaches rendering or scheduling. */
 export function normalizeUsageData(value: unknown): UsageData | undefined {
 	const record = asRecord(value);
@@ -227,11 +233,13 @@ export function normalizeUsageData(value: unknown): UsageData | undefined {
 
 	const plan = typeof record?.plan === "string" ? record.plan.trim() : undefined;
 	const resets = normalizeResets(record?.resets);
+	const resetsLeft = normalizeResetsLeft(record?.resetsLeft);
 	return {
 		windows,
 		...(plan ? { plan } : {}),
 		...(resets ? { resets } : {}),
 		...(balance ? { balance } : {}),
+		...(resetsLeft !== undefined ? { resetsLeft } : {}),
 	};
 }
 
@@ -538,6 +546,11 @@ export function formatUsageDetails(
 			lines.push(`\u2022 ${key}: ${safe}% ${cells}`);
 		}
 	}
+	if (typeof normalized.resetsLeft === "number") {
+		const label =
+			normalized.resetsLeft === 1 ? "1 left" : `${normalized.resetsLeft} left`;
+		lines.push(`\u2022 resets: ${label}`);
+	}
 	if (normalized.balance) {
 		lines.push(`\u2022 balance: ${formatBalance(normalized.balance)}`);
 	}
@@ -836,6 +849,10 @@ export interface CodexUsageResponse {
 		primary_window?: RateLimitWindowSnapshot | null;
 		secondary_window?: RateLimitWindowSnapshot | null;
 	};
+	rate_limit_reset_credits?: {
+		available_count?: number;
+		applicable_available_count?: number;
+	} | null;
 }
 
 export function codexWindowKey(
@@ -876,10 +893,16 @@ export function parseCodexUsage(json: CodexUsageResponse): UsageData {
 	addWindow(json.rate_limit?.secondary_window, "weekly");
 
 	if (Object.keys(windows).length === 0) throw new Error("no usage data");
+	const rawResetsLeft = json.rate_limit_reset_credits?.available_count;
+	const resetsLeft =
+		typeof rawResetsLeft === "number" && Number.isFinite(rawResetsLeft) && rawResetsLeft >= 0
+			? Math.floor(rawResetsLeft)
+			: undefined;
 	const normalized = normalizeUsageData({
 		windows,
 		plan: json.plan_type,
 		resets,
+		...(resetsLeft !== undefined ? { resetsLeft } : {}),
 	});
 	if (!normalized) throw new Error("no usage data");
 	return normalized;
@@ -942,6 +965,11 @@ export const codexCfg: ProviderCfg = {
 			if (!seen.has(k) && typeof v === "number") {
 				parts.push(labeledWindow(k, v, data.resets, k, theme, style));
 			}
+		}
+
+		if (typeof data.resetsLeft === "number" && data.resetsLeft > 0) {
+			const label = `${data.resetsLeft} reset${data.resetsLeft === 1 ? "" : "s"} left`;
+			parts.push(theme.fg("dim", label));
 		}
 
 		if (parts.length === 0) return "";
