@@ -22,7 +22,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "bash .auto/checks.sh",
+    "test": "bash scripts/test.sh",
     "typecheck": "tsc --noEmit"
   },
   "pi": {
