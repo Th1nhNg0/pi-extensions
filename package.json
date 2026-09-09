@@ -22,12 +22,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test tests/*.test.mts",
+    "test": "bash .auto/checks.sh",
     "typecheck": "tsc --noEmit"
   },
   "pi": {
     "extensions": [
-      "extensions/*.ts"
+      "extensions/startup-entry.ts"
     ]
   },
   "license": "MIT",
