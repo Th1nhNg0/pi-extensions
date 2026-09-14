@@ -11,6 +11,7 @@ export function registerDeferredCores(
 		Promise.all([
 			import("./subscription-usage.ts"),
 			import("./discord-presence.ts"),
+			import("./live-throughput-status.ts"),
 		]),
 ): Promise<EventHandler[]> {
 	const registerEvent = pi.on.bind(pi) as unknown as EventRegistrar;

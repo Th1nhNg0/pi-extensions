@@ -25,6 +25,7 @@ printf '{"type":"module"}\n' >"$check_dir/package.json"
 	extensions/deferred-extension.ts \
 	extensions/subscription-usage.ts \
 	extensions/discord-presence.ts \
+	extensions/live-throughput-status.ts \
 	tests/*.mts
 
 node --test "$check_dir"/tests/*.mjs

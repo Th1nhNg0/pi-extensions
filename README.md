@@ -210,6 +210,61 @@ The publisher reloads saved privacy preferences before each publish, so changes 
 
 ---
 
+### 3. `live-throughput-status` (`extensions/live-throughput-status.ts`)
+
+Adds a model-neutral streaming-throughput line to the footer, directly below the subscription-usage line. It is derived entirely from Pi's standard assistant-stream events, so it works with local and hosted models alike — no provider id, model id, or inference-server log/metric is ever read.
+
+#### Footer Status Examples
+
+| Phase | Status Line Output |
+| :--- | :--- |
+| Waiting | `⚡ TTFT: waiting · Decode: waiting for first token…` |
+| Streaming (no usage reported yet) | `⚡ TTFT: 1.24s · Decode: ~42.1 tok/s · ~312 tok` |
+| Settled (provider reported usage) | `⚡ TTFT: 1.24s · Input/TTFT: ~1.5k tok/s · Decode: 39.8 tok/s · 842 tok` |
+| Settled (buffered output, no deltas) | `⚡ Decode: 500 tok · rate unavailable` |
+
+#### What the Numbers Mean
+
+* **TTFT** — measured from Pi's `before_provider_request` hook to the first output delta the client observes. It is end-to-end client latency (network, queue, scheduling, and stream start included), not GPU-only prefill time.
+* **Live decode TPS** — a `characters / 4` estimate, hence the `~`: most providers do not report a cumulative token count on every stream chunk. Thinking and tool-call deltas count as generated output. Until a decode window exists the line reads `Decode: measuring…` rather than dividing by a near-zero interval.
+* **Final decode TPS** — uses the provider's reported output-token count over the client-observed first-to-last delta interval, excluding the first token because it defines the start boundary. This matches the common OpenAI-compatible pattern of sending usage once, in a final chunk.
+* **Input/TTFT** — uncached input tokens plus cache writes divided by TTFT. Cache reads are excluded because the model never re-read them. This is a comparable client-side prompt-rate estimate, **not** authoritative server prefill throughput.
+
+#### Provider Behavior
+
+| Provider Behavior | Live Display | Final Display |
+| :--- | :--- | :--- |
+| Reports final output usage | Approximate TPS | Exact token count with client-timed TPS |
+| Reports no output usage | Approximate TPS | Approximate TPS |
+| Buffers output instead of streaming deltas | `Decode: measuring…` | Token count; rate unavailable |
+
+For an OpenAI-compatible local server, Pi requests streaming usage by default. Keep `supportsUsageInStreaming` enabled only when the server accepts `stream_options: { "include_usage": true }`; otherwise set it to `false` and the extension keeps using its explicit `chars / 4` fallback.
+
+#### Commands
+
+| Command | Usage | Description |
+| :--- | :--- | :--- |
+| `/throughput` | `/throughput` | Detailed readout of the last measurement (model, TTFT, input split, decode rate and span, freshness). Works even while the footer line is hidden. |
+| `/throughput toggle` | `/throughput toggle [on\|off]` | Cycle `on` → `off`, or jump straight to a mode. Persists in `~/.pi/agent/live-throughput-prefs.json`; `off` clears the line and stops all measurement. |
+| `/throughput help` | `/throughput help` | Show the command help. |
+
+```text
+Live throughput — openai-codex • gpt-5
+• TTFT: 1.24s · Input/TTFT: ~1.5k tok/s
+• input: 1.9k tok (1.9k uncached + 62 cache write) · 50k cache read
+• decode: 841.0 tok/s · 842 tok over 1.00s
+Measured just now
+```
+
+#### Limitations
+
+* The live `characters / 4` estimate varies with prose, code, JSON, and CJK.
+* Even with an exact final token count, client timing is affected by stream buffering and network jitter.
+* Short outputs do not have enough first-to-last span for a stable rate; `Decode: measuring…` appears during the first 200 ms of every stream.
+* `Input/TTFT` divides by TTFT, which also contains network/queue/scheduling overhead; use inference-server metrics for true prefill throughput.
+
+---
+
 ## 🧰 My Pi Setup
 
 My current user-level Pi package setup:
