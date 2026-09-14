@@ -10,15 +10,16 @@ import liveThroughput, {
 	ageLabel,
 	compact,
 	deltaChars,
-	finalStatusText,
-	liveStatusText,
+	finalRateText,
 	normalizePrefs,
 	processedInputTokens,
+	rateStatusText,
 	runReadout,
 } from "../extensions/live-throughput-status.ts";
 
 const START = 1_800_000_000_000;
 const STATUS_KEY = "live-throughput";
+
 /** Mock timers are per test, but a few tests build more than one harness. */
 const timersReady = new WeakSet<TestContext>();
 
@@ -31,7 +32,7 @@ interface HarnessOptions {
 
 /**
  * Harness around the extension's registered events and command. Time is
- * mocked so TTFT/decode arithmetic is asserted against exact values, and fs is
+ * mocked so the rate arithmetic is asserted against exact values, and fs is
  * mocked so prefs never touch the real ~/.pi/agent directory.
  */
 function harness(t: TestContext, options: HarnessOptions = {}) {
@@ -120,6 +121,16 @@ type Harness = ReturnType<typeof harness>;
 
 const assistant = { role: "assistant" };
 
+/**
+ * The footer carries exactly one short value — the rate — so every rendered
+ * line must match this shape. Returns the text for further assertions.
+ */
+function assertRateOnly(text: string | undefined): string {
+	assert.ok(text !== undefined, "expected a footer line");
+	assert.match(text, /^~?\d+\.\d tok\/s$/);
+	return text;
+}
+
 /** Open a turn: provider request hook, then the assistant message start. */
 async function beginTurn(h: Harness): Promise<void> {
 	await h.fire("before_provider_request", { payload: {} });
@@ -141,87 +152,110 @@ async function endTurn(h: Harness, usage: unknown): Promise<void> {
 	await h.fire("message_end", { message: { ...assistant, usage } });
 }
 
-test("footer reports TTFT, a live estimate, then exact usage tokens", async (t) => {
+/**
+ * One assistant turn: 400 chars at t+1.24s (the TTFT), then 400 more a second
+ * later — a 1.0s decode window carrying 200 estimated tokens.
+ */
+async function streamTurn(
+	h: Harness,
+	t: TestContext,
+	usage: unknown = {},
+): Promise<void> {
+	await beginTurn(h);
+	t.mock.timers.tick(1_240);
+	await sendDelta(h, 400);
+	t.mock.timers.tick(1_000);
+	await sendDelta(h, 400);
+	await endTurn(h, usage);
+}
+
+test("footer shows a live estimate, then the exact rate from usage", async (t) => {
 	const h = harness(t);
 	await h.fire("session_start", { reason: "startup" });
-	assert.equal(h.text(), "TTFT: waiting · Decode: waiting");
+	// No placeholder: nothing is printed until a rate is measurable.
+	assert.equal(h.text(), undefined);
 
 	await beginTurn(h);
-	assert.equal(h.text(), "TTFT: waiting · Decode: waiting for first token…");
+	assert.equal(h.text(), undefined);
 
 	t.mock.timers.tick(1_240);
 	await sendDelta(h, 400);
-	assert.equal(h.text(), "TTFT: 1.24s · Decode: measuring… · ~100 tok");
+	// The first token defines the window start, so there is no rate yet.
+	assert.equal(h.text(), undefined);
 
 	t.mock.timers.tick(1_000);
 	await sendDelta(h, 400);
-	// 800 chars / 4 = ~200 tokens over a 1.0s decode window.
-	assert.equal(h.text(), "TTFT: 1.24s · Decode: ~200.0 tok/s · ~200 tok");
+	// 800 chars / 4 = ~200 tokens over a 1.0s window, so the rate is estimated.
+	assert.equal(assertRateOnly(h.text()), "~200.0 tok/s");
 
 	await endTurn(h, { input: 1_850, output: 842, cacheRead: 0, cacheWrite: 0 });
-	// 841 = 842 output tokens minus the first token that defines the boundary.
-	assert.equal(
-		h.text(),
-		"TTFT: 1.24s · Input/TTFT: ~1491.9 tok/s · Decode: 841.0 tok/s · 842 tok",
-	);
+	// 841 = 842 output tokens minus the first token that defines the boundary;
+	// the tilde is gone because the provider reported usage.
+	assert.equal(assertRateOnly(h.text()), "841.0 tok/s");
 });
 
-test("first delta never prints a divide-by-near-zero rate", async (t) => {
+test("no rate is printed before a real decode window, and repaints are throttled", async (t) => {
 	const h = harness(t);
 	await beginTurn(h);
+
 	t.mock.timers.tick(500);
 	await sendDelta(h, 4_000);
-	// 1000 estimated tokens in a 0ms window would otherwise render as ~1000000.0.
-	assert.equal(h.text(), "TTFT: 0.50s · Decode: measuring… · ~1000 tok");
+	// 1000 estimated tokens in a 0ms window would otherwise render ~1000000.0.
+	assert.equal(h.text(), undefined);
 
-	t.mock.timers.tick(200);
-	await sendDelta(h, 1);
-	assert.match(h.text()!, /Decode: ~\d+\.\d tok\/s/);
+	t.mock.timers.tick(1_000);
+	await sendDelta(h, 4_000);
+	const shown = assertRateOnly(h.text());
+	assert.equal(shown, "~2000.0 tok/s");
+
+	t.mock.timers.tick(100);
+	await sendDelta(h, 400);
+	// < 200ms since the last write: the TUI is spared the repaint.
+	assert.equal(h.text(), shown);
+
+	t.mock.timers.tick(100);
+	await sendDelta(h, 400);
+	assert.notEqual(h.text(), shown);
+	assert.equal(assertRateOnly(h.text()), "~1833.3 tok/s");
 });
 
-test("cache reads are excluded from Input/TTFT but cache writes count", async (t) => {
+test("Input/TTFT excludes cache reads and includes cache writes (readout)", async (t) => {
 	const cached = harness(t);
-	await beginTurn(cached);
-	t.mock.timers.tick(1_240);
-	await sendDelta(cached, 400);
-	t.mock.timers.tick(1_000);
-	await sendDelta(cached, 400);
-	await endTurn(cached, { input: 0, output: 100, cacheRead: 50_000, cacheWrite: 0 });
-	assert.equal(cached.text(), "TTFT: 1.24s · Decode: 99.0 tok/s · 100 tok");
-	assert.doesNotMatch(cached.text()!, /Input\/TTFT/);
+	await streamTurn(cached, t, { input: 0, output: 100, cacheRead: 50_000, cacheWrite: 0 });
+	await cached.command("");
+	// Everything the footer no longer shows is reported by /throughput instead.
+	assert.doesNotMatch(cached.lastNotification().text, /Input\/TTFT/);
+	assert.match(cached.lastNotification().text, /50k cache read/);
 
 	const writing = harness(t);
-	await beginTurn(writing);
-	t.mock.timers.tick(1_240);
-	await sendDelta(writing, 400);
-	t.mock.timers.tick(1_000);
-	await sendDelta(writing, 400);
-	await endTurn(writing, { input: 1_000, output: 100, cacheRead: 50_000, cacheWrite: 240 });
+	await streamTurn(writing, t, { input: 1_000, output: 100, cacheRead: 50_000, cacheWrite: 240 });
+	await writing.command("");
 	// (1000 uncached + 240 cache write) / 1.24s TTFT
-	assert.equal(
-		writing.text(),
-		"TTFT: 1.24s · Input/TTFT: ~1000.0 tok/s · Decode: 99.0 tok/s · 100 tok",
-	);
+	assert.match(writing.lastNotification().text, /Input\/TTFT: ~1\.0k tok\/s/);
 });
 
-test("providers without usage keep the chars/4 estimate", async (t) => {
+test("providers without usage keep the chars/4 estimate in the footer", async (t) => {
 	const h = harness(t);
-	await beginTurn(h);
-	t.mock.timers.tick(1_240);
-	await sendDelta(h, 400);
-	t.mock.timers.tick(1_000);
-	await sendDelta(h, 400);
-	await endTurn(h, {});
-	assert.equal(h.text(), "TTFT: 1.24s · Decode: ~200.0 tok/s · ~200 tok");
+	await streamTurn(h, t, {});
+	assert.equal(assertRateOnly(h.text()), "~200.0 tok/s");
 });
 
-test("buffered providers report token counts without a rate", async (t) => {
+test("a provider that streams no deltas leaves the last measured rate", async (t) => {
 	const h = harness(t);
-	await beginTurn(h);
-	assert.equal(h.text(), "TTFT: waiting · Decode: waiting for first token…");
+	await h.fire("session_start");
+	await streamTurn(h, t, { input: 1_850, output: 842 });
+	assert.equal(assertRateOnly(h.text()), "841.0 tok/s");
+
+	// Buffered turn: the provider emits no deltas, so no rate can be timed.
+	await h.fire("before_provider_request", { payload: {} });
+	await h.fire("message_start", { message: assistant });
+	t.mock.timers.tick(3_000);
 	await endTurn(h, { input: 300, output: 500 });
-	// No deltas were observed, so no client-timed decode window exists.
-	assert.equal(h.text(), "Decode: 500 tok · rate unavailable");
+	assert.equal(h.text(), "841.0 tok/s");
+
+	// The buffered turn's tokens are still reported by /throughput.
+	await h.command("");
+	assert.match(h.lastNotification().text, /• decode: 500 tok · rate unavailable/);
 });
 
 test("thinking and tool-call deltas count as generated output", async (t) => {
@@ -229,18 +263,18 @@ test("thinking and tool-call deltas count as generated output", async (t) => {
 	await beginTurn(h);
 	t.mock.timers.tick(1_000);
 	await sendDelta(h, 400, "thinking_delta");
-	assert.equal(h.text(), "TTFT: 1.00s · Decode: measuring… · ~100 tok");
+	assert.equal(h.text(), undefined);
 
 	t.mock.timers.tick(1_000);
 	await sendDelta(h, 400, "toolcall_delta");
-	assert.equal(h.text(), "TTFT: 1.00s · Decode: ~200.0 tok/s · ~200 tok");
+	// Both delta kinds count: 800 chars / 4 = ~200 tokens over 1.0s.
+	assert.equal(assertRateOnly(h.text()), "~200.0 tok/s");
 });
 
 test("non-delta stream events and non-assistant messages are ignored", async (t) => {
 	const h = harness(t);
 	await h.fire("session_start");
 	await beginTurn(h);
-	const waiting = h.text();
 
 	t.mock.timers.tick(1_000);
 	await h.fire("message_update", {
@@ -251,7 +285,7 @@ test("non-delta stream events and non-assistant messages are ignored", async (t)
 		message: assistant,
 		assistantMessageEvent: { type: "text_delta", delta: 42 },
 	});
-	assert.equal(h.text(), waiting);
+	assert.equal(h.text(), undefined);
 
 	await h.fire("message_start", { message: { role: "user" } });
 	await h.fire("message_update", {
@@ -259,16 +293,14 @@ test("non-delta stream events and non-assistant messages are ignored", async (t)
 		assistantMessageEvent: { type: "text_delta", delta: "x".repeat(400) },
 	});
 	await h.fire("message_end", { message: { role: "user", usage: { output: 12 } } });
-	assert.equal(h.text(), waiting);
+	assert.equal(h.text(), undefined);
 });
 
-test("a finalized message with nothing measured keeps the previous line", async (t) => {
+test("a finalization with nothing measured prints no placeholder", async (t) => {
 	const h = harness(t);
 	await h.fire("session_start");
 	await h.fire("message_end", { message: { ...assistant, usage: {} } });
-	// session_start's waiting line survives: a restored transcript entry must
-	// not overwrite the footer with an empty measurement.
-	assert.equal(h.text(), "TTFT: waiting · Decode: waiting");
+	assert.equal(h.text(), undefined);
 });
 
 test("toggle off clears the line, stops measuring, and persists the choice", async (t) => {
@@ -277,6 +309,9 @@ test("toggle off clears the line, stops measuring, and persists the choice", asy
 	await beginTurn(h);
 	t.mock.timers.tick(1_240);
 	await sendDelta(h, 400);
+	t.mock.timers.tick(1_000);
+	await sendDelta(h, 400);
+	assert.equal(assertRateOnly(h.text()), "~200.0 tok/s");
 
 	await h.command("toggle off");
 	assert.equal(h.text(), undefined);
@@ -289,6 +324,7 @@ test("toggle off clears the line, stops measuring, and persists the choice", asy
 	await sendDelta(h, 4_000);
 	await endTurn(h, { input: 1_000, output: 500 });
 	assert.equal(h.text(), undefined);
+	assert.equal(h.statuses.size, 1); // only the earlier "off" clear
 
 	await h.command("toggle on");
 	assert.equal(h.text(), undefined);
@@ -298,7 +334,9 @@ test("toggle off clears the line, stops measuring, and persists the choice", asy
 	await beginTurn(h);
 	t.mock.timers.tick(1_000);
 	await sendDelta(h, 400);
-	assert.equal(h.text(), "TTFT: 1.00s · Decode: measuring… · ~100 tok");
+	t.mock.timers.tick(1_000);
+	await sendDelta(h, 400);
+	assert.equal(assertRateOnly(h.text()), "~200.0 tok/s");
 });
 
 test("toggle accepts explicit modes and rejects unknown ones", async (t) => {
@@ -320,7 +358,12 @@ test("toggle accepts explicit modes and rejects unknown ones", async (t) => {
 test("persisted prefs hide or restore the footer at session start", async (t) => {
 	const hidden = harness(t, { prefs: { mode: "off" } });
 	await hidden.fire("session_start");
-	assert.equal(hidden.text(), undefined);
+	await beginTurn(hidden);
+	t.mock.timers.tick(1_000);
+	await sendDelta(hidden, 400);
+	t.mock.timers.tick(1_000);
+	await sendDelta(hidden, 400);
+	assert.equal(hidden.statuses.size, 0);
 
 	await hidden.command("");
 	assert.match(hidden.lastNotification().text, /No measurement yet/);
@@ -328,52 +371,58 @@ test("persisted prefs hide or restore the footer at session start", async (t) =>
 
 	const shown = harness(t, { prefs: { mode: "on" } });
 	await shown.fire("session_start");
-	assert.equal(shown.text(), "TTFT: waiting · Decode: waiting");
+	await streamTurn(shown, t, {});
+	assert.equal(assertRateOnly(shown.text()), "~200.0 tok/s");
 });
 
 test("malformed or unknown prefs fall back to a visible footer", async (t) => {
 	const malformed = harness(t, { rawPrefs: "{not json" });
 	await malformed.fire("session_start");
-	assert.equal(malformed.text(), "TTFT: waiting · Decode: waiting");
+	await streamTurn(malformed, t, {});
+	assert.equal(assertRateOnly(malformed.text()), "~200.0 tok/s");
 
 	const unknown = harness(t, { prefs: { mode: "sometimes" } });
 	await unknown.fire("session_start");
-	assert.equal(unknown.text(), "TTFT: waiting · Decode: waiting");
+	await streamTurn(unknown, t, {});
+	assert.equal(assertRateOnly(unknown.text()), "~200.0 tok/s");
 });
 
 test("sessions without a UI never write status", async (t) => {
 	const h = harness(t, { hasUI: false });
 	await h.fire("session_start");
-	await beginTurn(h);
-	t.mock.timers.tick(1_000);
-	await sendDelta(h, 400);
-	await endTurn(h, { input: 10, output: 20 });
+	await streamTurn(h, t, { input: 10, output: 20 });
 	await h.command("toggle off");
 	assert.equal(h.statuses.size, 0);
 });
 
-test("model switches reset the measurement", async (t) => {
+test("model switches drop the stale rate and measure anew", async (t) => {
 	const h = harness(t);
 	await h.fire("session_start");
-	await beginTurn(h);
-	t.mock.timers.tick(1_240);
-	await sendDelta(h, 400);
-	assert.match(h.text()!, /TTFT: 1.24s/);
+	await streamTurn(h, t, {});
+	assert.equal(assertRateOnly(h.text()), "~200.0 tok/s");
 
 	await h.fire("model_select", { source: "cycle" });
-	assert.equal(h.text(), "TTFT: waiting · Decode: waiting");
+	assert.equal(h.text(), undefined);
 
-	// The next turn measures TTFT from its own request hook, not the old one.
+	// The next turn measures from its own request hook, not the previous one.
 	t.mock.timers.tick(5_000);
 	await beginTurn(h);
 	t.mock.timers.tick(750);
 	await sendDelta(h, 400);
-	assert.equal(h.text(), "TTFT: 0.75s · Decode: measuring… · ~100 tok");
+	t.mock.timers.tick(1_000);
+	await sendDelta(h, 400);
+	assert.equal(assertRateOnly(h.text()), "~200.0 tok/s");
+	await endTurn(h, {});
+
+
+	await h.command("");
+	assert.match(h.lastNotification().text, /• TTFT: 0\.75s/);
 });
 
 test("session shutdown clears the footer", async (t) => {
 	const h = harness(t);
 	await h.fire("session_start");
+	await streamTurn(h, t, {});
 	await h.fire("session_shutdown", { reason: "quit" });
 	assert.deepEqual(h.statuses.get(STATUS_KEY), undefined);
 });
@@ -426,45 +475,30 @@ test("deltaChars counts text, thinking, and tool-call deltas only", () => {
 	assert.equal(deltaChars([{ type: "text_delta", delta: "x" }]), 0);
 });
 
-test("liveStatusText defers until a decode window exists", () => {
-	assert.equal(
-		liveStatusText(1.24, 100, 0),
-		"TTFT: 1.24s · Decode: measuring… · ~100 tok",
-	);
-	assert.equal(
-		liveStatusText(1.24, 100, 0.199),
-		"TTFT: 1.24s · Decode: measuring… · ~100 tok",
-	);
-	assert.equal(
-		liveStatusText(1.24, 200, 1),
-		"TTFT: 1.24s · Decode: ~200.0 tok/s · ~200 tok",
-	);
+test("rateStatusText marks estimated rates with a tilde", () => {
+	assert.equal(rateStatusText(42.05, true), "~42.0 tok/s");
+	assert.equal(rateStatusText(39.84, false), "39.8 tok/s");
+	assert.equal(rateStatusText(-5, false), "0.0 tok/s");
 });
 
-test("finalStatusText prefers exact usage and marks estimates", () => {
+test("finalRateText prefers usage, then the estimate, then nothing", () => {
 	assert.equal(
-		finalStatusText({
-			ttftSeconds: 1.24,
-			uncachedInputTokens: 1_850,
-			cacheWriteTokens: 62,
-			outputTokens: 842,
-			decodeSeconds: 20,
-			streamedChars: 3_400,
-		}),
-		"TTFT: 1.24s · Input/TTFT: ~1541.9 tok/s · Decode: 42.0 tok/s · 842 tok",
+		finalRateText({ outputTokens: 842, decodeSeconds: 20, streamedChars: 3_400 }),
+		"42.0 tok/s",
 	);
 	assert.equal(
-		finalStatusText({ outputTokens: 1, decodeSeconds: 0, streamedChars: 0 }),
-		"Decode: 1 tok · rate unavailable",
+		finalRateText({ outputTokens: 5, streamedChars: 400, decodeSeconds: 2 }),
+		"2.0 tok/s",
 	);
 	assert.equal(
-		finalStatusText({ ttftSeconds: 0.5, streamedChars: 400, decodeSeconds: 2 }),
-		"TTFT: 0.50s · Decode: ~50.0 tok/s · ~100 tok",
+		finalRateText({ streamedChars: 400, decodeSeconds: 2 }),
+		"~50.0 tok/s",
 	);
 	assert.equal(
-		finalStatusText({ streamedChars: 0 }),
-		"Decode: no output tokens",
+		finalRateText({ outputTokens: 1, decodeSeconds: 0, streamedChars: 0 }),
+		undefined,
 	);
+	assert.equal(finalRateText({ streamedChars: 0 }), undefined);
 	assert.equal(
 		processedInputTokens({ uncachedInputTokens: 10, cacheWriteTokens: 5 }),
 		15,

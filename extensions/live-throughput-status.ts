@@ -4,21 +4,25 @@
  * Adds a model-neutral streaming-throughput line to Pi's footer status area,
  * directly below the model/thinking indicator and the subscription-usage line:
  *
- *   ⚡ TTFT: 1.24s · Decode: ~42.1 tok/s · ~312 tok        ← during a stream
- *   ⚡ TTFT: 1.24s · Input/TTFT: ~1.5k tok/s · Decode: 39.8 tok/s · 842 tok
+ *   ⚡ ~42.1 tok/s        ← during a stream (characters / 4 estimate)
+ *   ⚡ 39.8 tok/s         ← once the message settles (reported output tokens)
  *
- * TTFT is measured from Pi's `before_provider_request` hook to the first output
- * delta the client observes. Live decode TPS is a `characters / 4` estimate —
- * hence the `~` — because most providers do not report a cumulative token count
- * on every stream chunk. The final line drops the `~` when the provider reports
- * token usage on `message_end`: the reported output-token count is then spread
- * over the client-observed first-to-last-delta interval, with the first token
- * excluded because it defines the start boundary.
+ * The footer carries one number only: decode throughput. Live TPS is a
+ * `characters / 4` estimate — hence the `~` — because most providers do not
+ * report a cumulative token count on every stream chunk. The `~` disappears
+ * when the provider reports token usage on `message_end`: the reported
+ * output-token count is then spread over the client-observed first-to-last
+ * delta interval, with the first token excluded because it defines the start
+ * boundary. A provider that streams no deltas, or reports no usage, has no
+ * rate to show and simply leaves the most recent one in place.
  *
- * `Input/TTFT` divides uncached input tokens by TTFT. It is a client-side
- * prompt-rate estimate: TTFT also contains network, queue, scheduling, and
- * stream-start overhead, so it is not authoritative server prefill throughput.
- * Cache reads are excluded because the model never re-read them.
+ * Everything else lives in `/throughput` instead of the footer: TTFT (from
+ * Pi's `before_provider_request` hook to the first observed output delta), the
+ * uncached/cached input split, and the decode window. TTFT also contains
+ * network, queue, scheduling, and stream-start overhead, so the `Input/TTFT`
+ * estimate it feeds is a client-side prompt-rate comparison, not authoritative
+ * server prefill throughput; cache reads are excluded because the model never
+ * re-read them.
  *
  * Everything is derived from the standard assistant-stream events, so no
  * provider id, model id, or server log is referenced anywhere. `/throughput`
@@ -41,9 +45,10 @@ const LABEL = "⚡";
 const CHARS_PER_TOKEN = 4;
 const UPDATE_INTERVAL_MS = 200;
 /**
- * A live rate needs a real decode window. The first delta arrives with zero
+ * A live rate needs a real decode window: the first delta arrives with zero
  * elapsed stream time, and dividing by the sub-millisecond floor would print a
- * six-digit TPS, so early samples report "measuring…" instead.
+ * six-digit TPS. Until this much stream time has passed, the previous rate (or
+ * nothing, in a fresh session) stays on the footer.
  */
 const MIN_LIVE_RATE_SECONDS = UPDATE_INTERVAL_MS / 1000;
 
@@ -160,22 +165,16 @@ export function ageLabel(elapsedMs: number): string {
 	return `${Math.floor(hours / 24)}d ago`;
 }
 
-/** Footer text while the stream is still running (live estimate, hence `~`). */
-export function liveStatusText(
-	ttftSeconds: number,
-	estimatedTokens: number,
-	decodeSeconds: number,
+/** Footer text: the decode rate alone, prefixed with `~` while estimated. */
+export function rateStatusText(
+	tokensPerSecond: number,
+	approximate: boolean,
 ): string {
-	const head = `TTFT: ${ttftSeconds.toFixed(2)}s`;
-	const tokens = `~${Math.round(estimatedTokens)} tok`;
-	if (decodeSeconds < MIN_LIVE_RATE_SECONDS) {
-		return `${head} · Decode: measuring… · ${tokens}`;
-	}
-	return `${head} · Decode: ~${rate(estimatedTokens, decodeSeconds)} tok/s · ${tokens}`;
+	return `${approximate ? "~" : ""}${Math.max(0, tokensPerSecond).toFixed(1)} tok/s`;
 }
 
-export interface FinalStatusInput {
-	ttftSeconds?: number;
+/** Settled-measurement inputs derived from the provider's usage payload. */
+export interface SettledMeasurement {
 	/** Uncached input tokens; Pi normalizes `usage.input` to uncached input. */
 	uncachedInputTokens?: number;
 	cacheWriteTokens?: number;
@@ -187,28 +186,18 @@ export interface FinalStatusInput {
 
 /** Tokens the model actually had to read up front (cache reads excluded). */
 export function processedInputTokens(
-	input: Pick<FinalStatusInput, "uncachedInputTokens" | "cacheWriteTokens">,
+	input: Pick<SettledMeasurement, "uncachedInputTokens" | "cacheWriteTokens">,
 ): number {
 	return (input.uncachedInputTokens ?? 0) + (input.cacheWriteTokens ?? 0);
 }
 
-/** Footer text once the message settles; exact counts drop the `~`. */
-export function finalStatusText(input: FinalStatusInput): string {
-	const parts: string[] = [];
-
-	if (input.ttftSeconds !== undefined) {
-		parts.push(`TTFT: ${input.ttftSeconds.toFixed(2)}s`);
-	}
-
-	const processed = processedInputTokens(input);
-	if (
-		processed > 0 &&
-		input.ttftSeconds !== undefined &&
-		input.ttftSeconds > 0
-	) {
-		parts.push(`Input/TTFT: ~${rate(processed, input.ttftSeconds)} tok/s`);
-	}
-
+/**
+ * Rate shown once a message settles: exact when the provider reported usage,
+ * the chars/4 estimate when it streamed without usage, and nothing at all when
+ * there was no client-timed decode window (e.g. a provider that buffers output
+ * and emits no deltas).
+ */
+export function finalRateText(input: SettledMeasurement): string | undefined {
 	const { outputTokens, decodeSeconds, streamedChars } = input;
 	if (
 		outputTokens !== undefined &&
@@ -218,19 +207,12 @@ export function finalStatusText(input: FinalStatusInput): string {
 	) {
 		// The first token defines the start boundary, so it is not part of the
 		// decoded span; counting it would inflate short responses the most.
-		parts.push(`Decode: ${rate(outputTokens - 1, decodeSeconds)} tok/s · ${outputTokens} tok`);
-	} else if (outputTokens !== undefined) {
-		parts.push(`Decode: ${outputTokens} tok · rate unavailable`);
-	} else if (streamedChars > 0 && decodeSeconds !== undefined && decodeSeconds > 0) {
-		const estimatedTokens = streamedChars / CHARS_PER_TOKEN;
-		parts.push(
-			`Decode: ~${rate(estimatedTokens, decodeSeconds)} tok/s · ~${Math.round(estimatedTokens)} tok`,
-		);
-	} else {
-		parts.push("Decode: no output tokens");
+		return rateStatusText((outputTokens - 1) / decodeSeconds, false);
 	}
-
-	return parts.join(" · ");
+	if (streamedChars > 0 && decodeSeconds !== undefined && decodeSeconds > 0) {
+		return rateStatusText(streamedChars / CHARS_PER_TOKEN / decodeSeconds, true);
+	}
+	return undefined;
 }
 
 /** Snapshot of the last settled measurement, rendered by `/throughput`. */
@@ -372,19 +354,18 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 		startedLabel = {};
 	}
 
-	function waitingText(): string {
-		return "TTFT: waiting · Decode: waiting for first token…";
-	}
 
 	pi.on("session_start", async (_event, ctx) => {
 		clearMeasurement();
 		lastRun = undefined;
-		render(ctx, enabled() ? "TTFT: waiting · Decode: waiting" : undefined);
+		// Clear any line left by an earlier session; while hidden, write nothing.
+		if (enabled()) render(ctx, undefined);
 	});
 
 	pi.on("model_select", async (_event, ctx) => {
+		// A different model has different throughput; drop the stale rate.
 		clearMeasurement();
-		render(ctx, enabled() ? "TTFT: waiting · Decode: waiting" : undefined);
+		if (enabled()) render(ctx, undefined);
 	});
 
 	// Fires immediately before Pi sends a provider payload. This handler
@@ -402,7 +383,8 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 		resetMeasurement();
 		startedLabel = modelLabel(ctx);
 		requestStartedAt ??= Date.now();
-		render(ctx, waitingText());
+		// Deliberately no placeholder line: the footer keeps showing the previous
+		// rate until a fresh one is measurable.
 	});
 
 	pi.on("message_update", async (event, ctx) => {
@@ -419,19 +401,14 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 		lastOutputAt = now;
 		streamedChars += chars;
 
-		// Throttle footer writes: chunks can arrive far faster than the TUI
-		// needs to repaint, and the first sample (lastDisplayAt === 0) always
-		// renders.
+		// No rate is meaningful before a real decode window exists, and chunks
+		// arrive far faster than the TUI needs to repaint; both guards keep the
+		// footer to one honest write per window.
+		const decodeSeconds = seconds(now - firstOutputAt);
+		if (decodeSeconds < MIN_LIVE_RATE_SECONDS) return;
 		if (now - lastDisplayAt < UPDATE_INTERVAL_MS) return;
 		lastDisplayAt = now;
-		render(
-			ctx,
-			liveStatusText(
-				ttftSeconds ?? 0,
-				streamedChars / CHARS_PER_TOKEN,
-				seconds(now - firstOutputAt),
-			),
-		);
+		render(ctx, rateStatusText(streamedChars / CHARS_PER_TOKEN / decodeSeconds, true));
 	});
 
 	pi.on("message_end", async (event, ctx) => {
@@ -463,17 +440,16 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 			return;
 		}
 
-		render(
-			ctx,
-			finalStatusText({
-				ttftSeconds: observedTtft,
-				uncachedInputTokens,
-				cacheWriteTokens,
-				outputTokens,
-				decodeSeconds,
-				streamedChars,
-			}),
-		);
+		const rateText = finalRateText({
+			uncachedInputTokens,
+			cacheWriteTokens,
+			outputTokens,
+			decodeSeconds,
+			streamedChars,
+		});
+		// A provider that streamed no deltas (or reported no usage) has no rate to
+		// show; the previous line stands rather than flickering away.
+		if (rateText !== undefined) render(ctx, rateText);
 		lastRun = {
 			...startedLabel,
 			ttftSeconds: observedTtft,
@@ -490,7 +466,7 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		clearMeasurement();
-		render(ctx, undefined);
+		if (enabled()) render(ctx, undefined);
 	});
 
 	async function handleToggle(
