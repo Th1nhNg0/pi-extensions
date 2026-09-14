@@ -498,7 +498,14 @@ test("deepseekCfg.render shows the local peak window plus the account balance", 
 		{ windows: {}, balance: { currency: "USD", total: 12.34 } },
 		mockTheme,
 	);
-	assert.match(rendered, /(Peak|Off-Peak) \d{2}:\d{2}( [+-]1)?–\d{2}:\d{2}( [+-]1)? ~/);
+	assert.match(rendered, /^(Peak|Off-Peak) ~/);
+
+	// Both peak and off-peak show only the countdown (no time window).
+	const peakTag = deepSeekPeakTag(mockTheme, Date.parse("2026-09-06T02:00:00.000Z"));
+	assert.equal(peakTag, "Peak ~2h");
+
+	const offPeakTag = deepSeekPeakTag(mockTheme, Date.parse("2026-09-06T05:00:00.000Z"));
+	assert.equal(offPeakTag, "Off-Peak ~1h");
 	assert.match(rendered, /\$12\.34$/);
 	// The peak tag is theme-colored: warning while peak, dim while off-peak.
 	const now = Date.now();
@@ -516,8 +523,15 @@ test("formatUsageDetails reports the DeepSeek balance and both peak windows", ()
 	);
 	assert.match(text, /Subscription usage — deepseek/);
 	assert.match(text, /• balance: \$3\.50/);
-	assert.match(text, /• deepseek pool: Peak hours \(.+\) ~2h left/);
+	assert.match(text, /• deepseek pool: Peak hours ~2h left/);
 	assert.match(text, /• peak windows: .*01:00–04:00 UTC, 06:00–10:00 UTC/);
+
+	const offPeakText = formatUsageDetails(
+		{ windows: {}, balance: { currency: "USD", total: 3.5 } },
+		"deepseek",
+		{ now: Date.parse("2026-09-06T05:00:00.000Z") },
+	);
+	assert.match(offPeakText, /• deepseek pool: Off-peak ~1h until peak/);
 });
 
 test("earliestReset falls back to standard interval if expired reset was already fetched", () => {

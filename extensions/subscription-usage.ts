@@ -7,9 +7,9 @@
  *
  *   ↑1k ↓2k $0.123 12.5%/200k (auto)      kimi-k2 • high
  *   R: ░░░░░░ 4% ~4h · W: ██████ 97% ~8h · M: █████░░░ 62% ~20d
- *   Peak 14:00–18:00 ~2h · R: ░░░░░░ 4% ~4h        ← DeepSeek peak hours
+ *   Peak ~2h · R: ░░░░░░ 4% ~4h                  ← DeepSeek peak hours
  *   5h: ░░░░░░ 1% ~4h · W: ░░░░░░ 0% ~6d
- *   Off-Peak 02:00–06:00 ~5h · $12.34            ← DeepSeek API balance
+ *   Off-Peak ~5h · $12.34                        ← DeepSeek API balance
  *
  * `/usage` shows the detailed readout for all providers;
  * `/usage toggle [bars|percent|off]` cycles bars → bare percentages →
@@ -556,10 +556,9 @@ export function formatUsageDetails(
 	}
 	if (usesDeepSeekPeakPricing(providerId, options.modelId)) {
 		const peak = getDeepSeekPeakInfo(now);
-		const range = formatLocalTimeRange(peak.windowStartMs, peak.windowEndMs, now);
 		const tag = peak.isPeak
-			? `Peak hours (${range}) ${resetLabel(peak.nextFlipMs, now)} left`
-			: `Off-peak ${resetLabel(peak.nextFlipMs, now)} until peak (${range})`;
+			? `Peak hours ${resetLabel(peak.nextFlipMs, now)} left`
+			: `Off-peak ${resetLabel(peak.nextFlipMs, now)} until peak`;
 		lines.push(`\u2022 deepseek pool: ${tag}`);
 		lines.push(`\u2022 peak windows: ${formatDeepSeekPeakWindows(now)}`);
 	}
@@ -683,10 +682,9 @@ export function deepSeekPeakTag(
 	now = Date.now(),
 ): string {
 	const peak = getDeepSeekPeakInfo(now);
-	const range = formatLocalTimeRange(peak.windowStartMs, peak.windowEndMs, now);
 	return peak.isPeak
-		? theme.fg("warning", `Peak ${range} ${resetLabel(peak.nextFlipMs, now)}`)
-		: theme.fg("dim", `Off-Peak ${range} ${resetLabel(peak.nextFlipMs, now)}`);
+		? theme.fg("warning", `Peak ${resetLabel(peak.nextFlipMs, now)}`)
+		: theme.fg("dim", `Off-Peak ${resetLabel(peak.nextFlipMs, now)}`);
 }
 
 /** Earliest reset deadline across all tracked windows (ms epoch), if any. */

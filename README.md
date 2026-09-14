@@ -28,8 +28,8 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 | **Antigravity Pro (Gemini)** | `5h: ░░░░░░ 0% ~4h · W: █████▌░ 79% ~4d` |
 | **Antigravity Pro (Claude/GPT)** | `5h: ░░░░░░ 0% ~4h · W: ████░░░ 61% ~6d` |
 | **OpenAI Codex** | `5h: ░░░░░░ 1% ~4h · W: ███░░░ 51% ~3d · 3 resets left` |
-| **OpenCode Go** | `Peak 13:00–17:00 ~2h · R: ░░░░░░ 2% ~3h · W: ██░░░░ 44% ~3d · M: ██████ 98% ~14d` |
-| **DeepSeek API** | `Off-Peak 08:00–11:00 ~5h · $12.34` |
+| **OpenCode Go** | `Peak ~2h · R: ░░░░░░ 2% ~3h · W: ██░░░░ 44% ~3d · M: ██████ 98% ~14d` |
+| **DeepSeek API** | `Off-Peak ~5h · $12.34` |
 | **Any (percent style)** | `R 2% ~3h · W 44% ~3d · M 98% ~14d` |
 #### Legend
 
