@@ -20,6 +20,9 @@ import {
 	getDeepSeekPeakInfo,
 	DEEPSEEK_PEAK_WINDOWS,
 	deepseekCfg,
+	resolveRefreshTargets,
+	formatRefreshNotice,
+	usageProviderCfgs,
 	deepSeekPeakTag,
 	formatBalance,
 	formatDeepSeekPeakWindows,
@@ -542,4 +545,83 @@ test("earliestReset falls back to standard interval if expired reset was already
 	};
 	const earliest = earliestReset(data, "gpt-5", "openai-codex", now);
 	assert.equal(earliest, now - 10_000);
+});
+
+test("resolveRefreshTargets defaults to every provider and honours narrowing", () => {
+	const all = usageProviderCfgs.map((c) => c.id);
+	assert.deepEqual(resolveRefreshTargets("", usageProviderCfgs)?.map((c) => c.id), all);
+	assert.deepEqual(resolveRefreshTargets("  ALL  ", usageProviderCfgs)?.map((c) => c.id), all);
+	assert.deepEqual(
+		resolveRefreshTargets("active", usageProviderCfgs, "openai-codex")?.map((c) => c.id),
+		["openai-codex"],
+	);
+	assert.deepEqual(
+		resolveRefreshTargets("OpenCode-Go", usageProviderCfgs)?.map((c) => c.id),
+		["opencode-go"],
+	);
+	// Unambiguous aliases resolve to exactly one provider.
+	assert.deepEqual(resolveRefreshTargets("codex", usageProviderCfgs)?.map((c) => c.id), [
+		"openai-codex",
+	]);
+	assert.deepEqual(resolveRefreshTargets("zen", usageProviderCfgs)?.map((c) => c.id), [
+		"opencode-go",
+	]);
+	assert.deepEqual(resolveRefreshTargets("google", usageProviderCfgs)?.map((c) => c.id), [
+		"antigravity",
+	]);
+});
+
+test("resolveRefreshTargets returns undefined for unresolvable targets", () => {
+	assert.equal(resolveRefreshTargets("bogus", usageProviderCfgs), undefined);
+	assert.equal(resolveRefreshTargets("active", usageProviderCfgs), undefined);
+	assert.equal(resolveRefreshTargets("active", usageProviderCfgs, "ollama"), undefined);
+});
+
+test("resolveRefreshTargets never yields duplicates", () => {
+	const ids = resolveRefreshTargets("all", usageProviderCfgs)!.map((c) => c.id);
+	assert.equal(new Set(ids).size, ids.length);
+});
+
+test("formatRefreshNotice summarises single and fan-out outcomes", () => {
+	assert.equal(formatRefreshNotice([]), "No usage providers to refresh");
+	assert.equal(
+		formatRefreshNotice([{ id: "openai-codex", outcome: "fetched" }]),
+		"Usage refreshed for openai-codex",
+	);
+	assert.equal(
+		formatRefreshNotice([{ id: "deepseek", outcome: "cached" }]),
+		"Usage refresh finished from cache for deepseek",
+	);
+	assert.match(
+		formatRefreshNotice([{ id: "deepseek", outcome: "skipped" }]),
+		/skipped for deepseek \(no credentials\)/,
+	);
+	assert.match(
+		formatRefreshNotice([{ id: "deepseek", outcome: "failed" }]),
+		/failed for deepseek/,
+	);
+	assert.equal(
+		formatRefreshNotice([
+			{ id: "a", outcome: "fetched" },
+			{ id: "b", outcome: "fetched" },
+		]),
+		"Usage refreshed for all 2 providers (a, b)",
+	);
+	const mixed = formatRefreshNotice([
+		{ id: "a", outcome: "fetched" },
+		{ id: "b", outcome: "cached" },
+		{ id: "c", outcome: "skipped" },
+		{ id: "d", outcome: "failed" },
+	]);
+	assert.match(mixed, /Usage refreshed for a/);
+	assert.match(mixed, /from cache: b/);
+	assert.match(mixed, /no credentials: c/);
+	assert.match(mixed, /failed: d/);
+	assert.equal(
+		formatRefreshNotice([
+			{ id: "a", outcome: "cached" },
+			{ id: "b", outcome: "skipped" },
+		]),
+		"No usage data refreshed · from cache: a · no credentials: b",
+	);
 });

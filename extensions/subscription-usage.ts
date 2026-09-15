@@ -16,6 +16,9 @@
  * hidden (or jumps straight to the given mode); the choice persists in
  * ~/.pi/agent/subscription-usage-prefs.json.
  *
+ * `/usage refresh [all|<provider>|active]` force-refetches every usage
+ * provider (the default) or just one, bypassing the cooldown guards.
+ *
  * Each window also shows a compact countdown (~) until it resets. OpenCode
  * reports `resetsAt` (ISO) per window; Codex reports `reset_at` (epoch s);
  * Antigravity reports `resetTime` (ISO) per bucket. DeepSeek bills on two UTC
@@ -54,6 +57,18 @@ interface OAuthCredential {
 }
 
 type StoredCredential = ApiKeyCredential | OAuthCredential;
+
+/**
+ * Thrown when no usable credential (API key or OAuth token) exists for the
+ * account. Kept distinct from real fetch failures so `/usage refresh` can
+ * report a provider as unavailable instead of failed/retried.
+ */
+export class MissingCredentialError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "MissingCredentialError";
+	}
+}
 
 const AUTH_PATH = path.join(os.homedir(), ".pi", "agent", "auth.json");
 
@@ -329,6 +344,17 @@ interface ProviderCfg {
 	) => string;
 }
 
+/**
+ * Result of one provider refresh: fresh data, reused cache, no credential
+ * for the account (nothing was requested), or a real fetch failure.
+ */
+export type RefreshOutcome = "fetched" | "cached" | "skipped" | "failed";
+
+export interface RefreshResult {
+	id: string;
+	outcome: RefreshOutcome;
+}
+
 interface StatusCtx {
 	model?: { provider?: string; id?: string };
 	ui: {
@@ -346,7 +372,7 @@ interface ProviderState {
 	failStreak: number; // consecutive failures → exponential backoff
 	timer: ReturnType<typeof setTimeout> | undefined;
 	timerDeadline?: number;
-	inFlight: Promise<"fetched" | "cached"> | undefined;
+	inFlight: Promise<RefreshOutcome> | undefined;
 	requestId: number;
 	abortController?: AbortController;
 }
@@ -724,7 +750,8 @@ export const opencodeCfg: ProviderCfg = {
 		const key =
 			(rawEnv && rawEnv.length > 0 ? rawEnv : undefined) ??
 			(cred && cred.type === "api_key" ? cred.key : undefined);
-		if (!key) throw new Error("no API key (OPENCODE_API_KEY or auth.json)");
+		if (!key)
+			throw new MissingCredentialError("no API key (OPENCODE_API_KEY or auth.json)");
 
 		const res = await fetch("https://opencode.ai/zen/go/v1/usage", {
 			headers: { Authorization: `Bearer ${key}` },
@@ -797,7 +824,8 @@ export const deepseekCfg: ProviderCfg = {
 		const key =
 			(rawEnv && rawEnv.length > 0 ? rawEnv : undefined) ??
 			(cred && cred.type === "api_key" ? cred.key : undefined);
-		if (!key) throw new Error("no API key (DEEPSEEK_API_KEY or auth.json)");
+		if (!key)
+			throw new MissingCredentialError("no API key (DEEPSEEK_API_KEY or auth.json)");
 
 		const res = await fetch("https://api.deepseek.com/user/balance", {
 			headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
@@ -926,7 +954,7 @@ export const codexCfg: ProviderCfg = {
 		const access =
 			(fromEnv && fromEnv.length > 0 ? fromEnv : undefined) ??
 			(cred && cred.type === "oauth" ? cred.access : undefined);
-		if (!access) throw new Error("no OAuth token for openai-codex");
+		if (!access) throw new MissingCredentialError("no OAuth token for openai-codex");
 
 		const res = await fetch("https://chatgpt.com/backend-api/codex/usage", {
 			headers: {
@@ -1071,7 +1099,7 @@ export const antigravityCfg: ProviderCfg = {
 		}
 
 		if (!access && !refreshToken)
-			throw new Error("no OAuth token or API key for antigravity");
+			throw new MissingCredentialError("no OAuth token or API key for antigravity");
 
 		if (
 			refreshToken &&
@@ -1083,7 +1111,7 @@ export const antigravityCfg: ProviderCfg = {
 				if (!access) throw e;
 			}
 		}
-		if (!access) throw new Error("antigravity access token is unavailable");
+		if (!access) throw new MissingCredentialError("antigravity access token is unavailable");
 
 		const endpoints = antigravityEndpointCandidates();
 		const headers: Record<string, string> = {
@@ -1268,10 +1296,96 @@ export const antigravityCfg: ProviderCfg = {
 	},
 };
 
+/**
+ * Every usage provider this extension can query, in display order. `/usage
+ * refresh` fans out over this list unless a narrower target is given.
+ */
+export const usageProviderCfgs: readonly ProviderCfg[] = [
+	opencodeCfg,
+	codexCfg,
+	antigravityCfg,
+	deepseekCfg,
+];
+
+/** Unambiguous short names accepted as `/usage refresh <target>` aliases. */
+const PROVIDER_ALIASES: Readonly<Record<string, string>> = {
+	opencode: "opencode-go",
+	"opencode-zen": "opencode-go",
+	zen: "opencode-go",
+	codex: "openai-codex",
+	openai: "openai-codex",
+	antigravity: "antigravity",
+	google: "antigravity",
+	deepseek: "deepseek",
+};
+
+/**
+ * Resolve a `/usage refresh` target. Empty/`all` means every provider (the
+ * default), `active` means the provider behind the current model, and anything
+ * else must match a provider id or one of its aliases. Returns `undefined` for
+ * an unknown target so the caller can warn without issuing a request.
+ */
+export function resolveRefreshTargets(
+	arg: string,
+	cfgs: readonly ProviderCfg[],
+	activeProviderId?: string,
+): ProviderCfg[] | undefined {
+	const target = arg.trim().toLowerCase();
+	if (!target || target === "all") return [...cfgs];
+	if (target === "active") {
+		const active = activeProviderId
+			? cfgs.find((c) => c.id.toLowerCase() === activeProviderId.toLowerCase())
+			: undefined;
+		return active ? [active] : undefined;
+	}
+	const exact = cfgs.find((c) => c.id.toLowerCase() === target);
+	if (exact) return [exact];
+	const aliased = PROVIDER_ALIASES[target];
+	if (!aliased) return undefined;
+	const match = cfgs.find((c) => c.id === aliased);
+	return match ? [match] : undefined;
+}
+
+/** Human-readable summary of a `/usage refresh` fan-out. */
+export function formatRefreshNotice(results: readonly RefreshResult[]): string {
+	if (results.length === 0) return "No usage providers to refresh";
+	if (results.length === 1) {
+		const { id, outcome } = results[0];
+		switch (outcome) {
+			case "fetched":
+				return `Usage refreshed for ${id}`;
+			case "cached":
+				return `Usage refresh finished from cache for ${id}`;
+			case "skipped":
+				return `Usage refresh skipped for ${id} (no credentials)`;
+			default:
+				return `Usage refresh failed for ${id}`;
+		}
+	}
+	const idsWith = (outcome: RefreshOutcome) =>
+		results.filter((r) => r.outcome === outcome).map((r) => r.id);
+	const fetched = idsWith("fetched");
+	const cached = idsWith("cached");
+	const skipped = idsWith("skipped");
+	const failed = idsWith("failed");
+	const parts: string[] = [];
+	if (fetched.length === results.length) {
+		parts.push(`Usage refreshed for all ${results.length} providers (${fetched.join(", ")})`);
+	} else if (fetched.length > 0) {
+		parts.push(`Usage refreshed for ${fetched.join(", ")}`);
+	} else {
+		parts.push("No usage data refreshed");
+	}
+	if (cached.length > 0) parts.push(`from cache: ${cached.join(", ")}`);
+	if (skipped.length > 0) parts.push(`no credentials: ${skipped.join(", ")}`);
+	if (failed.length > 0) parts.push(`failed: ${failed.join(", ")}`);
+	return parts.join(" · ");
+}
+
 export default function (pi: ExtensionAPI) {
 	const cache = new Map<string, ProviderState>();
 	let currentCtx: StatusCtx | undefined;
-	const cfgs = [opencodeCfg, codexCfg, antigravityCfg, deepseekCfg];
+	const cfgs = usageProviderCfgs;
 	let mode: UsageMode = loadPrefs().mode;
 
 	function renderUi(
@@ -1280,6 +1394,12 @@ export default function (pi: ExtensionAPI) {
 		text: string | undefined,
 	): void {
 		if (!ui) return;
+		// The footer status line belongs to the active provider only: a fan-out
+		// refresh must not leave widgets behind for providers we are not using.
+		if (text !== undefined) {
+			const activeProvider = currentCtx ? safeModel(currentCtx)?.provider : undefined;
+			if (activeProvider !== providerId) return;
+		}
 		try {
 			// Footer status line, directly below the model/thinking indicator.
 			ui.setStatus(providerId, text);
@@ -1464,7 +1584,7 @@ export default function (pi: ExtensionAPI) {
 		force: boolean,
 		hard = false,
 		scheduled = false,
-	): Promise<"fetched" | "cached"> {
+	): Promise<RefreshOutcome> {
 		const state = cache.get(cfg.id) ?? freshState();
 		cache.set(cfg.id, state);
 		if (state.inFlight && !hard) return state.inFlight;
@@ -1477,7 +1597,7 @@ export default function (pi: ExtensionAPI) {
 		const ac = new AbortController();
 		state.abortController = ac;
 
-		const request = (async (): Promise<"fetched" | "cached"> => {
+		const request = (async (): Promise<RefreshOutcome> => {
 			const now = Date.now();
 			const model = safeModel(ctx);
 
@@ -1540,6 +1660,15 @@ export default function (pi: ExtensionAPI) {
 			} catch (err) {
 				const ui = safeUi(ctx);
 				if (!ui || !isCurrentRequest()) return "cached";
+				if (err instanceof MissingCredentialError) {
+					// No credential for this account: nothing was sent to the API, so
+					// this is availability, not failure — no backoff, no error log.
+					state.lastText = state.lastData
+						? renderText(cfg, state.lastData, ui, model?.id)
+						: ui.theme.fg("warning", `${cfg.id}: no key`);
+					renderUi(ui, cfg.id, state.lastText);
+					return "skipped";
+				}
 				state.failStreak += 1;
 				console.error(
 					`[${cfg.id}-usage] fetch failed (${state.failStreak}×): ` +
@@ -1553,7 +1682,7 @@ export default function (pi: ExtensionAPI) {
 					state.lastText = ui.theme.fg("error", `${cfg.id}: err`);
 					renderUi(ui, cfg.id, state.lastText);
 				}
-				return "cached";
+				return "failed";
 			}
 		})();
 		state.inFlight = request;
@@ -1686,12 +1815,13 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * `/usage refresh` — force a live refetch for the active provider right
-	 * now, bypassing the cooldown and burst guards. Useful when the source
-	 * API lags (e.g. Antigravity quota summary right after a reset) and you
-	 * want to rule out client-side staleness in one keystroke.
+	 * `/usage refresh [all|<provider>|active]` — force a live refetch for every
+	 * usage provider (the default), or just the named/active one, bypassing the
+	 * cooldown and burst guards. Useful when the source API lags (e.g.
+	 * Antigravity quota summary right after a reset) and you want to rule out
+	 * client-side staleness in one keystroke.
 	 */
-	async function handleUsageRefresh(_args: string, ctx: UsageCmdCtx): Promise<void> {
+	async function handleUsageRefresh(args: string, ctx: UsageCmdCtx): Promise<void> {
 		if (mode === "off") {
 			ctx.ui.notify(
 				"Subscription usage is hidden; use /usage toggle to enable refreshes",
@@ -1699,39 +1829,53 @@ export default function (pi: ExtensionAPI) {
 			);
 			return;
 		}
-		const model = safeModel(ctx);
-		const cfg = cfgs.find((c) => c.id === model?.provider);
-		if (!cfg) {
-			ctx.ui.notify(`No usage provider for "${model?.provider ?? "unknown"}"`, "warning");
+		const targets = resolveRefreshTargets(args, cfgs, safeModel(ctx)?.provider);
+		if (!targets) {
+			ctx.ui.notify(
+				`Unknown usage provider "${args.trim()}". Known: ${cfgs.map((c) => c.id).join(", ")}` +
+				` (or "all"/"active")`,
+				"warning",
+			);
 			return;
 		}
-		const outcome = await refresh(cfg, ctx, true, true);
-		const s = cache.get(cfg.id);
-		const current = safeModel(ctx);
-		if (s && safeUi(ctx))
-			arm(cfg, ctx, nextDelay(s, Date.now(), current?.id, cfg.id));
-		ctx.ui.notify(
-			outcome === "fetched"
-				? `Usage refreshed for ${cfg.id}`
-				: `Usage refresh finished from cache for ${cfg.id}`,
-			"info",
+		// Settle every target so one slow or failing provider cannot hide the
+		// outcome of the others. `refresh()` reports rather than throws.
+		const settled = await Promise.allSettled(
+			targets.map(async (cfg): Promise<RefreshResult> => ({
+				id: cfg.id,
+				outcome: await refresh(cfg, ctx, true, true),
+			})),
 		);
+		const results: RefreshResult[] = settled.map((entry, index) =>
+			entry.status === "fulfilled"
+				? entry.value
+				: { id: targets[index].id, outcome: "failed" as const },
+		);
+		// Only the provider active *now* owns the footer and the wake timer: a
+		// fan-out must not leave stale widgets or polling loops behind.
+		const current = safeModel(ctx);
+		const activeCfg = cfgs.find((c) => c.id === current?.provider);
+		const state = activeCfg ? cache.get(activeCfg.id) : undefined;
+		if (activeCfg && state && safeUi(ctx))
+			arm(activeCfg, ctx, nextDelay(state, Date.now(), current?.id, activeCfg.id));
+		ctx.ui.notify(formatRefreshNotice(results), "info");
 	}
 
 	/**
 	 * Single `/usage` command: bare `/usage` shows the detailed readout;
 	 * `/usage toggle [bars|percent|off]` cycles the footer style;
-	 * `/usage refresh` force-refetches the active provider now.
+	 * `/usage refresh [all|<provider>|active]` force-refetches every usage
+	 * provider (default) or the named/active one.
 	 */
 	pi.registerCommand("usage", {
-		description: "Show subscription usage (/usage | toggle | refresh)",
+		description: "Show subscription usage (/usage | toggle | refresh [all|<provider>|active])",
 		getArgumentCompletions: (prefix) => {
 			const trimmed = prefix.trimStart();
 			const spaceIndex = trimmed.indexOf(" ");
 			if (spaceIndex === -1) {
 				const subcommands = [
 					{ value: "toggle", label: "toggle", description: "Cycle footer style: bars → percent → off" },
-					{ value: "refresh", label: "refresh", description: "Force-refresh the active provider now" },
+					{ value: "refresh", label: "refresh", description: "Force-refresh every provider now (optionally name one)" },
 					{ value: "help", label: "help", description: "Show usage help" },
 				];
 				const filtered = subcommands.filter((sub) =>
@@ -1748,6 +1892,27 @@ export default function (pi: ExtensionAPI) {
 					description: `Set footer style to ${m}`,
 				}));
 				const filtered = modes.filter((item) => item.value.startsWith(`toggle ${rest}`));
+				return filtered.length > 0 ? filtered : null;
+			}
+			if (sub === "refresh") {
+				const targets = [
+					{
+						value: "refresh all",
+						label: "refresh all",
+						description: "Force-refresh every usage provider",
+					},
+					{
+						value: "refresh active",
+						label: "refresh active",
+						description: "Force-refresh the active provider only",
+					},
+					...cfgs.map((c) => ({
+						value: `refresh ${c.id}`,
+						label: `refresh ${c.id}`,
+						description: `Force-refresh ${c.id} only`,
+					})),
+				];
+				const filtered = targets.filter((item) => item.value.startsWith(`refresh ${rest}`));
 				return filtered.length > 0 ? filtered : null;
 			}
 			return null;
@@ -1772,7 +1937,7 @@ export default function (pi: ExtensionAPI) {
 							"Subscription usage commands:",
 							"• /usage — detailed usage for all providers",
 							"• /usage toggle [bars|percent|off] — cycle or set footer style",
-							"• /usage refresh — force-refresh the active provider now",
+							"• /usage refresh [all|<provider>|active] — force-refresh every provider (default: all)",
 						].join("\n"),
 						"info",
 					);

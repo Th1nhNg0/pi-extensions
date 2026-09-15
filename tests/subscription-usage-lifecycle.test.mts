@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test, { type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import subscriptionUsage, { codexCfg } from "../extensions/subscription-usage.ts";
+import subscriptionUsage, {
+	antigravityCfg,
+	codexCfg,
+	deepseekCfg,
+	MissingCredentialError,
+	opencodeCfg,
+	usageProviderCfgs,
+} from "../extensions/subscription-usage.ts";
 
 async function flush() {
 	// Drain the scheduler's async cache/read/write continuations without real timers.
@@ -25,7 +32,15 @@ function harness(t: TestContext, mode = "bars") {
 		return {};
 	});
 	const unwatch = t.mock.method(fs, "unwatchFile", () => {});
+	// Every provider is mocked: `/usage refresh` fans out by default, so an
+	// unmocked provider would attempt a real network request.
 	const fetch = t.mock.method(codexCfg, "fetchUsage", async () => ({ windows: { "5h": 12 } }));
+	const providerFetches = {
+		"opencode-go": t.mock.method(opencodeCfg, "fetchUsage", async () => ({ windows: { rolling: 5 } })),
+		"openai-codex": fetch,
+		antigravity: t.mock.method(antigravityCfg, "fetchUsage", async () => ({ windows: { "gemini-5h": 8 } })),
+		deepseek: t.mock.method(deepseekCfg, "fetchUsage", async () => ({ windows: { "deepseek-5h": 3 } })),
+	};
 	const events = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
 	const commands = new Map<string, { handler(args: string, ctx: ExtensionCommandContext): Promise<void> }>();
 	const statuses = new Map<string, string | undefined>();
@@ -46,7 +61,7 @@ function harness(t: TestContext, mode = "bars") {
 		await flush();
 	}
 	t.after(async () => { await event("session_shutdown"); });
-	return { watch, unwatch, fetch, statuses, ctx, event, commands,
+	return { watch, unwatch, fetch, providerFetches, statuses, ctx, event, commands,
 		get watchListener() { return watchListener; },
 	};
 }
@@ -173,7 +188,7 @@ test("/usage toggle cycles footer style", async (t) => {
 	assert.match(notices.at(-1)!, /Subscription usage style: bars/);
 });
 
-test("/usage refresh force-fetches the active provider", async (t) => {
+test("/usage refresh force-fetches every provider by default", async (t) => {
 	const h = harness(t);
 	await h.event("session_start");
 	assert.equal(h.fetch.mock.callCount(), 1);
@@ -181,8 +196,97 @@ test("/usage refresh force-fetches the active provider", async (t) => {
 	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
 	await h.commands.get("usage")!.handler("refresh", h.ctx);
 	await flush();
+	// Session start fetched the active provider only; the default refresh
+	// fans out to every configured provider.
 	assert.equal(h.fetch.mock.callCount(), 2);
-	assert.match(notices.at(-1)!, /Usage refreshed for openai-codex/);
+	for (const [id, mocked] of Object.entries(h.providerFetches)) {
+		if (id === "openai-codex") continue;
+		assert.equal(mocked.mock.callCount(), 1, id);
+	}
+	assert.match(notices.at(-1)!, /Usage refreshed for all 4 providers/);
+});
+
+test("/usage refresh <provider> refreshes only that provider", async (t) => {
+	const h = harness(t);
+	await h.event("session_start");
+	const notices: string[] = [];
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	await h.commands.get("usage")!.handler("refresh deepseek", h.ctx);
+	await flush();
+	assert.equal(h.providerFetches.deepseek.mock.callCount(), 1);
+	assert.equal(h.providerFetches["opencode-go"].mock.callCount(), 0);
+	assert.equal(h.fetch.mock.callCount(), 1); // session start only
+	assert.equal(notices.at(-1), "Usage refreshed for deepseek");
+});
+
+test("/usage refresh active and provider aliases target one provider", async (t) => {
+	const h = harness(t);
+	await h.event("session_start");
+	const notices: string[] = [];
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	await h.commands.get("usage")!.handler("refresh active", h.ctx);
+	await flush();
+	assert.equal(notices.at(-1), "Usage refreshed for openai-codex");
+	// `codex` is an unambiguous alias for the openai-codex provider.
+	await h.commands.get("usage")!.handler("refresh codex", h.ctx);
+	await flush();
+	assert.equal(notices.at(-1), "Usage refreshed for openai-codex");
+	assert.equal(h.providerFetches.deepseek.mock.callCount(), 0);
+	assert.equal(h.providerFetches["opencode-go"].mock.callCount(), 0);
+});
+
+test("/usage refresh with an unknown target warns without any request", async (t) => {
+	const h = harness(t);
+	await h.event("session_start");
+	const notices: { msg: string; level?: string }[] = [];
+	(h.ctx.ui as unknown as { notify: (msg: string, level?: string) => void }).notify = (msg, level) =>
+		notices.push({ msg, level });
+	const before = [h.fetch.mock.callCount(), h.providerFetches.deepseek.mock.callCount()];
+	await h.commands.get("usage")!.handler("refresh bogus", h.ctx);
+	await flush();
+	assert.equal(notices.at(-1)!.level, "warning");
+	assert.match(notices.at(-1)!.msg, /Unknown usage provider/);
+	assert.deepEqual([h.fetch.mock.callCount(), h.providerFetches.deepseek.mock.callCount()], before);
+});
+
+test("fan-out refresh writes a footer status for the active provider only", async (t) => {
+	const h = harness(t);
+	await h.event("session_start");
+	await h.commands.get("usage")!.handler("refresh", h.ctx);
+	await flush();
+	// Providers we are not using must not leak status widgets into the footer.
+	for (const cfg of usageProviderCfgs) {
+		if (cfg.id === "openai-codex") continue;
+		assert.equal(h.statuses.get(cfg.id), undefined, cfg.id);
+	}
+	assert.match(h.statuses.get("openai-codex")!, /12%/);
+});
+
+test("a provider without credentials is reported as skipped, not failed", async (t) => {
+	const h = harness(t);
+	await h.event("session_start");
+	h.providerFetches.deepseek.mock.mockImplementation(async () => {
+		throw new MissingCredentialError("no API key (DEEPSEEK_API_KEY or auth.json)");
+	});
+	const notices: string[] = [];
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	await h.commands.get("usage")!.handler("refresh", h.ctx);
+	await flush();
+	assert.match(notices.at(-1)!, /no credentials: deepseek/);
+	assert.doesNotMatch(notices.at(-1)!, /failed:/);
+});
+
+test("a provider whose fetch rejects is reported as failed", async (t) => {
+	const h = harness(t);
+	await h.event("session_start");
+	h.providerFetches.deepseek.mock.mockImplementation(async () => {
+		throw new Error("HTTP 503");
+	});
+	const notices: string[] = [];
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	await h.commands.get("usage")!.handler("refresh", h.ctx);
+	await flush();
+	assert.match(notices.at(-1)!, /failed: deepseek/);
 });
 
 test("/usage help and unknown subcommands notify", async (t) => {
