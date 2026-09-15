@@ -281,10 +281,11 @@ npm:pi-mcp-adapter
 npm:@juicesharp/rpiv-ask-user-question
 npm:@ff-labs/pi-fff
 npm:pi-antigravity
-git:github.com/Th1nhNg0/pi-extensions
 npm:pi-background-tasks
 npm:pi-hashline-edit-pro@latest
+git:github.com/Th1nhNg0/pi-extensions
 npm:pi-advisor-flow
+npm:pi-goal-x
 ```
 
 To inspect the currently installed packages:
