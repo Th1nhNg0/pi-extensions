@@ -273,7 +273,9 @@ Measured just now
 
 ## 🧰 My Pi Setup
 
-My current user-level Pi package setup:
+My current Pi package setup (`pi list`):
+
+**User packages**
 
 ```text
 npm:pi-web-access
@@ -286,6 +288,8 @@ npm:pi-hashline-edit-pro@latest
 git:github.com/Th1nhNg0/pi-extensions
 npm:pi-advisor-flow
 npm:@narumitw/pi-goal
+npm:@narumitw/pi-btw
+npm:@narumitw/pi-stamp
 ```
 
 To inspect the currently installed packages:
