@@ -2851,7 +2851,6 @@ export class DiscordPresenceManager {
 
 	private async publish(state: PresenceState): Promise<void> {
 		if (!this.started || this.disposed || !this.publisher) return;
-		if (!(await this.isCurrentPublisher(state.publisherGeneration))) return;
 		if (!(await this.ensureConnected())) return;
 		if (!this.started || this.disposed || !this.publisher) return;
 		const transport = this.transport;
@@ -2870,8 +2869,7 @@ export class DiscordPresenceManager {
 						this.disposed ||
 						!this.publisher ||
 						this.transport !== transport ||
-						!transport.isConnected() ||
-						!(await this.isCurrentPublisher(state.publisherGeneration))
+						!transport.isConnected()
 					) {
 						return false;
 					}
@@ -2895,32 +2893,57 @@ export class DiscordPresenceManager {
 					) {
 						return true;
 					}
-					try {
+					const sendActivity = async (): Promise<void> => {
 						await awaitWithTimeout(
 							transport.setActivity(activity),
 							RPC_WRITE_TIMEOUT_MS,
 						);
-						this.lastPublishedActivity = activity;
-						this.lastPublishTime = this.now();
-						this.consecutiveRateLimits = 0;
-						return true;
+					};
+
+					const deferRateLimit = (): void => {
+						this.consecutiveRateLimits += 1;
+						this.rateLimitBackoffUntil =
+							this.now() +
+							Math.min(
+								RETRY_CAP_MS,
+								RATE_LIMIT_BACKOFF_MS * 2 ** (this.consecutiveRateLimits - 1),
+							);
+						// Do not replace a newer update received while this RPC was pending.
+						this.pendingPresenceState ??= state;
+					};
+
+					try {
+						await sendActivity();
 					} catch (transportErr) {
 						if (isRateLimitError(transportErr)) {
-							this.consecutiveRateLimits += 1;
-							this.rateLimitBackoffUntil =
-								this.now() +
-								Math.min(
-									RETRY_CAP_MS,
-									RATE_LIMIT_BACKOFF_MS *
-										2 ** (this.consecutiveRateLimits - 1),
-								);
-							// Do not replace a newer update received while this RPC was pending.
-							this.pendingPresenceState ??= state;
+							deferRateLimit();
 							return true;
 						}
-						transportFailed = true;
-						throw transportErr;
+
+						// A connected transport can recover from a transient write error
+						// without paying a reconnect delay. Retry once; persistent failures
+						// still take the normal unavailable path below.
+						if (!transport.isConnected()) {
+							transportFailed = true;
+							throw transportErr;
+						}
+
+						try {
+							await sendActivity();
+						} catch (retryErr) {
+							if (isRateLimitError(retryErr)) {
+								deferRateLimit();
+								return true;
+							}
+							transportFailed = true;
+							throw retryErr;
+						}
 					}
+
+					this.lastPublishedActivity = activity;
+					this.lastPublishTime = this.now();
+					this.consecutiveRateLimits = 0;
+					return true;
 				},
 			);
 		} catch (error) {
@@ -2941,21 +2964,6 @@ export class DiscordPresenceManager {
 			this.retryAttempt = 0;
 			this.outageWarningShown = false;
 			this.clearRetryTimer();
-		}
-	}
-
-	private async isCurrentPublisher(
-		expectedGeneration = this.publisherGeneration,
-	): Promise<boolean> {
-		try {
-			const state = await this.stateStore.read();
-			return (
-				state.publisherId === this.sessionId &&
-				state.publisherGeneration === expectedGeneration
-			);
-		} catch {
-			this.warnRegistryFailure();
-			return false;
 		}
 	}
 
