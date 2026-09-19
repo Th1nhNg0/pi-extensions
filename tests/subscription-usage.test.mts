@@ -28,6 +28,7 @@ import {
 	formatDeepSeekPeakWindows,
 	formatLocalTimeRange,
 	usesDeepSeekPeakPricing,
+	isDeepSeekPeakDay,
 	antigravityCfg,
 	opencodeCfg,
 	type CodexUsageResponse,
@@ -415,49 +416,86 @@ test("formatUsageDetails lists resets left when present", () => {
 });
 
 test("getDeepSeekPeakInfo accurately classifies UTC peak and off-peak windows", () => {
-	// 00:30 UTC -> off-peak (30m until peak window 1 at 01:00)
-	const t0030 = Date.parse("2026-09-06T00:30:00.000Z");
+	// Monday 00:30 UTC -> off-peak (30m until peak window 1 at 01:00)
+	const t0030 = Date.parse("2026-09-07T00:30:00.000Z");
 	const info0030 = getDeepSeekPeakInfo(t0030);
 	assert.equal(info0030.isPeak, false);
-	assert.equal(info0030.nextFlipMs, Date.parse("2026-09-06T01:00:00.000Z"));
+	assert.equal(info0030.reason, undefined);
+	assert.equal(info0030.nextFlipMs, Date.parse("2026-09-07T01:00:00.000Z"));
 
 	// 01:00 UTC -> peak window 1 starts (3h left until 04:00)
-	const t0100 = Date.parse("2026-09-06T01:00:00.000Z");
+	const t0100 = Date.parse("2026-09-07T01:00:00.000Z");
 	const info0100 = getDeepSeekPeakInfo(t0100);
 	assert.equal(info0100.isPeak, true);
-	assert.equal(info0100.nextFlipMs, Date.parse("2026-09-06T04:00:00.000Z"));
+	assert.equal(info0100.nextFlipMs, Date.parse("2026-09-07T04:00:00.000Z"));
 
 	// 04:00 UTC -> off-peak (2h until peak window 2 at 06:00)
-	const t0400 = Date.parse("2026-09-06T04:00:00.000Z");
+	const t0400 = Date.parse("2026-09-07T04:00:00.000Z");
 	const info0400 = getDeepSeekPeakInfo(t0400);
 	assert.equal(info0400.isPeak, false);
-	assert.equal(info0400.nextFlipMs, Date.parse("2026-09-06T06:00:00.000Z"));
+	assert.equal(info0400.nextFlipMs, Date.parse("2026-09-07T06:00:00.000Z"));
 
 	// 06:00 UTC -> peak window 2 starts (4h left until 10:00)
-	const t0600 = Date.parse("2026-09-06T06:00:00.000Z");
+	const t0600 = Date.parse("2026-09-07T06:00:00.000Z");
 	const info0600 = getDeepSeekPeakInfo(t0600);
 	assert.equal(info0600.isPeak, true);
-	assert.equal(info0600.nextFlipMs, Date.parse("2026-09-06T10:00:00.000Z"));
+	assert.equal(info0600.nextFlipMs, Date.parse("2026-09-07T10:00:00.000Z"));
 
-	// 10:00 UTC -> off-peak until 01:00 UTC tomorrow (15h until peak)
-	const t1000 = Date.parse("2026-09-06T10:00:00.000Z");
+	// 10:00 UTC -> off-peak until Tuesday 01:00 UTC (15h until peak)
+	const t1000 = Date.parse("2026-09-07T10:00:00.000Z");
 	const info1000 = getDeepSeekPeakInfo(t1000);
 	assert.equal(info1000.isPeak, false);
-	assert.equal(info1000.nextFlipMs, Date.parse("2026-09-07T01:00:00.000Z"));
+	assert.equal(info1000.nextFlipMs, Date.parse("2026-09-08T01:00:00.000Z"));
+
+	// Friday 10:00 UTC runs the whole weekend through to Monday 01:00 UTC.
+	const friday = getDeepSeekPeakInfo(Date.parse("2026-09-11T10:00:00.000Z"));
+	assert.equal(friday.isPeak, false);
+	assert.equal(friday.reason, undefined);
+	assert.equal(friday.nextFlipMs, Date.parse("2026-09-14T01:00:00.000Z"));
+});
+
+test("DeepSeek peak billing skips the weekend in full", () => {
+	assert.equal(isDeepSeekPeakDay(Date.parse("2026-09-05T00:00:00.000Z")), false); // Sat
+	assert.equal(isDeepSeekPeakDay(Date.parse("2026-09-06T00:00:00.000Z")), false); // Sun
+	assert.equal(isDeepSeekPeakDay(Date.parse("2026-09-07T00:00:00.000Z")), true); // Mon
+
+	// A Saturday window hour stays off-peak and targets Monday's first window.
+	const sat = getDeepSeekPeakInfo(Date.parse("2026-09-05T02:00:00.000Z"));
+	assert.equal(sat.isPeak, false);
+	assert.equal(sat.reason, "weekend");
+	assert.equal(sat.windowStartMs, Date.parse("2026-09-07T01:00:00.000Z"));
+	assert.equal(sat.windowEndMs, Date.parse("2026-09-07T04:00:00.000Z"));
+
+	// Sunday keeps the weekend reason and still flips at Monday 01:00 UTC.
+	const sun = getDeepSeekPeakInfo(Date.parse("2026-09-06T07:00:00.000Z"));
+	assert.equal(sun.isPeak, false);
+	assert.equal(sun.reason, "weekend");
+	assert.equal(sun.nextFlipMs, Date.parse("2026-09-07T01:00:00.000Z"));
+
+	// Exact window boundaries on a weekend belong to the weekend, not to a peak day.
+	const sunStart = getDeepSeekPeakInfo(Date.parse("2026-09-06T01:00:00.000Z"));
+	assert.equal(sunStart.isPeak, false);
+	assert.equal(sunStart.reason, "weekend");
+	assert.equal(sunStart.nextFlipMs, Date.parse("2026-09-07T01:00:00.000Z"));
+
+	const sunEnd = getDeepSeekPeakInfo(Date.parse("2026-09-06T10:00:00.000Z"));
+	assert.equal(sunEnd.isPeak, false);
+	assert.equal(sunEnd.reason, "weekend");
+	assert.equal(sunEnd.nextFlipMs, Date.parse("2026-09-07T01:00:00.000Z"));
 });
 
 test("DeepSeek peak windows expose bounds and local ranges", () => {
 	// Windows stay anchored to the UTC clock regardless of local timezone.
 	assert.deepEqual(DEEPSEEK_PEAK_WINDOWS, [[60, 240], [360, 600]]);
 
-	const t0100 = Date.parse("2026-09-06T01:00:00.000Z");
+	const t0100 = Date.parse("2026-09-07T01:00:00.000Z");
 	const active = getDeepSeekPeakInfo(t0100);
 	assert.equal(active.windowStartMs, t0100);
-	assert.equal(active.windowEndMs, Date.parse("2026-09-06T04:00:00.000Z"));
+	assert.equal(active.windowEndMs, Date.parse("2026-09-07T04:00:00.000Z"));
 
-	const offPeak = getDeepSeekPeakInfo(Date.parse("2026-09-06T10:00:00.000Z"));
-	assert.equal(offPeak.windowStartMs, Date.parse("2026-09-07T01:00:00.000Z"));
-	assert.equal(offPeak.windowEndMs, Date.parse("2026-09-07T04:00:00.000Z"));
+	const offPeak = getDeepSeekPeakInfo(Date.parse("2026-09-07T10:00:00.000Z"));
+	assert.equal(offPeak.windowStartMs, Date.parse("2026-09-08T01:00:00.000Z"));
+	assert.equal(offPeak.windowEndMs, Date.parse("2026-09-08T04:00:00.000Z"));
 
 	// Local range is a 3-hour span for window 1 and always parses as HH:MM–HH:MM.
 	assert.match(formatLocalTimeRange(active.windowStartMs, active.windowEndMs, t0100), /^\d{2}:\d{2}( [+-]1)?–\d{2}:\d{2}( [+-]1)?$/);
@@ -465,6 +503,33 @@ test("DeepSeek peak windows expose bounds and local ranges", () => {
 	assert.match(label, /01:00–04:00 UTC/);
 	assert.match(label, /06:00–10:00 UTC/);
 	assert.match(label, /\(local\)/);
+	assert.match(label, /Mon–Fri \(UTC\)/);
+
+	// A weekend anchors to the coming weekday, so both show identical clock
+	// times and neither invents a cross-midnight suffix.
+	const weekendLabel = formatDeepSeekPeakWindows(Date.parse("2026-09-12T06:00:00.000Z"));
+	assert.equal(weekendLabel, formatDeepSeekPeakWindows(Date.parse("2026-09-14T06:00:00.000Z")));
+});
+
+test("DeepSeek peak windows follow the coming weekday across a DST change", () => {
+	const original = process.env.TZ;
+	process.env.TZ = "America/New_York";
+	try {
+		// US DST starts Sun 2026-03-08, so Saturday's readout must already show
+		// the EDT clock times of the Monday windows it describes.
+		const saturday = formatDeepSeekPeakWindows(Date.parse("2026-03-07T12:00:00.000Z"));
+		assert.match(saturday, /21:00–00:00 \+1, 02:00 \+1–06:00 \+1 \(local\)/);
+		assert.equal(saturday, formatDeepSeekPeakWindows(Date.parse("2026-03-09T12:00:00.000Z")));
+		// A weekday anchors to its own UTC day, using that day's offset.
+		assert.match(
+			formatDeepSeekPeakWindows(Date.parse("2026-03-06T12:00:00.000Z")),
+			/20:00–23:00, 01:00 \+1–05:00 \+1 \(local\)/,
+		);
+	} finally {
+		if (original === undefined) delete process.env.TZ;
+		else process.env.TZ = original;
+	}
+
 });
 
 test("usesDeepSeekPeakPricing covers the DeepSeek API and DeepSeek models", () => {
@@ -504,11 +569,15 @@ test("deepseekCfg.render shows the local peak window plus the account balance", 
 	assert.match(rendered, /^(Peak|Off-Peak) ~/);
 
 	// Both peak and off-peak show only the countdown (no time window).
-	const peakTag = deepSeekPeakTag(mockTheme, Date.parse("2026-09-06T02:00:00.000Z"));
+	const peakTag = deepSeekPeakTag(mockTheme, Date.parse("2026-09-07T02:00:00.000Z"));
 	assert.equal(peakTag, "Peak ~2h");
 
-	const offPeakTag = deepSeekPeakTag(mockTheme, Date.parse("2026-09-06T05:00:00.000Z"));
+	const offPeakTag = deepSeekPeakTag(mockTheme, Date.parse("2026-09-07T05:00:00.000Z"));
 	assert.equal(offPeakTag, "Off-Peak ~1h");
+
+	// Weekend off-peak names the reason so a multi-day wait is explicable.
+	const weekendTag = deepSeekPeakTag(mockTheme, Date.parse("2026-09-05T06:00:00.000Z"));
+	assert.equal(weekendTag, "Off-Peak ~1d (weekend)");
 	assert.match(rendered, /\$12\.34$/);
 	// The peak tag is theme-colored: warning while peak, dim while off-peak.
 	const now = Date.now();
@@ -522,7 +591,7 @@ test("formatUsageDetails reports the DeepSeek balance and both peak windows", ()
 	const text = formatUsageDetails(
 		{ windows: {}, balance: { currency: "USD", total: 3.5 } },
 		"deepseek",
-		{ now: Date.parse("2026-09-06T02:00:00.000Z") },
+		{ now: Date.parse("2026-09-07T02:00:00.000Z") },
 	);
 	assert.match(text, /Subscription usage — deepseek/);
 	assert.match(text, /• balance: \$3\.50/);
@@ -532,9 +601,17 @@ test("formatUsageDetails reports the DeepSeek balance and both peak windows", ()
 	const offPeakText = formatUsageDetails(
 		{ windows: {}, balance: { currency: "USD", total: 3.5 } },
 		"deepseek",
-		{ now: Date.parse("2026-09-06T05:00:00.000Z") },
+		{ now: Date.parse("2026-09-07T05:00:00.000Z") },
 	);
-	assert.match(offPeakText, /• deepseek pool: Off-peak ~1h until peak/);
+	assert.match(offPeakText, /• deepseek pool: Off-peak ~1h until peak$/m);
+
+	// Weekend stretches add the reason, and past a day the absolute resume time.
+	const weekendText = formatUsageDetails(
+		{ windows: {}, balance: { currency: "USD", total: 3.5 } },
+		"deepseek",
+		{ now: Date.parse("2026-09-05T06:00:00.000Z") },
+	);
+	assert.match(weekendText, /• deepseek pool: Off-peak ~1d until peak \(weekend\) — resumes 2026-09-07 01:00 UTC$/m);
 });
 
 test("earliestReset falls back to standard interval if expired reset was already fetched", () => {

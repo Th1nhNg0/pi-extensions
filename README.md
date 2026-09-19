@@ -37,7 +37,7 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 * `W` : Weekly quota window
 * `M` : Monthly quota window
 * `~` : Countdown until the next quota reset (e.g. `~4h`, `~3d`)
-* `Peak` / `Off-Peak` : DeepSeek billing state. Windows are `01:00–04:00` and `06:00–10:00` UTC, converted to your local time; `+1`/`-1` marks a window that crosses local midnight. Off-peak hours are billed at 50%.
+* `Peak` / `Off-Peak` : DeepSeek billing state. Windows are `01:00–04:00` and `06:00–10:00` UTC on Monday–Friday UTC days only (weekends are off-peak in full), converted to your local time, where `+1`/`-1` marks an edge that lands on the local day after/before the reference day (that UTC day on weekdays, the coming weekday on weekends). Off-peak hours are billed at 50%. A weekend off-peak reads `(weekend)` and, past a day, shows when peak resumes.
 * `$12.34` : DeepSeek API account balance (`GET /user/balance`), shown for pay-as-you-go accounts.
 * `3 resets left` : Banked rate-limit resets available for OpenAI Codex subscriptions.
 
@@ -55,7 +55,7 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 
 All controls live under one `/usage` command:
 
-- `/usage` shows every window for **all** providers as a detailed readout (percents, bars, reset countdowns + absolute reset times, plan, balance, and freshness). Only the active provider is live-fetched; the rest render from cache. It works even while the footer is hidden. For DeepSeek it also lists both peak windows in your local time alongside their canonical UTC ranges.
+- `/usage` shows every window for **all** providers as a detailed readout (percents, bars, reset countdowns + absolute reset times, plan, balance, and freshness). Only the active provider is live-fetched; the rest render from cache. It works even while the footer is hidden. For DeepSeek it also lists both peak windows (Monday–Friday UTC days only, so weekends never bill peak) in your local time alongside their canonical UTC ranges.
 - `/usage toggle` cycles the status line through three modes: bar cells (`bars`) → bare percentages (`percent`) → hidden (`off`). Pass a mode to jump straight to it, e.g. `/usage toggle percent`. While hidden, no status is shown and no provider requests are made; toggling back re-renders (or refetches) immediately. The choice persists across sessions in `~/.pi/agent/subscription-usage-prefs.json`.
 - `/usage refresh [all|<provider>|active]` requests fresh usage immediately, bypassing cooldowns. It refreshes **every** configured provider by default; pass `active` for just the provider behind the current model, or a provider id/alias (`opencode-go`, `zen`, `openai-codex`, `codex`, `antigravity`, `deepseek`, …) for a single one. An unknown target warns without issuing any request. Providers with no stored credential are reported as *skipped* rather than failed, and only the provider active at completion owns the footer status and wake timer. When the display is `off`, this command makes no requests; enable it with `/usage toggle` first. Automatic retries recover from temporary provider failures without needing a model switch or reload.
 
@@ -70,8 +70,8 @@ Updated 5m ago
 ```text
 Subscription usage — deepseek • deepseek-v4-flash
 • balance: $12.34
-• deepseek pool: Peak hours (13:00–17:00) ~48m left
-• peak windows: 08:00–11:00, 13:00–17:00 (local) · 01:00–04:00 UTC, 06:00–10:00 UTC
+• deepseek pool: Peak hours ~48m left
+• peak windows: 08:00–11:00, 13:00–17:00 (local) · 01:00–04:00 UTC, 06:00–10:00 UTC · Mon–Fri (UTC)
 Updated just now
 ```
 

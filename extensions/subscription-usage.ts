@@ -22,9 +22,9 @@
  * Each window also shows a compact countdown (~) until it resets. OpenCode
  * reports `resetsAt` (ISO) per window; Codex reports `reset_at` (epoch s);
  * Antigravity reports `resetTime` (ISO) per bucket. DeepSeek bills on two UTC
- * peak windows (01:00–04:00 and 06:00–10:00), rendered in local time, and
- * the DeepSeek API provider additionally shows the account balance from
- * `GET /user/balance`.
+ * peak windows, UTC weekdays only (01:00–04:00 and 06:00–10:00 UTC), rendered in
+ * local time, and the DeepSeek API provider additionally shows the account
+ * balance from `GET /user/balance`.
  *
  * Fetch strategy (adaptive, no spam):
  * - Fetch on session start, model switch, and right after an agent turn
@@ -398,6 +398,16 @@ export function resetLabel(resetMs: number, now = Date.now()): string {
 	return `~${Math.floor(d / 7)}w`;
 }
 
+/** `YYYY-MM-DD HH:MM UTC` for an epoch timestamp; `unknown time` if invalid. */
+function utcStamp(ms: number): string {
+	if (!Number.isFinite(ms)) return "unknown time";
+	try {
+		return new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC";
+	} catch {
+		return "unknown time";
+	}
+}
+
 /** Build a single bar segment: filled/empty cells + percent + reset countdown. */
 export function bar(
 	percent: number,
@@ -561,12 +571,7 @@ export function formatUsageDetails(
 		const reset = normalized.resets?.[key];
 		if (typeof reset === "number" && Number.isFinite(reset)) {
 			const rel = resetLabel(reset, now);
-			let abs: string;
-			try {
-				abs = new Date(reset).toISOString().replace("T", " ").slice(0, 16) + " UTC";
-			} catch {
-				abs = "unknown time";
-			}
+			const abs = utcStamp(reset);
 			lines.push(`\u2022 ${key}: ${safe}% ${cells} \u2014 resets ${rel} (${abs})`);
 		} else {
 			lines.push(`\u2022 ${key}: ${safe}% ${cells}`);
@@ -584,7 +589,7 @@ export function formatUsageDetails(
 		const peak = getDeepSeekPeakInfo(now);
 		const tag = peak.isPeak
 			? `Peak hours ${resetLabel(peak.nextFlipMs, now)} left`
-			: `Off-peak ${resetLabel(peak.nextFlipMs, now)} until peak`;
+			: deepSeekOffPeakDetail(peak, now);
 		lines.push(`\u2022 deepseek pool: ${tag}`);
 		lines.push(`\u2022 peak windows: ${formatDeepSeekPeakWindows(now)}`);
 	}
@@ -599,21 +604,46 @@ function jitter(ms: number): number {
 }
 
 /**
- * DeepSeek bills on a UTC clock: two peak windows per day, with a 50%
- * off-peak discount during every other hour. Windows are stored as UTC
- * minutes from midnight so they stay correct across DST changes.
+ * DeepSeek bills on a UTC clock: two peak windows on weekdays, with a 50%
+ * off-peak discount during every other hour. Weekends are off-peak in full.
+ * Windows are stored as UTC minutes from midnight so they stay correct across
+ * DST changes.
  */
 export const DEEPSEEK_PEAK_WINDOWS: ReadonlyArray<readonly [number, number]> = [
 	[1 * 60, 4 * 60], // 01:00 - 04:00 UTC
 	[6 * 60, 10 * 60], // 06:00 - 10:00 UTC
 ];
 
+/** Peak billing applies Monday–Friday (UTC weekday); weekends never bill peak. */
+export function isDeepSeekPeakDay(ms: number): boolean {
+	const day = new Date(ms).getUTCDay();
+	return day !== 0 && day !== 6;
+}
+
+/** Off-peak stretches at least this long also show an absolute resume time. */
+const DEEPSEEK_LONG_OFFPEAK_MS = 86_400_000;
+
+/**
+ * Peak-hour state for DeepSeek's UTC billing windows. `windowStartMs` and
+ * `windowEndMs` describe the active window while peak, or the next weekday
+ * window while off-peak, so callers can render a local range without
+ * re-deriving it.
+ */
+export interface DeepSeekPeakInfo {
+	isPeak: boolean;
+	nextFlipMs: number;
+	windowStartMs: number;
+	windowEndMs: number;
+	/** Set while off-peak because the current UTC day is Saturday or Sunday. */
+	reason?: "weekend";
+}
+
 /** Local calendar-day index, used to mark windows that cross local midnight. */
 function localDayIndex(ms: number): number {
 	return Math.floor((ms - new Date(ms).getTimezoneOffset() * 60_000) / 86_400_000);
 }
 
-/** `HH:MM` in local time, suffixed with `+1`/`-1` on another local day. */
+/** `HH:MM` in local time, ` +1`/` -1` when the edge lands after/before `referenceDay`. */
 function localClock(ms: number, referenceDay: number): string {
 	const date = new Date(ms);
 	const hh = String(date.getHours()).padStart(2, "0");
@@ -636,63 +666,82 @@ function utcClock(minutes: number): string {
 	return `${hh}:${mm}`;
 }
 
+/**
+ * UTC midnight of the day whose local clock times the peak windows render
+ * against: today when it is a weekday, otherwise the next weekday. Anchoring a
+ * weekend to the coming weekday keeps the local ranges from describing a day
+ * that never bills peak, and keeps them correct across a DST change.
+ */
+function deepSeekWindowAnchor(now: number): number {
+	const d = new Date(now);
+	const today = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+	for (let offset = 0; offset <= 7; offset++) {
+		const midnight = today + offset * 86_400_000;
+		if (isDeepSeekPeakDay(midnight)) return midnight;
+	}
+	return today;
+}
+
 /** Both peak windows as local ranges, plus their canonical UTC ranges. */
 export function formatDeepSeekPeakWindows(now = Date.now()): string {
-	const d = new Date(now);
-	const utcMidnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+	const anchor = deepSeekWindowAnchor(now);
 	const local = DEEPSEEK_PEAK_WINDOWS.map(([start, end]) =>
-		formatLocalTimeRange(utcMidnight + start * 60_000, utcMidnight + end * 60_000, now),
+		formatLocalTimeRange(anchor + start * 60_000, anchor + end * 60_000, anchor),
 	).join(", ");
 	const utc = DEEPSEEK_PEAK_WINDOWS.map(
 		([start, end]) => `${utcClock(start)}–${utcClock(end)} UTC`,
 	).join(", ");
-	return `${local} (local) · ${utc}`;
+	return `${local} (local) · ${utc} · Mon–Fri (UTC)`;
 }
 
 /**
- * Peak-hour state for DeepSeek's UTC billing windows. `windowStartMs` and
- * `windowEndMs` describe the active window while peak, or the next window
- * while off-peak, so callers can render a local range without re-deriving it.
+ * Peak-hour state for DeepSeek's UTC billing windows at `now`. Peak runs
+ * Monday–Friday only, so weekend off-peak resolves to the next weekday
+ * window; `reason` marks the weekend case for callers that explain the wait.
  */
-export function getDeepSeekPeakInfo(now = Date.now()): {
-	isPeak: boolean;
-	nextFlipMs: number;
-	windowStartMs: number;
-	windowEndMs: number;
-} {
+export function getDeepSeekPeakInfo(now = Date.now()): DeepSeekPeakInfo {
 	const d = new Date(now);
 	const utcMins = d.getUTCHours() * 60 + d.getUTCMinutes();
 	const utcMidnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+	const weekend = !isDeepSeekPeakDay(now);
 
-	for (const [start, end] of DEEPSEEK_PEAK_WINDOWS) {
-		if (utcMins >= start && utcMins < end) {
-			const windowStartMs = utcMidnight + start * 60_000;
-			const windowEndMs = utcMidnight + end * 60_000;
-			return { isPeak: true, nextFlipMs: windowEndMs, windowStartMs, windowEndMs };
+	if (!weekend) {
+		for (const [start, end] of DEEPSEEK_PEAK_WINDOWS) {
+			if (utcMins >= start && utcMins < end) {
+				const windowStartMs = utcMidnight + start * 60_000;
+				const windowEndMs = utcMidnight + end * 60_000;
+				return { isPeak: true, nextFlipMs: windowEndMs, windowStartMs, windowEndMs };
+			}
 		}
 	}
 
-	for (const [start, end] of DEEPSEEK_PEAK_WINDOWS) {
-		if (utcMins < start) {
-			const windowStartMs = utcMidnight + start * 60_000;
+	// Off-peak: the next window on the nearest weekday, skipping the weekend.
+	for (let offset = 0; offset <= 7; offset++) {
+		const midnight = utcMidnight + offset * 86_400_000;
+		if (!isDeepSeekPeakDay(midnight)) continue;
+		for (const [start, end] of DEEPSEEK_PEAK_WINDOWS) {
+			const windowStartMs = midnight + start * 60_000;
+			if (windowStartMs <= now) continue;
 			return {
 				isPeak: false,
 				nextFlipMs: windowStartMs,
 				windowStartMs,
-				windowEndMs: utcMidnight + end * 60_000,
+				windowEndMs: midnight + end * 60_000,
+				...(weekend ? { reason: "weekend" as const } : {}),
 			};
 		}
 	}
 
-	// Past the final window: the next peak starts with window 1 tomorrow.
+	// Unreachable with the current window table (a weekday always follows
+	// within three days); kept so callers never see a non-finite countdown.
 	const [start, end] = DEEPSEEK_PEAK_WINDOWS[0];
 	const tomorrow = utcMidnight + 86_400_000;
-	const windowStartMs = tomorrow + start * 60_000;
 	return {
 		isPeak: false,
-		nextFlipMs: windowStartMs,
-		windowStartMs,
+		nextFlipMs: tomorrow + start * 60_000,
+		windowStartMs: tomorrow + start * 60_000,
 		windowEndMs: tomorrow + end * 60_000,
+		...(weekend ? { reason: "weekend" as const } : {}),
 	};
 }
 
@@ -702,15 +751,28 @@ export function usesDeepSeekPeakPricing(providerId?: string, modelId?: string): 
 	return Boolean(modelId && /deepseek/i.test(modelId));
 }
 
-/** Theme-colored peak/off-peak tag with the local window and flip countdown. */
+/**
+ * Detailed off-peak line for the `/usage` readout: flip countdown, the weekend
+ * reason when it applies, and — past a day — the absolute resume time.
+ */
+function deepSeekOffPeakDetail(peak: DeepSeekPeakInfo, now: number): string {
+	const reason = peak.reason ? ` (${peak.reason})` : "";
+	const resume =
+		peak.nextFlipMs - now >= DEEPSEEK_LONG_OFFPEAK_MS
+			? ` — resumes ${utcStamp(peak.nextFlipMs)}`
+			: "";
+	return `Off-peak ${resetLabel(peak.nextFlipMs, now)} until peak${reason}${resume}`;
+}
+
+/** Theme-colored peak/off-peak tag with the weekend reason and countdown. */
 export function deepSeekPeakTag(
 	theme: { fg(color: string, text: string): string },
 	now = Date.now(),
 ): string {
 	const peak = getDeepSeekPeakInfo(now);
-	return peak.isPeak
-		? theme.fg("warning", `Peak ${resetLabel(peak.nextFlipMs, now)}`)
-		: theme.fg("dim", `Off-Peak ${resetLabel(peak.nextFlipMs, now)}`);
+	if (peak.isPeak) return theme.fg("warning", `Peak ${resetLabel(peak.nextFlipMs, now)}`);
+	const reason = peak.reason ? ` (${peak.reason})` : "";
+	return theme.fg("dim", `Off-Peak ${resetLabel(peak.nextFlipMs, now)}${reason}`);
 }
 
 /** Earliest reset deadline across all tracked windows (ms epoch), if any. */
