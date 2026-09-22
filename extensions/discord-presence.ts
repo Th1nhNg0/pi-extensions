@@ -2678,36 +2678,7 @@ export class DiscordPresenceManager {
 
 		const wasPublisher = this.publisher;
 		if (wasPublisher && this.transport) {
-			try {
-				await this.stateStore.withPublisherLock(
-					this.sessionId,
-					this.publisherGeneration,
-					async (assertOwnership) => {
-						const current = await this.stateStore.read();
-						const mainSessions = Object.values(current.sessions).filter(
-							(r) => !isSubagentRecord(r),
-						);
-						if (
-							current.publisherId === this.sessionId &&
-							mainSessions.length <= 1
-						) {
-							try {
-								await assertOwnership();
-								if (this.transport) {
-									await awaitWithTimeout(
-										this.transport.clearActivity(),
-										RPC_WRITE_TIMEOUT_MS,
-									);
-								}
-							} catch {
-								// Discord may already be unavailable.
-							}
-						}
-					},
-				);
-			} catch {
-				this.warnRegistryFailure();
-			}
+			await this.clearActivityOnShutdown();
 		}
 		this.publisher = false;
 		try {
@@ -2718,6 +2689,69 @@ export class DiscordPresenceManager {
 
 		await this.closeTransport();
 		this.status = "stopped";
+	}
+
+	/**
+	 * Discord throttles SET_ACTIVITY clears too. Retry once after backoff, but
+	 * recheck publisher ownership in case another Pi session takes over.
+	 */
+	private async clearActivityOnShutdown(): Promise<void> {
+		const transport = this.transport;
+		if (!transport) return;
+
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			let retryAfterRateLimit = false;
+			try {
+				await this.stateStore.withPublisherLock(
+					this.sessionId,
+					this.publisherGeneration,
+					async (assertOwnership) => {
+						const current = await this.stateStore.read();
+						const mainSessions = Object.values(current.sessions).filter(
+							(record) => !isSubagentRecord(record),
+						);
+						if (
+							current.publisherId !== this.sessionId ||
+							mainSessions.length > 1 ||
+							this.transport !== transport
+						) {
+							return;
+						}
+
+						await assertOwnership();
+						try {
+							await awaitWithTimeout(
+								transport.clearActivity(),
+								RPC_WRITE_TIMEOUT_MS,
+							);
+						} catch (error) {
+							if (
+								attempt === 0 &&
+								isRateLimitError(error) &&
+								transport.isConnected()
+							) {
+								this.logger(
+									"[discord-presence] Presence cleanup was rate-limited; retrying after backoff.",
+								);
+								retryAfterRateLimit = true;
+								return;
+							}
+							if (isRateLimitError(error)) {
+								this.logger(
+									"[discord-presence] Discord rate-limited presence cleanup during shutdown.",
+								);
+							}
+						}
+					},
+				);
+			} catch {
+				this.warnRegistryFailure();
+				return;
+			}
+
+			if (!retryAfterRateLimit) return;
+			await wait(Math.max(RATE_LIMIT_BACKOFF_MS, this.minPublishIntervalMs));
+		}
 	}
 
 	private async heartbeat(): Promise<void> {

@@ -2021,6 +2021,87 @@ test("DiscordPresenceManager handles Discord RPC rate limit error (4002) without
 	await manager.stop();
 });
 
+test("manager retries final activity cleanup after a rate-limit response", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const stateStore = new MemoryStateStore();
+	const transport = new MockTransport();
+	const originalClear = transport.clearActivity.bind(transport);
+	let clearCalls = 0;
+	transport.clearActivity = async () => {
+		clearCalls += 1;
+		if (clearCalls === 1) {
+			const error = new Error("rate limited");
+			(error as unknown as { code: number }).code = 4002;
+			throw error;
+		}
+		await originalClear();
+	};
+	const manager = new DiscordPresenceManager({
+		clientId: CLIENT_ID,
+		projectName: "shutdown-clear-retry",
+		stateStore,
+		createTransport: () => transport,
+		logger: () => {},
+	});
+
+	await manager.start();
+	const stopping = manager.stop();
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(clearCalls, 1);
+	assert.equal(transport.closeCount, 0);
+
+	t.mock.timers.tick(RATE_LIMIT_BACKOFF_MS);
+	await stopping;
+	assert.equal(clearCalls, 2);
+	assert.equal(transport.clearCount, 1);
+	assert.equal(transport.closeCount, 1);
+	assert.equal(manager.getStatus(), "stopped");
+});
+
+test("shutdown clear retry yields to a new publisher session", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const stateStore = new MemoryStateStore();
+	const firstTransport = new MockTransport();
+	const originalClear = firstTransport.clearActivity.bind(firstTransport);
+	let clearCalls = 0;
+	firstTransport.clearActivity = async () => {
+		clearCalls += 1;
+		if (clearCalls === 1) {
+			const error = new Error("rate limited");
+			(error as unknown as { code: number }).code = 4002;
+			throw error;
+		}
+		await originalClear();
+	};
+	const first = new DiscordPresenceManager({
+		clientId: CLIENT_ID, projectName: "first", stateStore,
+		createTransport: () => firstTransport, logger: () => {},
+	});
+	const secondTransport = new MockTransport();
+	const second = new DiscordPresenceManager({
+		clientId: CLIENT_ID, projectName: "second", stateStore,
+		createTransport: () => secondTransport, logger: () => {},
+	});
+
+	await first.start();
+	const stopping = first.stop();
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(clearCalls, 1);
+
+	await second.start();
+	assert.equal(second.getStatus(), "standby");
+	t.mock.timers.tick(RATE_LIMIT_BACKOFF_MS);
+	await stopping;
+	assert.equal(clearCalls, 1);
+	assert.equal(firstTransport.closeCount, 1);
+
+	await second.refresh();
+	assert.equal(second.getStatus(), "connected");
+	assert.equal(secondTransport.activities.length, 1);
+	await second.stop();
+	assert.equal(secondTransport.clearCount, 1);
+});
+
 test("publisher coalesces rapid updates into one Discord update per Rich Presence window", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
 	const stateStore = new MemoryStateStore();
