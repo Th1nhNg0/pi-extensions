@@ -286,7 +286,6 @@ npm:pi-antigravity
 npm:pi-background-tasks
 npm:pi-hashline-edit-pro@latest
 git:github.com/Th1nhNg0/pi-extensions
-npm:pi-advisor-flow
 npm:@narumitw/pi-goal
 npm:@narumitw/pi-btw
 npm:@narumitw/pi-stamp
