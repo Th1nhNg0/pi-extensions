@@ -28,17 +28,27 @@
  * provider id, model id, or server log is referenced anywhere. `/throughput`
  * shows the last measurement, `/throughput toggle [on|off]` hides or reveals
  * the line, and the choice persists in
- * ~/.pi/agent/live-throughput-prefs.json.
+ * the Pi agent directory (`~/.pi/agent` by default; honors `PI_CODING_AGENT_DIR`).
  */
 
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import {
+	argumentCompletions,
+	commandHelp,
+	cycleMode,
+	loadPrefs,
+	parseMode,
+	parseSubcommand,
+	savePrefs,
+	showHelp,
+	unknownMode,
+	unknownSubcommand,
+	type CommandSpec,
+} from "./shared/command-kit.ts";
 
 const STATUS_KEY = "live-throughput";
 const LABEL = "⚡";
@@ -51,13 +61,7 @@ const UPDATE_INTERVAL_MS = 200;
  * nothing, in a fresh session) stays on the footer.
  */
 const MIN_LIVE_RATE_SECONDS = UPDATE_INTERVAL_MS / 1000;
-
-const PREFS_PATH = path.join(
-	os.homedir(),
-	".pi",
-	"agent",
-	"live-throughput-prefs.json",
-);
+const PREFS_FILE = "live-throughput-prefs.json";
 
 export type ThroughputMode = "on" | "off";
 
@@ -84,28 +88,12 @@ export function normalizePrefs(raw: unknown): ThroughputPrefs {
 	return { mode: mode ?? DEFAULT_PREFS.mode };
 }
 
-function loadPrefs(): ThroughputPrefs {
-	try {
-		return normalizePrefs(
-			JSON.parse(fs.readFileSync(PREFS_PATH, "utf8")) as unknown,
-		);
-	} catch {
-		return { ...DEFAULT_PREFS };
-	}
-}
-
-async function savePrefs(prefs: ThroughputPrefs): Promise<void> {
-	try {
-		await fs.promises.mkdir(path.dirname(PREFS_PATH), { recursive: true });
-		await fs.promises.writeFile(
-			PREFS_PATH,
-			`${JSON.stringify(prefs, null, 2)}\n`,
-			"utf8",
-		);
-	} catch (error) {
-		console.error("[live-throughput] failed to save prefs:", error);
-	}
-}
+/** One table drives the help, the completions, and the unknown-subcommand message. */
+export const THROUGHPUT_SPECS: readonly CommandSpec[] = [
+	{ name: "", description: "detailed readout of the last measurement" },
+	{ name: "toggle", values: THROUGHPUT_MODES, description: "show or hide the footer line" },
+	{ name: "help", description: "show this help" },
+];
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -311,7 +299,7 @@ function modelLabel(ctx: ExtensionContext): { provider?: string; model?: string 
 }
 
 export default function registerLiveThroughput(pi: ExtensionAPI): void {
-	let mode: ThroughputMode = loadPrefs().mode;
+	let mode: ThroughputMode = loadPrefs(PREFS_FILE, normalizePrefs).mode;
 
 	// Per-message measurement state.
 	let requestStartedAt: number | undefined;
@@ -473,24 +461,16 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 		rest: string,
 		ctx: ExtensionCommandContext,
 	): Promise<void> {
-		const arg = rest.trim().toLowerCase();
-		let next: ThroughputMode;
-		if (arg) {
-			const parsed = normalizeThroughputMode(arg);
-			if (!parsed) {
-				ctx.ui.notify(
-					`Unknown mode "${rest.trim()}". Options: ${THROUGHPUT_MODES.join(", ")}`,
-					"warning",
-				);
-				return;
-			}
-			next = parsed;
-		} else {
-			next = mode === "on" ? "off" : "on";
+		const arg = rest.trim();
+		const parsed = parseMode(arg, THROUGHPUT_MODES);
+		if (arg.length > 0 && !parsed) {
+			ctx.ui.notify(unknownMode(arg, THROUGHPUT_MODES), "warning");
+			return;
 		}
+		const next = parsed ?? cycleMode(mode, THROUGHPUT_MODES);
 
 		mode = next;
-		await savePrefs({ mode });
+		await savePrefs(PREFS_FILE, { mode }, "[live-throughput]");
 
 		if (next === "off") {
 			clearMeasurement();
@@ -506,37 +486,9 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 
 	pi.registerCommand("throughput", {
 		description: "Show streaming throughput (/throughput | toggle [on|off] | help)",
-		getArgumentCompletions: (prefix) => {
-			const trimmed = prefix.trimStart();
-			const spaceIndex = trimmed.indexOf(" ");
-			if (spaceIndex === -1) {
-				const subcommands = [
-					{ value: "toggle", label: "toggle", description: "Toggle the footer throughput line" },
-					{ value: "help", label: "help", description: "Show throughput help" },
-				];
-				const filtered = subcommands.filter((sub) =>
-					sub.value.startsWith(trimmed.toLowerCase()),
-				);
-				return filtered.length > 0 ? filtered : null;
-			}
-			const sub = trimmed.slice(0, spaceIndex).toLowerCase();
-			const rest = trimmed.slice(spaceIndex + 1).trimStart().toLowerCase();
-			if (sub === "toggle") {
-				const modes = THROUGHPUT_MODES.map((m) => ({
-					value: `toggle ${m}`,
-					label: `toggle ${m}`,
-					description: `Set the footer throughput line ${m}`,
-				}));
-				const filtered = modes.filter((item) => item.value.startsWith(`toggle ${rest}`));
-				return filtered.length > 0 ? filtered : null;
-			}
-			return null;
-		},
+		getArgumentCompletions: (prefix) => argumentCompletions(THROUGHPUT_SPECS, prefix),
 		handler: async (args, ctx) => {
-			const trimmed = args.trim();
-			const spaceIndex = trimmed.indexOf(" ");
-			const sub = (spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex)).toLowerCase();
-			const rest = spaceIndex === -1 ? "" : trimmed.slice(spaceIndex + 1).trim();
+			const { sub, rest } = parseSubcommand(args);
 
 			switch (sub) {
 				case "":
@@ -545,20 +497,18 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 					await handleToggle(rest, ctx);
 					return;
 				case "help":
-					ctx.ui.notify(
-						[
-							"Live throughput commands:",
-							"• /throughput — last measurement details",
-							"• /throughput toggle [on|off] — show or hide the footer line",
-						].join("\n"),
-						"info",
+					await showHelp(
+						ctx,
+						commandHelp({
+							title: "Live throughput",
+							command: "/throughput",
+							specs: THROUGHPUT_SPECS,
+							sections: [{ heading: "Settings", lines: [`mode: ${mode}`] }],
+						}),
 					);
 					return;
 				default:
-					ctx.ui.notify(
-						`Unknown subcommand "${sub}". Usage: /throughput | toggle [on|off] | help`,
-						"warning",
-					);
+					ctx.ui.notify(unknownSubcommand("/throughput", sub, THROUGHPUT_SPECS), "warning");
 					return;
 			}
 

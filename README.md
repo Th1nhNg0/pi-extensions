@@ -47,7 +47,7 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 
 * **Adaptive Fetching:** Refreshes on session start, model switch, and agent turn settlement with intelligent cooldowns.
 * **Smart Scheduling:** Reset-aware wake timers that automatically refresh immediately when a usage bucket flips.
-* **Shared Cache:** Persists validated data across multiple Pi sessions via `~/.pi/agent/subscription-usage-cache.json`, using asynchronous atomic writes so cache I/O does not block Pi.
+* **Shared Cache:** Persists validated usage data across Pi sessions in the Pi agent directory (`~/.pi/agent` by default; honors `PI_CODING_AGENT_DIR`) using asynchronous atomic writes.
 * **Safe Rendering:** Malformed provider values are ignored and percentages are bounded to `0–100%` before they reach the status line.
 * **Stale-Request Protection:** Overlapping refreshes are coalesced, and results from a replaced session/model are discarded.
 
@@ -56,7 +56,7 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 All controls live under one `/usage` command:
 
 - `/usage` shows every window for **all** providers as a detailed readout (percents, bars, reset countdowns + absolute reset times, plan, balance, and freshness). Only the active provider is live-fetched; the rest render from cache. It works even while the footer is hidden. For DeepSeek it also lists both peak windows (Monday–Friday UTC days only, so weekends never bill peak) in your local time alongside their canonical UTC ranges.
-- `/usage toggle` cycles the status line through three modes: bar cells (`bars`) → bare percentages (`percent`) → hidden (`off`). Pass a mode to jump straight to it, e.g. `/usage toggle percent`. While hidden, no status is shown and no provider requests are made; toggling back re-renders (or refetches) immediately. The choice persists across sessions in `~/.pi/agent/subscription-usage-prefs.json`.
+- `/usage toggle` cycles the status line through bar cells (`bars`), bare percentages (`percent`), and hidden (`off`). Pass a mode to jump straight to it, e.g. `/usage toggle percent`. While hidden, no status is shown and no provider requests are made; toggling back re-renders (or refetches) immediately. The choice persists across sessions in the Pi agent directory.
 - `/usage refresh [all|<provider>|active]` requests fresh usage immediately, bypassing cooldowns. It refreshes **every** configured provider by default; pass `active` for just the provider behind the current model, or a provider id/alias (`opencode-go`, `zen`, `openai-codex`, `codex`, `antigravity`, `deepseek`, …) for a single one. An unknown target warns without issuing any request. Providers with no stored credential are reported as *skipped* rather than failed, and only the provider active at completion owns the footer status and wake timer. When the display is `off`, this command makes no requests; enable it with `/usage toggle` first. Automatic retries recover from temporary provider failures without needing a model switch or reload.
 
 ```text
@@ -155,6 +155,8 @@ All presence controls are consolidated under a single clean `/discord` command:
 
 #### ⚙️ Configuration & Environment Variables
 
+All variables are optional; defaults work without configuring any of them. The extension includes a public application ID. Use environment variables only when you want launch-specific overrides.
+
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `PI_DISCORD_CLIENT_ID` | `1541350417143955466` | Custom Discord Application Client ID snowflake. Custom IDs disable default assets unless explicitly configured. |
@@ -187,7 +189,7 @@ Set `PI_DISCORD_SMALL_IMAGES` to a custom asset key or image URL to replace the 
 
 #### Setup & Diagnostics
 
-The extension includes a public Discord application ID, so no environment variable is required. Start or reload Pi while Discord Desktop is running, then use `/discord status` to check connection status and inspect per-session statistics (model, phase/action, token breakdown, pricing, context %, and duration). Custom settings can be changed on the fly using `/discord privacy` and `/discord toggle`, and are saved to `~/.pi/agent/discord-presence-prefs.json`.
+The extension includes a public Discord application ID, so no environment variable is required. Start or reload Pi while Discord Desktop is running, then use `/discord status` to check connection status and per-session metrics. `/discord config` shows the effective settings in the TUI viewer; `/discord privacy` and `/discord toggle` change and save their settings in the Pi agent directory.
 
 ##### WSL + Windows Discord
 
@@ -204,7 +206,7 @@ export PI_DISCORD_NPIPERELAY=/mnt/c/Users/<windows-user>/bin/npiperelay.exe
 
 Keep Discord Desktop running on Windows, restart Pi, and run `/discord status`. Set `PI_DISCORD_TRANSPORT=ipc` only when Discord is running inside Linux instead.
 
-Multiple Pi sessions share a registry at `~/.pi/agent/discord-presence-state.json`. One session publishes the aggregate activity while the others send heartbeats. If the publisher exits, another active session takes over; stale sessions are removed automatically. Usage totals include assistant/tool results plus compaction and branch-summary calls. Registry locks renew their lease during long operations, and rapid tool/phase updates are coalesced into the newest pending state, which is published at most once per Discord Rich Presence window (15s). Publishing faster than that makes Discord silently clear the presence, so the cadence is capped by `PI_DISCORD_MIN_INTERVAL_MS` and reconnects keep to Discord's limit of 2 IPC connections per minute.
+Multiple Pi sessions share a registry in the Pi agent directory (`~/.pi/agent` by default; honors `PI_CODING_AGENT_DIR`). One session publishes aggregate activity while the others send heartbeats. If the publisher exits, another active session takes over; stale sessions are removed automatically. Usage totals include assistant/tool results plus compaction and branch-summary calls. Registry locks renew their lease during long operations, and rapid tool/phase updates are coalesced into the newest pending state, which is published at most once per Discord Rich Presence window (15s). Publishing faster than that makes Discord silently clear the presence, so the cadence is capped by `PI_DISCORD_MIN_INTERVAL_MS` and reconnects keep to Discord's limit of 2 IPC connections per minute.
 
 The publisher reloads saved privacy preferences before each publish, so changes made from a standby session apply on the next publisher update (normally within one heartbeat). Reconnection attempts respect exponential backoff even during tool activity, and an off→on toggle restarts a stopped presence manager.
 
@@ -251,7 +253,7 @@ For an OpenAI-compatible local server, Pi requests streaming usage by default. K
 | Command | Usage | Description |
 | :--- | :--- | :--- |
 | `/throughput` | `/throughput` | Detailed readout of the last measurement (model, TTFT, input split, decode rate and span, freshness). Works even while the footer line is hidden. |
-| `/throughput toggle` | `/throughput toggle [on\|off]` | Cycle `on` → `off`, or jump straight to a mode. Persists in `~/.pi/agent/live-throughput-prefs.json`; `off` clears the line and stops all measurement. |
+| `/throughput toggle` | `/throughput toggle [on\|off]` | Cycle `on` → `off`, or jump straight to a mode. Persists in the Pi agent directory; `off` clears the line and stops all measurement. |
 | `/throughput help` | `/throughput help` | Show the command help. |
 
 ```text
@@ -269,6 +271,91 @@ Measured just now
 * Short outputs do not have enough first-to-last span for a stable rate; during the first 200 ms of a stream the previous rate stays on screen.
 * `Input/TTFT` in `/throughput` divides by TTFT, which also contains network/queue/scheduling overhead; use inference-server metrics for true prefill throughput.
 
+---
+
+### 4. `prompt-rewriter` (`extensions/prompt-rewriter.ts`)
+
+Rewrites a rough prompt into a precise one **before it is sent**. The rewrite lands back in the editor, so the improved text is simply the message you send: no extra turn, no injected "here is your rewritten prompt" message, and no rewriting chatter left in the conversation.
+
+```text
+draft:  make the auth flow better
+sent:   Improve the auth flow in `src/auth.ts`: refresh the session before it expires,
+        and cover the expired-token path with a test.
+```
+
+#### ⌨️ Flows
+
+| Trigger | Behaviour |
+| :--- | :--- |
+| `/rewrite <prompt>` | Rewrites the given text and loads it into the editor. |
+| `/rewrite last` | Shows the previous rewrite: original, rewritten, or why it was unavailable. |
+
+Rewrites run while the footer shows `✦ rewriting prompt…`. TUI and RPC modes place the result in the editor for review; print/JSON modes reject the rewrite before making a model call because there is no editor to review it in. Nothing is sent until you press Enter — the improved prompt is an ordinary user message, with no extra conversation message.
+
+#### 🛡️ What the rewriter may not change
+
+The rewrite is validated before it can replace a prompt:
+
+* Verbatim tokens are compared: file paths, filenames, backticked spans, CLI flags, env vars, `SCREAMING_SNAKE_CASE` constants, `snake_case`/`camelCase`/`PascalCase` identifiers, and URLs must all survive. A dropped token rejects the rewrite and names what was lost.
+* Code fences must match, and the result may not grow past ~3× the original or shrink below ~⅓.
+* Assistant-voice output (`Sure!`, `Here's …`, `I'll …`) and empty output are rejected.
+* A rewrite that returns the prompt unchanged is reported as *already clear*, and the input text is left exactly as typed.
+#### 🧠 The rewrite call
+
+One nested model call with its own system prompt, `cacheRetention: "none"`, a fresh `sessionId`, capped `maxTokens`, and minimal thinking, so it does not disturb the session's prompt cache or budget. The session model is used by default; `/rewrite model <provider/id>` points it at a cheaper one. Passed to the model: your prompt plus, optionally, the last three conversation messages (truncated) so references like "it" or "that test" still resolve. When the rewritten prompt comes back, no conversation history is rewritten, and nothing about the rewriting reaches the model that acts on it.
+
+#### Commands
+
+| Command | Usage | Description |
+| :--- | :--- | :--- |
+| `/rewrite <prompt>` | `/rewrite <prompt>` | Improve the given text and load it into the editor. |
+| `/rewrite model` | `/rewrite model <provider/id>\|reset` | Choose the rewrite model; `reset` returns to the session model. |
+| `/rewrite context` | `/rewrite context [on\|off]` | Include a short recent-conversation excerpt for reference resolution. |
+| `/rewrite last` | `/rewrite last` | Show the last rewrite, or why it was unavailable. |
+| `/rewrite help` | `/rewrite help` | Help plus the current settings. |
+
+#### ⚙️ Configuration & Environment Variables
+
+All variables are optional. Environment values seed the model/context until a preference is saved; thinking and timeout are optional launch-time tuning.
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `PI_REWRITE_MODEL` | session model | Seed the rewrite model as `provider/model` until a saved preference exists. |
+| `PI_REWRITE_CONTEXT` | `on` | Seed context handling until a saved preference exists. |
+| `PI_REWRITE_THINKING` | `minimal` | Thinking level for the rewrite: `minimal` … `max`, or `default` to leave the provider's default in place. |
+| `PI_REWRITE_TIMEOUT_MS` | `15000` | Rewrite timeout; on expiry the original draft is kept. |
+
+Preferences persist in the Pi agent directory (`~/.pi/agent` by default; honors `PI_CODING_AGENT_DIR`).
+
+#### Limitations
+
+* Each rewrite makes one extra model call only when requested; `/rewrite model` can use a cheaper model.
+* Pass the prompt as command arguments because Pi clears the editor before a command handler runs; the rewrite is loaded into the editor for review and is not sent automatically.
+* Validation catches structural damage (lost tokens, mangled fences, bloat, assistant chatter) but not subtle changes of meaning. `/rewrite last` shows the original next to the rewrite so you can compare before sending.
+
+---
+
+## 🧩 Shared command kit (`extensions/shared/command-kit.ts`)
+
+All four extensions expose one slash command with subcommands, a help screen, and a preferences file. Those four implementations had drifted apart, so the command surface now comes from one shared module.
+
+**One table per command drives three surfaces** — the help text, the argument completions, and the `Unknown subcommand` message — so they cannot drift again:
+
+| Surface | Before | Now |
+| :--- | :--- | :--- |
+| Help layout | 3 layouts (bullet lists vs. aligned columns) and 2 display channels | `commandHelp()` through `showText()`: the TUI opens the scrollable viewer, other modes get a notification |
+| Unknown subcommand | 3 different wordings, one per extension | `Unknown subcommand "x". Usage: /usage \| toggle [bars\|percent\|off] \| refresh [all\|<provider>\|active] \| help` |
+| Completions | 3 hand-written implementations, none for `/rewrite` | `argumentCompletions()` from the same table, with dynamic values for `/usage refresh` |
+| on/off and enum parsing | the same parse and error message written 3 times | `parseOnOff()`, `parseMode()`, `cycleMode()`, `unknownMode()` |
+| Prefs and data paths | 4 independent implementations and hardcoded agent paths | Shared prefs I/O; prefs, cache, auth lookup, and Discord state all use the Pi agent directory (`PI_CODING_AGENT_DIR` or `~/.pi/agent`), with atomic writes where data is written |
+
+Behaviour changes that came with it:
+
+* Multi-line output (help, `/discord config`, `/rewrite last`) opens in the TUI viewer instead of a one-line status message; RPC keeps the notification because `editor` is a blocking dialog there.
+* All extension preferences, the usage cache/auth lookup, and Discord's shared state now use `PI_CODING_AGENT_DIR` when set (otherwise `~/.pi/agent`). Preference/state writes are atomic where supported.
+* Usage lines list every subcommand, including `help`: `/usage | toggle [bars|percent|off] | refresh [all|<provider>|active] | help`.
+
+The kit is helpers only — no domain logic, no module state, and no runtime import from pi (types only), so the extension suite still runs under plain `node --test`.
 ---
 
 ## 🧰 My Pi Setup

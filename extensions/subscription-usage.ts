@@ -13,8 +13,8 @@
  *
  * `/usage` shows the detailed readout for all providers;
  * `/usage toggle [bars|percent|off]` cycles bars → bare percentages →
- * hidden (or jumps straight to the given mode); the choice persists in
- * ~/.pi/agent/subscription-usage-prefs.json.
+ * hidden (or jumps straight to the given mode); the choice persists in the
+ * Pi agent directory (`~/.pi/agent` by default; honors `PI_CODING_AGENT_DIR`).
  *
  * `/usage refresh [all|<provider>|active]` force-refetches every usage
  * provider (the default) or just one, bypassing the cooldown guards.
@@ -41,8 +41,22 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	agentFilePath,
+	argumentCompletions,
+	commandHelp,
+	cycleMode,
+	loadPrefs,
+	parseMode,
+	parseSubcommand,
+	usageLine,
+	savePrefs,
+	showHelp,
+	unknownMode,
+	unknownSubcommand,
+	type CommandSpec,
+} from "./shared/command-kit.ts";
 
 interface ApiKeyCredential {
 	type: "api_key";
@@ -70,11 +84,10 @@ export class MissingCredentialError extends Error {
 	}
 }
 
-const AUTH_PATH = path.join(os.homedir(), ".pi", "agent", "auth.json");
 
 function readStoredCredential(
 	providerId: string,
-	authPath = AUTH_PATH,
+	authPath = agentFilePath("auth.json"),
 ): StoredCredential | undefined {
 	try {
 		const raw = fs.readFileSync(authPath, "utf8");
@@ -93,18 +106,11 @@ const ERROR_BACKOFF_CAP_MS = 30 * 60 * 1000; // …capped at 30 min
 const RESET_CATCH_DELAY_MS = 5_000; // refetch shortly after a window flips
 const JITTER_RATIO = 0.2; // ±20%, avoid lockstep with other instances
 const BAR_CELLS = 6;
-const CACHE_PATH = path.join(
-	os.homedir(),
-	".pi",
-	"agent",
-	"subscription-usage-cache.json",
-);
-const PREFS_PATH = path.join(
-	os.homedir(),
-	".pi",
-	"agent",
-	"subscription-usage-prefs.json",
-);
+let cacheFile: string | undefined;
+function getCacheFile(): string {
+	return (cacheFile ??= agentFilePath("subscription-usage-cache.json"));
+}
+const PREFS_FILE = "subscription-usage-prefs.json";
 
 /** Display style for usage windows: bar cells or bare percentages. */
 export type UsageStyle = "bars" | "percent";
@@ -115,6 +121,14 @@ export const USAGE_STYLES: readonly UsageStyle[] = ["bars", "percent"];
 export type UsageMode = UsageStyle | "off";
 
 export const USAGE_MODES: readonly UsageMode[] = ["bars", "percent", "off"];
+
+/** One table drives the help, the completions, and the unknown-subcommand message. */
+export const USAGE_SPECS: readonly CommandSpec[] = [
+	{ name: "", description: "detailed usage for every provider" },
+	{ name: "toggle", values: USAGE_MODES, description: "cycle the footer style: bars → percent → off" },
+	{ name: "refresh", hint: "[all|<provider>|active]", description: "force-refresh providers (default: every one)" },
+	{ name: "help", description: "show this help" },
+];
 
 export function normalizeUsageStyle(value: unknown): UsageStyle | undefined {
 	return typeof value === "string" && (USAGE_STYLES as string[]).includes(value)
@@ -144,28 +158,6 @@ export function normalizePrefs(value: unknown): UsagePrefs {
 	};
 }
 
-function loadPrefs(): UsagePrefs {
-	try {
-		return normalizePrefs(
-			JSON.parse(fs.readFileSync(PREFS_PATH, "utf8")) as unknown,
-		);
-	} catch {
-		return { mode: "bars" };
-	}
-}
-
-async function savePrefs(prefs: UsagePrefs): Promise<void> {
-	try {
-		await fs.promises.mkdir(path.dirname(PREFS_PATH), { recursive: true });
-		await fs.promises.writeFile(
-			PREFS_PATH,
-			`${JSON.stringify(prefs, null, 2)}\n`,
-			"utf8",
-		);
-	} catch (error) {
-		console.error("[subscription-usage] failed to save usage prefs:", error);
-	}
-}
 
 /** Account balance for pay-as-you-go providers (e.g. the DeepSeek API). */
 export interface UsageBalance {
@@ -277,7 +269,7 @@ let diskCacheWriteQueue: Promise<void> = Promise.resolve();
 
 async function loadDiskCache(): Promise<DiskCache> {
 	try {
-		const raw = await fs.promises.readFile(CACHE_PATH, "utf8");
+		const raw = await fs.promises.readFile(getCacheFile(), "utf8");
 		diskCacheSnapshot = normalizeDiskCache(JSON.parse(raw) as unknown);
 	} catch {
 		// Keep the last valid snapshot during a partial read or file collision.
@@ -286,17 +278,18 @@ async function loadDiskCache(): Promise<DiskCache> {
 }
 
 async function persistDiskCache(cache: DiskCache): Promise<void> {
-	const dir = path.dirname(CACHE_PATH);
+	const filePath = getCacheFile();
+	const dir = path.dirname(filePath);
 	await fs.promises.mkdir(dir, { recursive: true });
 	const contents = JSON.stringify(cache, null, 2);
-	const tmp = `${CACHE_PATH}.${process.pid}.${Date.now()}.tmp`;
+	const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
 	try {
 		await fs.promises.writeFile(tmp, contents, "utf8");
 		try {
-			await fs.promises.rename(tmp, CACHE_PATH);
+			await fs.promises.rename(tmp, filePath);
 		} catch {
 			// Windows cannot always replace an existing file with rename().
-			await fs.promises.writeFile(CACHE_PATH, contents, "utf8");
+			await fs.promises.writeFile(filePath, contents, "utf8");
 		}
 	} finally {
 		await fs.promises.unlink(tmp).catch(() => undefined);
@@ -1448,7 +1441,7 @@ export default function (pi: ExtensionAPI) {
 	const cache = new Map<string, ProviderState>();
 	let currentCtx: StatusCtx | undefined;
 	const cfgs = usageProviderCfgs;
-	let mode: UsageMode = loadPrefs().mode;
+	let mode: UsageMode = loadPrefs(PREFS_FILE, normalizePrefs).mode;
 
 	function renderUi(
 		ui: StatusCtx["ui"] | undefined,
@@ -1552,7 +1545,7 @@ export default function (pi: ExtensionAPI) {
 		if (cacheWatcherActive) return;
 		try {
 			fs.watchFile(
-				CACHE_PATH,
+				getCacheFile(),
 				{ interval: 1000, persistent: false },
 				onDiskCacheChange,
 			);
@@ -1565,7 +1558,7 @@ export default function (pi: ExtensionAPI) {
 	function stopDiskCacheWatcher(): void {
 		if (!cacheWatcherActive) return;
 		try {
-			fs.unwatchFile(CACHE_PATH, onDiskCacheChange);
+			fs.unwatchFile(getCacheFile(), onDiskCacheChange);
 		} catch {
 			// Ignore unwatch failure during shutdown.
 		}
@@ -1830,25 +1823,17 @@ export default function (pi: ExtensionAPI) {
 
 	/** `/usage toggle [bars|percent|off]` — cycle the footer style or set it directly. */
 	async function handleUsageToggle(args: string, ctx: UsageCmdCtx): Promise<void> {
-		let next: UsageMode;
-		const arg = args.trim().toLowerCase();
-		if (arg) {
-			const parsed = normalizeUsageMode(arg);
-			if (!parsed) {
-				ctx.ui.notify(
-					`Unknown mode "${args.trim()}". Options: ${USAGE_MODES.join(", ")}`,
-					"warning",
-				);
-				return;
-			}
-			next = parsed;
-		} else {
-			// Cycle: bars → percent → off → bars
-			next = USAGE_MODES[(USAGE_MODES.indexOf(mode) + 1) % USAGE_MODES.length];
+		const arg = args.trim();
+		const parsed = parseMode(arg, USAGE_MODES);
+		if (arg.length > 0 && !parsed) {
+			ctx.ui.notify(unknownMode(arg, USAGE_MODES), "warning");
+			return;
 		}
+		// Cycle bars → percent → off → bars when no explicit mode is given.
+		const next = parsed ?? cycleMode(mode, USAGE_MODES);
 
 		mode = next;
-		await savePrefs({ mode });
+		await savePrefs(PREFS_FILE, { mode }, "[subscription-usage]");
 
 		if (next === "off") {
 			stopDiskCacheWatcher();
@@ -1930,60 +1915,23 @@ export default function (pi: ExtensionAPI) {
 	 * provider (default) or the named/active one.
 	 */
 	pi.registerCommand("usage", {
-		description: "Show subscription usage (/usage | toggle | refresh [all|<provider>|active])",
-		getArgumentCompletions: (prefix) => {
-			const trimmed = prefix.trimStart();
-			const spaceIndex = trimmed.indexOf(" ");
-			if (spaceIndex === -1) {
-				const subcommands = [
-					{ value: "toggle", label: "toggle", description: "Cycle footer style: bars → percent → off" },
-					{ value: "refresh", label: "refresh", description: "Force-refresh every provider now (optionally name one)" },
-					{ value: "help", label: "help", description: "Show usage help" },
-				];
-				const filtered = subcommands.filter((sub) =>
-					sub.value.startsWith(trimmed.toLowerCase()),
-				);
-				return filtered.length > 0 ? filtered : null;
-			}
-			const sub = trimmed.slice(0, spaceIndex).toLowerCase();
-			const rest = trimmed.slice(spaceIndex + 1).trimStart().toLowerCase();
-			if (sub === "toggle") {
-				const modes = ["bars", "percent", "off"].map((m) => ({
-					value: `toggle ${m}`,
-					label: `toggle ${m}`,
-					description: `Set footer style to ${m}`,
-				}));
-				const filtered = modes.filter((item) => item.value.startsWith(`toggle ${rest}`));
-				return filtered.length > 0 ? filtered : null;
-			}
-			if (sub === "refresh") {
-				const targets = [
-					{
-						value: "refresh all",
-						label: "refresh all",
-						description: "Force-refresh every usage provider",
-					},
-					{
-						value: "refresh active",
-						label: "refresh active",
-						description: "Force-refresh the active provider only",
-					},
-					...cfgs.map((c) => ({
-						value: `refresh ${c.id}`,
-						label: `refresh ${c.id}`,
-						description: `Force-refresh ${c.id} only`,
-					})),
-				];
-				const filtered = targets.filter((item) => item.value.startsWith(`refresh ${rest}`));
-				return filtered.length > 0 ? filtered : null;
-			}
-			return null;
-		},
+		description: `Show subscription usage (${usageLine("/usage", USAGE_SPECS).replace("Usage: ", "")})`,
+		getArgumentCompletions: (prefix) =>
+			argumentCompletions(USAGE_SPECS, prefix, (sub) =>
+				sub === "refresh"
+					? [
+							{ value: "refresh all", label: "refresh all", description: "Force-refresh every usage provider" },
+							{ value: "refresh active", label: "refresh active", description: "Force-refresh the active provider only" },
+							...cfgs.map((c) => ({
+								value: `refresh ${c.id}`,
+								label: `refresh ${c.id}`,
+								description: `Force-refresh ${c.id} only`,
+							})),
+						]
+					: undefined,
+				),
 		handler: async (args, ctx) => {
-			const trimmed = args.trim();
-			const spaceIndex = trimmed.indexOf(" ");
-			const sub = (spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex)).toLowerCase();
-			const rest = spaceIndex === -1 ? "" : trimmed.slice(spaceIndex + 1).trim();
+			const { sub, rest } = parseSubcommand(args);
 			switch (sub) {
 				case "":
 					break;
@@ -1994,21 +1942,18 @@ export default function (pi: ExtensionAPI) {
 					await handleUsageRefresh(rest, ctx);
 					return;
 				case "help":
-					ctx.ui.notify(
-						[
-							"Subscription usage commands:",
-							"• /usage — detailed usage for all providers",
-							"• /usage toggle [bars|percent|off] — cycle or set footer style",
-							"• /usage refresh [all|<provider>|active] — force-refresh every provider (default: all)",
-						].join("\n"),
-						"info",
+					await showHelp(
+						ctx,
+						commandHelp({
+							title: "Subscription usage",
+							command: "/usage",
+							specs: USAGE_SPECS,
+							sections: [{ heading: "Settings", lines: [`mode: ${mode}`] }],
+						}),
 					);
 					return;
 				default:
-					ctx.ui.notify(
-						`Unknown subcommand "${sub}". Usage: /usage | toggle [bars|percent|off] | refresh`,
-						"warning",
-					);
+					ctx.ui.notify(unknownSubcommand("/usage", sub, USAGE_SPECS), "warning");
 					return;
 			}
 

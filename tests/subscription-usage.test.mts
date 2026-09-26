@@ -29,8 +29,6 @@ import {
 	formatLocalTimeRange,
 	usesDeepSeekPeakPricing,
 	isDeepSeekPeakDay,
-	antigravityCfg,
-	opencodeCfg,
 	type CodexUsageResponse,
 	type UsageData,
 } from "../extensions/subscription-usage.ts";

@@ -50,13 +50,32 @@ function harness(t: TestContext, options: HarnessOptions = {}) {
 		() => options.rawPrefs ?? JSON.stringify(options.prefs ?? { mode: "on" }),
 	);
 	t.mock.method(fs.promises, "mkdir", async () => undefined);
-	const prefWrites: Array<{ path: unknown; data: unknown }> = [];
+	// Emulate the fs so atomic prefs writes land where the assertions expect them.
+	const files = new Map<string, string>();
+	let prefSaves = 0;
 	t.mock.method(fs.promises, "writeFile", async (filePath: unknown, data: unknown) => {
-		prefWrites.push({ path: filePath, data });
+		files.set(String(filePath), String(data));
 	});
+	t.mock.method(fs.promises, "rename", async (from: unknown, to: unknown) => {
+		const data = files.get(String(from));
+		if (data === undefined) {
+			throw new Error("ENOENT");
+		}
+		files.delete(String(from));
+		files.set(String(to), data);
+		prefSaves += 1;
+	});
+	t.mock.method(fs.promises, "unlink", async (filePath: unknown) => {
+		files.delete(String(filePath));
+	});
+	const prefsEntries = (): Array<{ path: string; data: string }> =>
+		[...files]
+			.filter(([filePath]) => filePath.endsWith("live-throughput-prefs.json"))
+			.map(([filePath, data]) => ({ path: filePath, data }));
 
 	const statuses = new Map<string, string | undefined>();
 	const notifications: Array<{ text: string; level: string | undefined }> = [];
+	const editors: Array<{ title: string; text: string }> = [];
 	const events = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
 	const commands = new Map<
 		string,
@@ -74,6 +93,10 @@ function harness(t: TestContext, options: HarnessOptions = {}) {
 			},
 			notify: (text: string, level?: string) => {
 				notifications.push({ text, level });
+			},
+			editor: async (title: string, text: string) => {
+				editors.push({ title, text });
+				return undefined;
 			},
 		},
 	} as unknown as ExtensionCommandContext;
@@ -93,7 +116,13 @@ function harness(t: TestContext, options: HarnessOptions = {}) {
 		ctx,
 		statuses,
 		notifications,
-		prefWrites,
+		get prefWrites() {
+			return prefsEntries();
+		},
+		get prefSaves() {
+			return prefSaves;
+		},
+		editors,
 		async fire(name: string, event: unknown = {}): Promise<void> {
 			const handler = events.get(name);
 			assert.ok(handler, `no handler registered for ${name}`);
@@ -315,9 +344,9 @@ test("toggle off clears the line, stops measuring, and persists the choice", asy
 
 	await h.command("toggle off");
 	assert.equal(h.text(), undefined);
-	assert.equal(h.prefWrites.length, 1);
-	assert.match(String(h.prefWrites[0].path), /live-throughput-prefs\.json$/);
-	assert.deepEqual(JSON.parse(String(h.prefWrites[0].data)), { mode: "off" });
+	assert.equal(h.prefSaves, 1);
+	assert.match(h.prefWrites[0].path, /live-throughput-prefs\.json$/);
+	assert.deepEqual(JSON.parse(h.prefWrites[0].data), { mode: "off" });
 	assert.match(h.lastNotification().text, /hidden/);
 
 	// Disabled: no timing, no footer writes at all.
@@ -328,7 +357,7 @@ test("toggle off clears the line, stops measuring, and persists the choice", asy
 
 	await h.command("toggle on");
 	assert.equal(h.text(), undefined);
-	assert.deepEqual(JSON.parse(String(h.prefWrites[1].data)), { mode: "on" });
+	assert.deepEqual(JSON.parse(h.prefWrites[0].data), { mode: "on" });
 
 	// Re-enabled: the next turn measures again.
 	await beginTurn(h);
@@ -346,11 +375,11 @@ test("toggle accepts explicit modes and rejects unknown ones", async (t) => {
 	await h.command("toggle bogus");
 	assert.equal(h.lastNotification().level, "warning");
 	assert.match(h.lastNotification().text, /Unknown mode/);
-	assert.equal(h.prefWrites.length, 0);
+	assert.equal(h.prefSaves, 0);
 
 	await h.command("toggle off");
 	await h.command("toggle off");
-	assert.equal(h.prefWrites.length, 2);
+	assert.equal(h.prefSaves, 2);
 	// Idempotent: an explicit mode is applied even when already active.
 	assert.equal(h.text(), undefined);
 });
@@ -455,8 +484,13 @@ test("/throughput help and unknown subcommands notify without measuring", async 
 	const h = harness(t);
 	await h.fire("session_start");
 
+	// Help notifies on screen; unknown-subcommand wording comes from the shared table.
 	await h.command("help");
+	assert.equal(h.editors.length, 0);
+	assert.equal(h.lastNotification().level, "info");
 	assert.match(h.lastNotification().text, /Live throughput commands:/);
+	assert.match(h.lastNotification().text, /\/throughput toggle \[on\|off\]/);
+	assert.match(h.lastNotification().text, /mode: on/);
 
 	await h.command("explode");
 	assert.equal(h.lastNotification().level, "warning");

@@ -17,6 +17,7 @@ import {
 	PRIVACY_ENV,
 	PRIVACY_MODES,
 	SMALL_IMAGES_ENV,
+	SHOW_COST_ENV,
 	type DiscordPresencePrefs,
 	type DiscordPresenceTransport,
 	type PresenceAction,
@@ -60,7 +61,6 @@ import {
 	isSubagentSession,
 	isSubagentRecord,
 	isActivityEqual,
-	isRateLimitError,
 	isRegistryLockError,
 	DEFAULT_MIN_PUBLISH_INTERVAL_MS,
 	RATE_LIMIT_BACKOFF_MS,
@@ -1462,6 +1462,43 @@ test("extension registers only unified 'discord' command and no redundant alias"
 		dummyPi as unknown as Parameters<typeof discordPresenceExtension>[0],
 	);
 	assert.deepEqual(registeredCommands, ["discord"]);
+});
+
+test("/discord config opens concise, accurate settings in the TUI viewer", async (t) => {
+	const previousShowCost = process.env[SHOW_COST_ENV];
+	process.env[SHOW_COST_ENV] = "off";
+	t.after(() => {
+		if (previousShowCost === undefined) delete process.env[SHOW_COST_ENV];
+		else process.env[SHOW_COST_ENV] = previousShowCost;
+	});
+
+	let command: { handler: Function } | undefined;
+	const dummyPi = {
+		registerCommand: (_name: string, definition: { handler: Function }) => {
+			command = definition;
+		},
+		on: () => {},
+	};
+	discordPresenceExtension(dummyPi as unknown as Parameters<typeof discordPresenceExtension>[0]);
+	assert.ok(command);
+
+	let title = "";
+	let text = "";
+	const ctx = {
+		hasUI: true,
+		mode: "tui",
+		ui: {
+			editor: async (nextTitle: string, nextText: string) => {
+				title = nextTitle;
+				text = nextText;
+			},
+			notify: () => {},
+		},
+	} as never;
+	await command.handler("config", ctx);
+	assert.equal(title, "Discord presence — configuration");
+	assert.match(text, /cost: hidden/);
+	assert.doesNotMatch(text, /Commands:/);
 });
 
 test("extension registers thinking_level_select and model_select event handlers", () => {

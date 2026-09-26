@@ -294,9 +294,12 @@ test("/usage help and unknown subcommands notify", async (t) => {
 	await h.event("session_start");
 	const notices: string[] = [];
 	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	// Outside TUI, multi-line help goes through the notification channel.
+	Object.assign(h.ctx, { hasUI: true, mode: "rpc" });
 	await h.commands.get("usage")!.handler("help", h.ctx);
 	await h.commands.get("usage")!.handler("bogus", h.ctx);
 	await flush();
+	assert.match(notices[0], /Subscription usage commands:/);
 	assert.match(notices[0], /\/usage toggle/);
 	assert.match(notices[1], /Unknown subcommand/);
 });

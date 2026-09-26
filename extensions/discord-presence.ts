@@ -36,6 +36,22 @@ import type {
 	TransportOptions,
 } from "@xhayper/discord-rpc";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	agentFilePath,
+	argumentCompletions,
+	commandHelp,
+	cycleMode,
+	parseMode,
+	parseOnOff,
+	parseSubcommand,
+	readJsonFile,
+	showHelp,
+	showText,
+	unknownMode,
+	unknownSubcommand,
+	writeJsonFile,
+	type CommandSpec,
+} from "./shared/command-kit.ts";
 
 export const CLIENT_ID_ENV = "PI_DISCORD_CLIENT_ID";
 export const PRIVACY_ENV = "PI_DISCORD_PRIVACY";
@@ -43,7 +59,6 @@ export const BUTTONS_ENV = "PI_DISCORD_BUTTONS";
 export const LARGE_IMAGE_ENV = "PI_DISCORD_LARGE_IMAGE";
 export const SMALL_IMAGES_ENV = "PI_DISCORD_SMALL_IMAGES";
 export const SHOW_COST_ENV = "PI_DISCORD_SHOW_COST";
-export const ENABLED_ENV = "PI_DISCORD_ENABLED";
 
 export const TRANSPORT_ENV = "PI_DISCORD_TRANSPORT";
 export const NPIPERELAY_ENV = "PI_DISCORD_NPIPERELAY";
@@ -200,7 +215,6 @@ export const ACTION_BADGE_URLS: Record<PresenceAction, string> =
 	) as Record<PresenceAction, string>;
 
 /** @deprecated Use ACTION_BADGE_URLS instead. */
-export const ACTION_EMOJI_BADGE_URLS = ACTION_BADGE_URLS;
 
 export const DEFAULT_BUTTONS: Array<{ label: string; url: string }> = [
 	{
@@ -213,19 +227,9 @@ export const DEFAULT_BUTTONS: Array<{ label: string; url: string }> = [
 	},
 ];
 
-export const DEFAULT_STATE_PATH = join(
-	os.homedir(),
-	".pi",
-	"agent",
-	"discord-presence-state.json",
-);
+export const DEFAULT_STATE_PATH = agentFilePath("discord-presence-state.json");
 
-export const DEFAULT_PREFS_PATH = join(
-	os.homedir(),
-	".pi",
-	"agent",
-	"discord-presence-prefs.json",
-);
+export const DEFAULT_PREFS_PATH = agentFilePath("discord-presence-prefs.json");
 
 const MAX_ACTIVITY_TEXT_LENGTH = 128;
 const HEARTBEAT_INTERVAL_MS = 5_000;
@@ -269,12 +273,20 @@ export const PRIVACY_MODES: readonly PresencePrivacyMode[] = [
 	"developer",
 ];
 
+/** One table drives the help, the completions, and the unknown-subcommand message. */
+export const DISCORD_SPECS: readonly CommandSpec[] = [
+	{ name: "status", description: "view active sessions & diagnostics" },
+	{ name: "privacy", values: PRIVACY_MODES, description: "set privacy mode" },
+	{ name: "toggle", values: ["on", "off"], description: "toggle presence on or off" },
+	{ name: "config", description: "show the configuration overview" },
+	{ name: "help", description: "show this help" },
+];
+
 export interface DiscordPresencePrefs {
 	privacyMode?: PresencePrivacyMode;
 	enabled?: boolean;
 	showCost?: boolean;
 	buttons?: boolean;
-	assets?: boolean;
 	largeImage?: string;
 	smallImages?: string;
 }
@@ -449,12 +461,7 @@ function finiteNumber(value: unknown): number | undefined {
 export async function readPrefs(
 	filePath = DEFAULT_PREFS_PATH,
 ): Promise<DiscordPresencePrefs> {
-	try {
-		const raw = JSON.parse(await readFile(filePath, "utf8"));
-		return (asRecord(raw) as DiscordPresencePrefs) ?? {};
-	} catch {
-		return {};
-	}
+	return (asRecord(readJsonFile(filePath)) as DiscordPresencePrefs) ?? {};
 }
 
 export async function writePrefs(
@@ -462,19 +469,7 @@ export async function writePrefs(
 	filePath = DEFAULT_PREFS_PATH,
 ): Promise<void> {
 	try {
-		await mkdir(dirname(filePath), { recursive: true });
-		const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-		const contents = JSON.stringify(prefs, null, 2);
-		try {
-			await writeFile(tempPath, contents, "utf8");
-			try {
-				await rename(tempPath, filePath);
-			} catch {
-				await writeFile(filePath, contents, "utf8");
-			}
-		} finally {
-			await rm(tempPath, { force: true }).catch(() => undefined);
-		}
+		await writeJsonFile(filePath, prefs);
 	} catch {
 		// Non-fatal if the filesystem is read-only
 	}
@@ -3177,14 +3172,12 @@ export interface SubagentTrackerOptions {
 	events?: SubagentTrackerEventBus;
 	sessionId: string;
 	onCountChange?: (count: number) => unknown;
-	logger?: (message: string) => void;
 }
 
 export class SubagentTracker {
 	private readonly events?: SubagentTrackerEventBus;
 	private readonly sessionId: string;
 	private readonly onCountChange?: (count: number) => unknown;
-	private readonly logger: (message: string) => void;
 	private activeAsyncRuns = new Set<string>();
 	private activeForegroundCalls = new Set<string>();
 	private rpcActiveCount: number | undefined;
@@ -3198,7 +3191,6 @@ export class SubagentTracker {
 		this.events = options.events;
 		this.sessionId = options.sessionId;
 		this.onCountChange = options.onCountChange;
-		this.logger = options.logger ?? defaultLogger;
 		this.subscribeEvents();
 	}
 
@@ -3380,22 +3372,14 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 		const normalized = arg.trim().toLowerCase();
 		let nextMode: PresencePrivacyMode;
 		if (normalized) {
-			if (
-				normalized !== "strict" &&
-				normalized !== "project" &&
-				normalized !== "developer"
-			) {
-				ctx.ui.notify(
-					`Unknown privacy mode "${arg.trim()}". Options: ${PRIVACY_MODES.join(", ")}`,
-					"warning",
-				);
+			const parsed = parseMode(normalized, PRIVACY_MODES);
+			if (!parsed) {
+				ctx.ui.notify(unknownMode(arg, PRIVACY_MODES), "warning");
 				return;
 			}
-			nextMode = normalized;
+			nextMode = parsed;
 		} else {
-			const current = manager?.getPrivacyMode() ?? "strict";
-			const currentIndex = PRIVACY_MODES.indexOf(current);
-			nextMode = PRIVACY_MODES[(currentIndex + 1) % PRIVACY_MODES.length];
+			nextMode = cycleMode(manager?.getPrivacyMode() ?? "strict", PRIVACY_MODES);
 		}
 
 		const prefs = await readPrefs();
@@ -3418,22 +3402,13 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 	) {
 		const prefs = await readPrefs();
 		const currentEnabled = prefs.enabled !== false;
-		let nextEnabled: boolean;
 		const normalized = arg.trim().toLowerCase();
-
-		if (normalized === "on") {
-			nextEnabled = true;
-		} else if (normalized === "off") {
-			nextEnabled = false;
-		} else if (normalized === "") {
-			nextEnabled = !currentEnabled;
-		} else {
-			ctx.ui.notify(
-				`Unknown toggle option "${arg.trim()}". Usage: /discord toggle [on|off]`,
-				"warning",
-			);
+		const parsed = parseOnOff(normalized);
+		if (normalized.length > 0 && parsed === undefined) {
+			ctx.ui.notify(unknownMode(arg, ["on", "off"]), "warning");
 			return;
 		}
+		const nextEnabled = parsed ?? !currentEnabled;
 
 		prefs.enabled = nextEnabled;
 		await writePrefs(prefs);
@@ -3471,145 +3446,49 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 			prefs.privacyMode ??
 			parsePrivacyMode(process.env[PRIVACY_ENV]);
 		const enabled = prefs.enabled !== false;
+		const showCost =
+			process.env[SHOW_COST_ENV] !== "off" &&
+			process.env[SHOW_COST_ENV] !== "false" &&
+			prefs.showCost !== false;
 		const transportMode = resolveDiscordTransportMode();
 		const buttonsEnv = process.env[BUTTONS_ENV];
 		const buttons =
 			buttonsEnv !== "off" &&
 			buttonsEnv !== "false" &&
-			buttonsEnv !== "none" &&
 			buttonsEnv !== "0" &&
 			prefs.buttons !== false;
-
-		const largeImg =
+		const largeImage =
 			process.env[LARGE_IMAGE_ENV] ??
 			prefs.largeImage ??
 			(isDefaultClient ? "pi" : "(none)");
-		const smallImg =
+		const smallImages =
 			process.env[SMALL_IMAGES_ENV] ??
 			prefs.smallImages ??
 			(isDefaultClient ? "action badge" : "(none)");
 
 		const lines = [
-			"Discord Rich Presence Configuration:",
-			`• Status: ${manager?.getStatusText() ?? (enabled ? "ready" : "disabled")}`,
-			`• Transport: ${transportMode}`,
-			`• Privacy Mode: ${privacy}`,
-			`• Show Price: yes (by default when pricing is available)`,
-			`• Client ID: ${clientId} (${isDefaultClient ? "default" : "custom"})`,
-			`• Buttons: ${buttons ? "enabled" : "disabled"}`,
-			`• Large Image: ${largeImg}`,
-			`• Small Images: ${smallImg}`,
-			`• Subagents: ${subagentTracker?.isInstalled() ? `detected (${subagentTracker.getTotalActiveCount()} running)` : "not detected"}`,
-			`• Preferences file: ${DEFAULT_PREFS_PATH}`,
-			"",
-			"Commands:",
-			"• /discord status — view active sessions & diagnostics",
-			"• /discord privacy [strict|project|developer] — set privacy mode",
-			"• /discord toggle [on|off] — toggle presence on or off",
-			"• /discord config — show configuration overview",
+			"Discord Rich Presence configuration",
+			`status: ${manager?.getStatusText() ?? disabledReason ?? (enabled ? "ready" : "disabled")}`,
+			`transport: ${transportMode}`,
+			`privacy: ${privacy}`,
+			`cost: ${showCost ? "shown" : "hidden"}`,
+			`client ID: ${clientId} (${isDefaultClient ? "default" : "custom"})`,
+			`buttons: ${buttons ? "enabled" : "disabled"}`,
+			`large image: ${largeImage}`,
+			`small images: ${smallImages}`,
+			`subagents: ${subagentTracker?.isInstalled() ? `detected (${subagentTracker.getTotalActiveCount()} running)` : "not detected"}`,
+			`preferences: ${DEFAULT_PREFS_PATH}`,
 		];
-		ctx.ui.notify(lines.join("\n"), "info");
+		await showText(ctx, "Discord presence — configuration", lines.join("\n"));
 	}
 
 	// Unified /discord command
 	pi.registerCommand("discord", {
 		description:
 			"Manage Discord Rich Presence (/discord status | privacy | toggle | config)",
-		getArgumentCompletions: (prefix) => {
-			const trimmed = prefix.trimStart();
-			const spaceIndex = trimmed.indexOf(" ");
-			if (spaceIndex === -1) {
-				const subcommands = [
-					{
-						value: "status",
-						label: "status",
-						description: "View active sessions & diagnostics",
-					},
-					{
-						value: "privacy",
-						label: "privacy",
-						description: "Set privacy mode (strict, project, developer)",
-					},
-					{
-						value: "toggle",
-						label: "toggle",
-						description: "Toggle presence on or off",
-					},
-					{
-						value: "config",
-						label: "config",
-						description: "Show configuration overview",
-					},
-					{
-						value: "help",
-						label: "help",
-						description: "Show help & usage information",
-					},
-				];
-				const filtered = subcommands.filter((sub) =>
-					sub.value.startsWith(trimmed.toLowerCase()),
-				);
-				return filtered.length > 0 ? filtered : null;
-			}
-
-			const sub = trimmed.slice(0, spaceIndex).toLowerCase();
-			const rest = trimmed
-				.slice(spaceIndex + 1)
-				.trimStart()
-				.toLowerCase();
-
-			if (sub === "privacy") {
-				const options = [
-					{
-						value: "privacy strict",
-						label: "privacy strict",
-						description: "Hide project names (default)",
-					},
-					{
-						value: "privacy project",
-						label: "privacy project",
-						description: "Show project name",
-					},
-					{
-						value: "privacy developer",
-						label: "privacy developer",
-						description: "Show project name and dev metrics",
-					},
-				];
-				const filtered = options.filter((o) =>
-					o.value.startsWith(`privacy ${rest}`),
-				);
-				return filtered.length > 0 ? filtered : null;
-			}
-
-			if (sub === "toggle") {
-				const options = [
-					{
-						value: "toggle on",
-						label: "toggle on",
-						description: "Enable Discord presence",
-					},
-					{
-						value: "toggle off",
-						label: "toggle off",
-						description: "Disable Discord presence",
-					},
-				];
-				const filtered = options.filter((o) =>
-					o.value.startsWith(`toggle ${rest}`),
-				);
-				return filtered.length > 0 ? filtered : null;
-			}
-
-			return null;
-		},
+		getArgumentCompletions: (prefix) => argumentCompletions(DISCORD_SPECS, prefix),
 		handler: async (args, ctx) => {
-			const trimmed = args.trim();
-			const spaceIndex = trimmed.indexOf(" ");
-			const sub = (
-				spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex)
-			).toLowerCase();
-			const rest = spaceIndex === -1 ? "" : trimmed.slice(spaceIndex + 1).trim();
+			const { sub, rest } = parseSubcommand(args);
 
 			switch (sub) {
 				case "status":
@@ -3624,15 +3503,33 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 				case "config":
 					await handleConfig(ctx);
 					break;
-				case "help":
+				case "help": {
+					const helpPrefs = await readPrefs();
+					await showHelp(
+						ctx,
+						commandHelp({
+							title: "Discord presence",
+							command: "/discord",
+							specs: DISCORD_SPECS,
+							sections: [
+								{
+									heading: "Settings",
+									lines: [
+										`privacy: ${manager?.getPrivacyMode() ?? "strict"}` ,
+										`enabled: ${helpPrefs.enabled === false ? "no" : "yes"}` ,
+										`preferences: ${DEFAULT_PREFS_PATH}` ,
+									],
+								},
+							],
+						}),
+					);
+					break;
+				}
 				case "":
 					await handleConfig(ctx);
 					break;
 				default:
-					ctx.ui.notify(
-						`Unknown subcommand "${sub}". Usage: /discord status | privacy | toggle | config`,
-						"warning",
-					);
+					ctx.ui.notify(unknownSubcommand("/discord", sub, DISCORD_SPECS), "warning");
 					break;
 			}
 		},

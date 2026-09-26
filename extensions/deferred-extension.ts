@@ -12,6 +12,7 @@ export function registerDeferredCores(
 			import("./subscription-usage.ts"),
 			import("./discord-presence.ts"),
 			import("./live-throughput-status.ts"),
+			import("./prompt-rewriter.ts"),
 		]),
 ): Promise<EventHandler[]> {
 	const registerEvent = pi.on.bind(pi) as unknown as EventRegistrar;
