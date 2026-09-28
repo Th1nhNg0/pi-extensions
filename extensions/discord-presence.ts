@@ -305,6 +305,26 @@ export async function writePrefs(
 
 
 
+/**
+ * A presence on/off switch: on unless the env variable holds an off value
+ * (`off`, `false`, `0`, `no`, `disable[d]`) or the saved preference is false.
+ */
+export function presenceSwitch(envName: string, pref: boolean | undefined): boolean {
+	return parseOnOff(process.env[envName] ?? "") !== false && pref !== false;
+}
+
+/**
+ * The thinking level shown next to the model: reasoning models always show one
+ * (`off` when disabled); other models show it only when explicitly enabled.
+ */
+export function displayThinkingLevel(
+	model: Parameters<typeof isReasoningSupported>[0],
+	level: string | undefined,
+): string | undefined {
+	if (isReasoningSupported(model)) return level || "off";
+	return level && level !== "off" ? level : undefined;
+}
+
 /** Return a basename for both POSIX and Windows paths, regardless of host OS. */
 export function basenameForAnyPlatform(value: string): string {
 	const normalized = value.trim().replace(/[\\/]+$/, "");
@@ -459,17 +479,9 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 			prefs.privacyMode ??
 			parsePrivacyMode(process.env[PRIVACY_ENV]);
 		const enabled = prefs.enabled !== false;
-		const showCost =
-			process.env[SHOW_COST_ENV] !== "off" &&
-			process.env[SHOW_COST_ENV] !== "false" &&
-			prefs.showCost !== false;
+		const showCost = presenceSwitch(SHOW_COST_ENV, prefs.showCost);
 		const transportMode = resolveDiscordTransportMode();
-		const buttonsEnv = process.env[BUTTONS_ENV];
-		const buttons =
-			buttonsEnv !== "off" &&
-			buttonsEnv !== "false" &&
-			buttonsEnv !== "0" &&
-			prefs.buttons !== false;
+		const buttons = presenceSwitch(BUTTONS_ENV, prefs.buttons);
 		const largeImage =
 			process.env[LARGE_IMAGE_ENV] ??
 			prefs.largeImage ??
@@ -590,21 +602,13 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 
 		const privacyMode =
 			prefs.privacyMode ?? parsePrivacyMode(process.env[PRIVACY_ENV]);
-		const showCost =
-			process.env[SHOW_COST_ENV] !== "off" &&
-			process.env[SHOW_COST_ENV] !== "false" &&
-			prefs.showCost !== false;
-		const enableButtons =
-			process.env[BUTTONS_ENV] !== "off" &&
-			process.env[BUTTONS_ENV] !== "false" &&
-			process.env[BUTTONS_ENV] !== "0" &&
-			prefs.buttons !== false;
+		const showCost = presenceSwitch(SHOW_COST_ENV, prefs.showCost);
+		const enableButtons = presenceSwitch(BUTTONS_ENV, prefs.buttons);
 
-		const reasoning = isReasoningSupported(ctx.model);
-		const rawThinking = ctx.thinkingLevel ?? pi.getThinkingLevel?.();
-		const thinkingLevel = reasoning
-			? (rawThinking || "off")
-			: (rawThinking && rawThinking !== "off" ? rawThinking : undefined);
+		const thinkingLevel = displayThinkingLevel(
+			ctx.model,
+			ctx.thinkingLevel ?? pi.getThinkingLevel?.(),
+		);
 
 		manager = new DiscordPresenceManager({
 			clientId,
@@ -645,20 +649,15 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 	});
 
 	pi.on("model_select", async (event, ctx) => {
-		const reasoning = isReasoningSupported(event.model);
-		const rawThinking = ctx.thinkingLevel ?? pi.getThinkingLevel?.();
-		const thinkingLevel = reasoning
-			? (rawThinking || "off")
-			: (rawThinking && rawThinking !== "off" ? rawThinking : undefined);
+		const thinkingLevel = displayThinkingLevel(
+			event.model,
+			ctx.thinkingLevel ?? pi.getThinkingLevel?.(),
+		);
 		await manager?.setModel(event.model.provider, event.model.id, thinkingLevel);
 	});
 
 	pi.on("thinking_level_select", async (event, ctx) => {
-		const reasoning = isReasoningSupported(ctx.model);
-		const thinkingLevel = reasoning
-			? (event.level || "off")
-			: (event.level && event.level !== "off" ? event.level : undefined);
-		await manager?.setThinkingLevel(thinkingLevel);
+		await manager?.setThinkingLevel(displayThinkingLevel(ctx.model, event.level));
 	});
 
 	pi.on("message_end", async (event) => {

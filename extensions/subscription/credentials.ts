@@ -40,3 +40,31 @@ export function readStoredCredential(
 		return undefined;
 	}
 }
+
+/** First non-empty (trimmed) value among the given environment variables. */
+export function envValue(
+	names: readonly string[],
+	env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+	for (const name of names) {
+		const value = env[name]?.trim();
+		if (value) return value;
+	}
+	return undefined;
+}
+
+/**
+ * An API key from the first set env variable, else the provider's stored
+ * `api_key` credential. Throws MissingCredentialError when neither exists.
+ */
+export function resolveApiKey(
+	providerId: string,
+	envNames: readonly string[],
+	env: NodeJS.ProcessEnv = process.env,
+): string {
+	const fromEnv = envValue(envNames, env);
+	if (fromEnv) return fromEnv;
+	const cred = readStoredCredential(providerId);
+	if (cred?.type === "api_key" && cred.key) return cred.key;
+	throw new MissingCredentialError(`no API key (${envNames.join(" / ")} or auth.json)`);
+}

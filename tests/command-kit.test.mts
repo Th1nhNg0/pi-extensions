@@ -278,7 +278,7 @@ test("writeJsonFile writes a temp file and renames it over the target", async (t
 
 	assert.deepEqual(mock.mkdirs, ["/tmp/agent"]);
 	assert.equal(mock.writes.length, 1);
-	assert.match(mock.writes[0].path, /x-prefs\.json\.\d+\.\d+\.tmp$/);
+	assert.match(mock.writes[0].path, /x-prefs\.json\.\d+\.\d+\.[a-z0-9]+\.tmp$/);
 	assert.deepEqual(JSON.parse(mock.writes[0].data), { mode: "off" });
 	assert.equal(mock.writes[0].data.endsWith("\n"), true);
 	assert.deepEqual(mock.renames, [{ from: mock.writes[0].path, to: target }]);

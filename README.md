@@ -59,6 +59,19 @@ All controls live under one `/usage` command:
 - `/usage toggle` cycles the status line through bar cells (`bars`), bare percentages (`percent`), and hidden (`off`). Pass a mode to jump straight to it, e.g. `/usage toggle percent`. While hidden, no status is shown and no provider requests are made; toggling back re-renders (or refetches) immediately. The choice persists across sessions in the Pi agent directory.
 - `/usage refresh [all|<provider>|active]` requests fresh usage immediately, bypassing cooldowns. It refreshes **every** configured provider by default; pass `active` for just the provider behind the current model, or a provider id/alias (`opencode-go`, `zen`, `openai-codex`, `codex`, `antigravity`, `deepseek`, …) for a single one. An unknown target warns without issuing any request. Providers with no stored credential are reported as *skipped* rather than failed, and only the provider active at completion owns the footer status and wake timer. When the display is `off`, this command makes no requests; enable it with `/usage toggle` first. Automatic retries recover from temporary provider failures without needing a model switch or reload.
 
+#### Credentials & Environment Variables
+
+Each provider reads its credential from the first non-empty environment variable, then from Pi's `auth.json`:
+
+| Provider | Environment variables | `auth.json` entry |
+| :--- | :--- | :--- |
+| OpenCode Go | `OPENCODE_API_KEY` | `opencode-go` (API key) |
+| DeepSeek API | `DEEPSEEK_API_KEY` | `deepseek` (API key) |
+| OpenAI Codex | `OPENAI_CODEX_TOKEN`, `CODEX_ACCESS_TOKEN`, `CHATGPT_ACCESS_TOKEN` | `openai-codex` (OAuth) |
+| Antigravity | `ANTIGRAVITY_TOKEN`, `ANTIGRAVITY_API_KEY` | `antigravity` (OAuth, auto-refreshed) |
+
+The Codex usage endpoint sits behind Cloudflare and needs a browser User-Agent; set `CODEX_USER_AGENT` to replace the built-in one if it starts getting rejected. Antigravity similarly honors `ANTIGRAVITY_USER_AGENT` and `ANTIGRAVITY_BASE_URL`.
+
 ```text
 Subscription usage — openai-codex (plus) • gpt-5
 • 5h: 1% ░░░░░░ — resets ~4h (2026-09-06 16:00 UTC)
@@ -156,10 +169,10 @@ All variables are optional; defaults work without configuring any of them. The e
 | :--- | :--- | :--- |
 | `PI_DISCORD_CLIENT_ID` | `1541350417143955466` | Custom Discord Application Client ID snowflake. Custom IDs disable default assets unless explicitly configured. |
 | `PI_DISCORD_PRIVACY` | `strict` | Privacy level: `strict` or `project`. |
-| `PI_DISCORD_BUTTONS` | `on` | Set to `off` to disable the default static Discord profile buttons. |
+| `PI_DISCORD_BUTTONS` | `on` | Set to `off` (or `false`/`0`/`no`) to disable the default static Discord profile buttons. |
 | `PI_DISCORD_LARGE_IMAGE` | `pi` | Large Rich Presence asset key or image URL. Set to `off` to disable. |
 | `PI_DISCORD_SMALL_IMAGES` | `on` | Action badge asset key (`thinking`, `reading`, `editing`, `searching`, `running`, `testing`, `browsing`, `idle`), custom asset key, or image URL. Set to `off` to disable. |
-| `PI_DISCORD_SHOW_COST` | `on` | Set to `off` to hide price from public Discord presence. |
+| `PI_DISCORD_SHOW_COST` | `on` | Set to `off` (or `false`/`0`/`no`) to hide price from public Discord presence. |
 | `PI_DISCORD_TRANSPORT` | `auto` | `ipc` or `wsl`; WSL auto-selects the `npiperelay.exe` bridge for Windows Discord. |
 | `PI_DISCORD_NPIPERELAY` | `npiperelay.exe` | Optional Windows path/name of the `npiperelay.exe` bridge used from WSL. |
 | `PI_DISCORD_MIN_INTERVAL_MS` | `15000` | Minimum milliseconds between Discord presence updates. Discord accepts about one Rich Presence update per 15 seconds; lower values can make Discord silently clear the presence or close the RPC socket. |

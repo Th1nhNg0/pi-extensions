@@ -49,6 +49,7 @@ import {
 	unknownSubcommand,
 	type CommandSpec,
 } from "./shared/command-kit.ts";
+import { asRecord } from "./shared/record-guards.ts";
 
 const STATUS_KEY = "live-throughput";
 const LABEL = "⚡";
@@ -94,12 +95,6 @@ export const THROUGHPUT_SPECS: readonly CommandSpec[] = [
 	{ name: "toggle", values: THROUGHPUT_MODES, description: "show or hide the footer line" },
 	{ name: "help", description: "show this help" },
 ];
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-	return value !== null && typeof value === "object" && !Array.isArray(value)
-		? (value as Record<string, unknown>)
-		: undefined;
-}
 
 /** Provider usage counts: finite and strictly positive, else undefined. */
 export function positiveNumber(value: unknown): number | undefined {

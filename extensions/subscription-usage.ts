@@ -65,7 +65,12 @@ import type { OpenCodeUsageResponse } from "./subscription/opencode-usage.ts";
 import { formatBalance, parseDeepSeekBalance } from "./subscription/balance.ts";
 import type { DeepSeekBalanceResponse } from "./subscription/balance.ts";
 export { formatBalance };
-import { MissingCredentialError, readStoredCredential } from "./subscription/credentials.ts";
+import {
+	MissingCredentialError,
+	envValue,
+	readStoredCredential,
+	resolveApiKey,
+} from "./subscription/credentials.ts";
 export { MissingCredentialError };
 import {
   bar,
@@ -220,26 +225,40 @@ function anySignal(a?: AbortSignal, b?: AbortSignal): AbortSignal {
 	return AbortSignal.any([a, b]);
 }
 
+const FETCH_TIMEOUT_MS = 10_000;
+
+/** Signal for one provider request: the caller's abort plus a hard timeout. */
+function requestSignal(signal?: AbortSignal): AbortSignal {
+	return anySignal(signal, AbortSignal.timeout(FETCH_TIMEOUT_MS));
+}
+
+/**
+ * One provider request: timeout-bounded, the body drained on a non-2xx status
+ * so the socket is released, and an `${errorPrefix}HTTP <status>` error.
+ */
+async function fetchJson<T>(
+	url: string,
+	init: RequestInit,
+	signal?: AbortSignal,
+	errorPrefix = "",
+): Promise<T> {
+	const res = await fetch(url, { ...init, signal: requestSignal(signal) });
+	if (!res.ok) {
+		await res.body?.cancel().catch(() => undefined);
+		throw new Error(`${errorPrefix}HTTP ${res.status}`);
+	}
+	return (await res.json()) as T;
+}
+
 export const opencodeCfg: ProviderCfg = {
 	id: "opencode-go",
 	async fetchUsage(signal?: AbortSignal) {
-		const rawEnv = process.env.OPENCODE_API_KEY?.trim();
-		const cred = rawEnv ? undefined : readStoredCredential("opencode-go");
-		const key =
-			(rawEnv && rawEnv.length > 0 ? rawEnv : undefined) ??
-			(cred && cred.type === "api_key" ? cred.key : undefined);
-		if (!key)
-			throw new MissingCredentialError("no API key (OPENCODE_API_KEY or auth.json)");
-
-		const res = await fetch("https://opencode.ai/zen/go/v1/usage", {
-			headers: { Authorization: `Bearer ${key}` },
-			signal: anySignal(signal, AbortSignal.timeout(10_000)),
-		});
-		if (!res.ok) {
-			await res.body?.cancel().catch(() => undefined);
-			throw new Error(`HTTP ${res.status}`);
-		}
-		const json = (await res.json()) as OpenCodeUsageResponse;
+		const key = resolveApiKey("opencode-go", ["OPENCODE_API_KEY"]);
+		const json = await fetchJson<OpenCodeUsageResponse>(
+			"https://opencode.ai/zen/go/v1/usage",
+			{ headers: { Authorization: `Bearer ${key}` } },
+			signal,
+		);
 		return parseOpenCodeUsage(json);
 	},
 	render(data, theme, modelId, style = "bars") {
@@ -273,23 +292,12 @@ export const opencodeCfg: ProviderCfg = {
 export const deepseekCfg: ProviderCfg = {
 	id: "deepseek",
 	async fetchUsage(signal?: AbortSignal) {
-		const rawEnv = process.env.DEEPSEEK_API_KEY?.trim();
-		const cred = rawEnv ? undefined : readStoredCredential("deepseek");
-		const key =
-			(rawEnv && rawEnv.length > 0 ? rawEnv : undefined) ??
-			(cred && cred.type === "api_key" ? cred.key : undefined);
-		if (!key)
-			throw new MissingCredentialError("no API key (DEEPSEEK_API_KEY or auth.json)");
-
-		const res = await fetch("https://api.deepseek.com/user/balance", {
-			headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
-			signal: anySignal(signal, AbortSignal.timeout(10_000)),
-		});
-		if (!res.ok) {
-			await res.body?.cancel().catch(() => undefined);
-			throw new Error(`HTTP ${res.status}`);
-		}
-		const json = (await res.json()) as DeepSeekBalanceResponse;
+		const key = resolveApiKey("deepseek", ["DEEPSEEK_API_KEY"]);
+		const json = await fetchJson<DeepSeekBalanceResponse>(
+			"https://api.deepseek.com/user/balance",
+			{ headers: { Authorization: `Bearer ${key}`, Accept: "application/json" } },
+			signal,
+		);
 		const balance = parseDeepSeekBalance(json);
 		return { windows: {}, balance };
 	},
@@ -308,34 +316,29 @@ const CODEX_WINDOW_LABELS: Record<string, string> = {
 	daily: "1d",
 };
 
+const CODEX_BROWSER_USER_AGENT =
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
 export const codexCfg: ProviderCfg = {
 	id: "openai-codex",
 	async fetchUsage(signal?: AbortSignal) {
-		const fromEnv = (
-			process.env.OPENAI_CODEX_TOKEN ||
-			process.env.CODEX_ACCESS_TOKEN ||
-			process.env.CHATGPT_ACCESS_TOKEN
-		)?.trim();
+		const fromEnv = envValue(["OPENAI_CODEX_TOKEN", "CODEX_ACCESS_TOKEN", "CHATGPT_ACCESS_TOKEN"]);
 		const cred = fromEnv ? undefined : readStoredCredential("openai-codex");
-		const access =
-			(fromEnv && fromEnv.length > 0 ? fromEnv : undefined) ??
-			(cred && cred.type === "oauth" ? cred.access : undefined);
+		const access = fromEnv ?? (cred?.type === "oauth" ? cred.access : undefined);
 		if (!access) throw new MissingCredentialError("no OAuth token for openai-codex");
 
-		const res = await fetch("https://chatgpt.com/backend-api/codex/usage", {
-			headers: {
-				Authorization: `Bearer ${access}`,
-				"User-Agent":
-					"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-				Accept: "application/json",
+		const json = await fetchJson<CodexUsageResponse>(
+			"https://chatgpt.com/backend-api/codex/usage",
+			{
+				headers: {
+					Authorization: `Bearer ${access}`,
+					// Cloudflare rejects non-browser agents; override when this one goes stale.
+					"User-Agent": envValue(["CODEX_USER_AGENT"]) ?? CODEX_BROWSER_USER_AGENT,
+					Accept: "application/json",
+				},
 			},
-			signal: anySignal(signal, AbortSignal.timeout(10_000)),
-		});
-		if (!res.ok) {
-			await res.body?.cancel().catch(() => undefined);
-			throw new Error(`HTTP ${res.status}`);
-		}
-		const json = (await res.json()) as CodexUsageResponse;
+			signal,
+		);
 		return parseCodexUsage(json);
 	},
 	render(data, theme, _modelId, style = "bars") {
@@ -417,23 +420,22 @@ async function refreshAntigravityToken(
 	if (cachedAntigravityToken && Date.now() < cachedAntigravityToken.expiresAt) {
 		return cachedAntigravityToken.token;
 	}
-	const res = await fetch("https://oauth2.googleapis.com/token", {
-		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
-		body: new URLSearchParams({
-			client_id: process.env.ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_CLIENT_ID,
-			client_secret:
-				process.env.ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_CLIENT_SECRET,
-			refresh_token: refreshToken,
-			grant_type: "refresh_token",
-		}).toString(),
-		signal: anySignal(signal, AbortSignal.timeout(10_000)),
-	});
-	if (!res.ok) {
-		await res.body?.cancel().catch(() => undefined);
-		throw new Error(`token refresh HTTP ${res.status}`);
-	}
-	const data = (await res.json()) as { access_token?: unknown; expires_in?: unknown };
+	const data = await fetchJson<{ access_token?: unknown; expires_in?: unknown }>(
+		"https://oauth2.googleapis.com/token",
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			body: new URLSearchParams({
+				client_id: process.env.ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_CLIENT_ID,
+				client_secret:
+					process.env.ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_CLIENT_SECRET,
+				refresh_token: refreshToken,
+				grant_type: "refresh_token",
+			}).toString(),
+		},
+		signal,
+		"token refresh ",
+	);
 	if (typeof data.access_token !== "string" || !data.access_token) {
 		throw new Error("token refresh response did not include an access token");
 	}
@@ -508,7 +510,7 @@ export const antigravityCfg: ProviderCfg = {
 							method: "POST",
 							headers: { ...headers, Authorization: `Bearer ${token}` },
 							body: JSON.stringify({}),
-							signal: anySignal(signal, AbortSignal.timeout(10_000)),
+							signal: requestSignal(signal),
 						},
 					);
 					lastResponse = response;
@@ -560,7 +562,7 @@ export const antigravityCfg: ProviderCfg = {
 							pluginType: "GEMINI",
 						},
 					}),
-					signal: anySignal(signal, AbortSignal.timeout(10_000)),
+					signal: requestSignal(signal),
 				});
 				if (resAssist.ok) {
 					const assistJson = (await resAssist.json()) as {
@@ -810,14 +812,20 @@ export default function (pi: ExtensionAPI) {
 	}
 
 
-	// `hard` (manual /usage refresh) also bypasses the MIN_FETCH_GAP_MS
-	// burst guard, so one keystroke always performs a live provider request.
+	interface RefreshOptions {
+		/** Skip the event cooldown (session start, model switch, manual refresh). */
+		force?: boolean;
+		/** Also skip the MIN_FETCH_GAP_MS burst guard and replace an in-flight
+		 *  request, so a manual /usage refresh always performs a live request. */
+		hard?: boolean;
+		/** A timer wake: its delay already encodes the cooldown/backoff policy. */
+		scheduled?: boolean;
+	}
+
 	async function refresh(
 		cfg: ProviderCfg,
 		ctx: StatusCtx,
-		force: boolean,
-		hard = false,
-		scheduled = false,
+		{ force = false, hard = false, scheduled = false }: RefreshOptions = {},
 	): Promise<RefreshOutcome> {
 		const state = cache.get(cfg.id) ?? freshState();
 		cache.set(cfg.id, state);
@@ -939,7 +947,7 @@ export default function (pi: ExtensionAPI) {
 			state.timerDeadline = undefined;
 			void (async () => {
 				if (!safeUi(ctx) || cache.get(cfg.id) !== state) return;
-				await refresh(cfg, ctx, false, false, true);
+				await refresh(cfg, ctx, { scheduled: true });
 				if (!safeUi(ctx) || cache.get(cfg.id) !== state) return;
 				const model = safeModel(ctx);
 				arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
@@ -952,7 +960,7 @@ export default function (pi: ExtensionAPI) {
 	function poke(cfg: ProviderCfg, ctx: StatusCtx, force: boolean) {
 		void (async () => {
 			if (!safeUi(ctx)) return;
-			const outcome = await refresh(cfg, ctx, force);
+			const outcome = await refresh(cfg, ctx, { force });
 			const s = cache.get(cfg.id);
 			const model = safeModel(ctx);
 			if (s && safeUi(ctx)) {
@@ -1069,7 +1077,7 @@ export default function (pi: ExtensionAPI) {
 		const settled = await Promise.allSettled(
 			targets.map(async (cfg): Promise<RefreshResult> => ({
 				id: cfg.id,
-				outcome: await refresh(cfg, ctx, true, true),
+				outcome: await refresh(cfg, ctx, { force: true, hard: true }),
 			})),
 		);
 		const results: RefreshResult[] = settled.map((entry, index) =>
@@ -1144,7 +1152,7 @@ export default function (pi: ExtensionAPI) {
 			// While hidden (`off`) there are no fetches at all; render from cache.
 			if (activeCfg && mode !== "off") {
 				try {
-					await refresh(activeCfg, ctx, true, true);
+					await refresh(activeCfg, ctx, { force: true, hard: true });
 				} catch {
 					// refresh() already renders footer errors; details fall back to cache below.
 				}

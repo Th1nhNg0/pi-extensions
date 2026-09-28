@@ -6,6 +6,8 @@ import test from "node:test";
 import type { SetActivity } from "@xhayper/discord-rpc";
 import {
 	BUTTONS_ENV,
+	displayThinkingLevel,
+	presenceSwitch,
 	TRANSPORT_ENV,
 	DEFAULT_CLIENT_ID,
 	DEFAULT_LARGE_IMAGE_KEY,
@@ -2490,4 +2492,29 @@ test("DiscordPresenceManager stop cancels pending throttle timer without deadloc
 	// Stop while throttle is pending; stop must resolve promptly and not deadlock!
 	await manager.stop();
 	assert.equal(manager.getStatus(), "stopped");
+});
+
+test("presenceSwitch honours every off spelling and the saved preference", (t) => {
+	const saved = process.env.PI_DISCORD_TEST_SWITCH;
+	t.after(() => {
+		if (saved === undefined) delete process.env.PI_DISCORD_TEST_SWITCH;
+		else process.env.PI_DISCORD_TEST_SWITCH = saved;
+	});
+	delete process.env.PI_DISCORD_TEST_SWITCH;
+	assert.equal(presenceSwitch("PI_DISCORD_TEST_SWITCH", undefined), true);
+	assert.equal(presenceSwitch("PI_DISCORD_TEST_SWITCH", false), false);
+	for (const off of ["off", "false", "0", "no", "OFF"]) {
+		process.env.PI_DISCORD_TEST_SWITCH = off;
+		assert.equal(presenceSwitch("PI_DISCORD_TEST_SWITCH", true), false, off);
+	}
+	process.env.PI_DISCORD_TEST_SWITCH = "on";
+	assert.equal(presenceSwitch("PI_DISCORD_TEST_SWITCH", undefined), true);
+});
+
+test("displayThinkingLevel shows off only for reasoning models", () => {
+	assert.equal(displayThinkingLevel({ reasoning: true }, undefined), "off");
+	assert.equal(displayThinkingLevel({ reasoning: true }, "high"), "high");
+	assert.equal(displayThinkingLevel({ reasoning: false }, "off"), undefined);
+	assert.equal(displayThinkingLevel({ reasoning: false }, "low"), "low");
+	assert.equal(displayThinkingLevel(undefined, undefined), undefined);
 });

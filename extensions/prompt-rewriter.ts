@@ -45,6 +45,7 @@ import {
 	showText,
 	type CommandSpec,
 } from "./shared/command-kit.ts";
+import { asRecord } from "./shared/record-guards.ts";
 
 const PREFS_FILE = "prompt-rewriter-prefs.json";
 const STATUS_KEY = "prompt-rewriter";
@@ -119,10 +120,6 @@ export interface RewriteEnv {
 }
 
 type EnvRecord = Record<string, string | undefined>;
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-	return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
-}
 
 function asBoolean(value: unknown): boolean | undefined {
 	if (typeof value === "boolean") {

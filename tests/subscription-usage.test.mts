@@ -700,3 +700,19 @@ test("formatRefreshNotice summarises single and fan-out outcomes", () => {
 		"No usage data refreshed · from cache: a · no credentials: b",
 	);
 });
+
+test("envValue returns the first non-empty trimmed variable", async () => {
+	const { envValue } = await import("../extensions/subscription/credentials.ts");
+	assert.equal(envValue(["A", "B"], { A: "  ", B: " tok " }), "tok");
+	assert.equal(envValue(["A", "B"], { B: "" }), undefined);
+});
+
+test("resolveApiKey prefers the environment and names every variable when missing", async () => {
+	const { resolveApiKey, MissingCredentialError } = await import("../extensions/subscription/credentials.ts");
+	assert.equal(resolveApiKey("pi-test-no-such-provider", ["KEY"], { KEY: " k " }), "k");
+	assert.throws(
+		() => resolveApiKey("pi-test-no-such-provider", ["KEY_A", "KEY_B"], {}),
+		(error: unknown) =>
+			error instanceof MissingCredentialError && /KEY_A \/ KEY_B or auth\.json/.test(error.message),
+	);
+});

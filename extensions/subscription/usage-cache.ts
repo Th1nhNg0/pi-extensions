@@ -1,7 +1,6 @@
 /** Usage payload normalization and the session-shared disk cache. */
 import fs from "node:fs";
-import path from "node:path";
-import { agentFilePath } from "../shared/command-kit.ts";
+import { agentFilePath, writeTextFileAtomic } from "../shared/command-kit.ts";
 import { asRecord } from "../shared/record-guards.ts";
 
 /** Account balance for pay-as-you-go providers (e.g. the DeepSeek API). */
@@ -121,25 +120,6 @@ export async function loadDiskCache(): Promise<DiskCache> {
 	return diskCacheSnapshot;
 }
 
-async function persistDiskCache(cache: DiskCache): Promise<void> {
-	const filePath = getCacheFile();
-	const dir = path.dirname(filePath);
-	await fs.promises.mkdir(dir, { recursive: true });
-	const contents = JSON.stringify(cache, null, 2);
-	const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-	try {
-		await fs.promises.writeFile(tmp, contents, "utf8");
-		try {
-			await fs.promises.rename(tmp, filePath);
-		} catch {
-			// Windows cannot always replace an existing file with rename().
-			await fs.promises.writeFile(filePath, contents, "utf8");
-		}
-	} finally {
-		await fs.promises.unlink(tmp).catch(() => undefined);
-	}
-}
-
 export async function saveDiskCache(
 	providerId: string,
 	data: UsageData,
@@ -156,7 +136,7 @@ export async function saveDiskCache(
 			data: normalizeUsageData(data) ?? data,
 			fetchedAt: Date.now(),
 		};
-		await persistDiskCache(existing);
+		await writeTextFileAtomic(getCacheFile(), JSON.stringify(existing, null, 2));
 		diskCacheSnapshot = existing;
 	})();
 	diskCacheWriteQueue = operation.then(

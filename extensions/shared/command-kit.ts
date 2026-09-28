@@ -254,7 +254,8 @@ export async function writeJsonFile(filePath: string, value: unknown): Promise<v
 
 export async function writeTextFileAtomic(filePath: string, contents: string): Promise<void> {
 	await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-	const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+	// The random suffix keeps two writes in the same millisecond from sharing a temp file.
+	const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
 	try {
 		await fs.promises.writeFile(tmpPath, contents, "utf8");
 		await fs.promises.rename(tmpPath, filePath);
