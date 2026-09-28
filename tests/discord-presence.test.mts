@@ -498,12 +498,13 @@ test("formatDiscordModelLabel normalizes popular and custom model names", () => 
 test("parsePrivacyMode validates input and defaults to strict", () => {
 	assert.equal(parsePrivacyMode("strict"), "strict");
 	assert.equal(parsePrivacyMode("project"), "project");
-	assert.equal(parsePrivacyMode("developer"), "developer");
+	// Retired mode: it showed exactly what "project" shows.
+	assert.equal(parsePrivacyMode("developer"), "project");
 	assert.equal(parsePrivacyMode("STRICT"), "strict");
 	assert.equal(parsePrivacyMode("Project"), "project");
 	assert.equal(parsePrivacyMode("invalid-mode"), "strict");
 	assert.equal(parsePrivacyMode(undefined), "strict");
-	assert.deepEqual(PRIVACY_MODES, ["strict", "project", "developer"]);
+	assert.deepEqual(PRIVACY_MODES, ["strict", "project"]);
 	assert.equal(PRIVACY_ENV, "PI_DISCORD_PRIVACY");
 });
 
@@ -546,16 +547,10 @@ test("formatPublicMetrics formats tokens, context percentage, and cost by defaul
 		"42k tok · ctx 38% · $0.84",
 	);
 
-	// Developer mode: includes cost
-	assert.equal(
-		formatPublicMetrics(usage, context, "developer"),
-		"42k tok · ctx 38% · $0.84",
-	);
-
 	// Incomplete cost prefix ~$
 	const incompleteUsage = { ...usage, costComplete: false };
 	assert.equal(
-		formatPublicMetrics(incompleteUsage, context, "developer"),
+		formatPublicMetrics(incompleteUsage, context, "project"),
 		"42k tok · ctx 38% · ~$0.84",
 	);
 
@@ -1055,10 +1050,6 @@ test("pure formatting helpers format single and multi session components", () =>
 		formatSingleSessionState(record, "project"),
 		"my-project · 42k tok · ctx 38% · $0.84",
 	);
-	assert.equal(
-		formatSingleSessionState(record, "developer"),
-		"my-project · 42k tok · ctx 38% · $0.84",
-	);
 
 	const records = [
 		record,
@@ -1184,6 +1175,12 @@ test("preferences read and write persist custom settings", async () => {
 
 		const restored = await readPrefs(path);
 		assert.deepEqual(restored, prefs);
+
+		// A legacy "developer" mode reads back as "project"; junk falls back to env/default.
+		await writePrefs({ privacyMode: "developer" as never, enabled: true }, path);
+		assert.deepEqual(await readPrefs(path), { privacyMode: "project", enabled: true });
+		await writePrefs({ privacyMode: "loud" as never }, path);
+		assert.deepEqual(await readPrefs(path), {});
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}

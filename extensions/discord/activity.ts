@@ -37,12 +37,8 @@ export const DEFAULT_BUTTONS: Array<{ label: string; url: string }> = [
 	},
 ];
 
-export type PresencePrivacyMode = "strict" | "project" | "developer";
-export const PRIVACY_MODES: readonly PresencePrivacyMode[] = [
-	"strict",
-	"project",
-	"developer",
-];
+export type PresencePrivacyMode = "strict" | "project";
+export const PRIVACY_MODES: readonly PresencePrivacyMode[] = ["strict", "project"];
 
 export type PresenceActivity = SetActivity & {
 	details: string;
@@ -63,13 +59,21 @@ export interface ActivityBuildOptions {
 	smallImageText?: string;
 }
 
-export function parsePrivacyMode(
-	value: string | undefined,
-): PresencePrivacyMode {
-	const normalized = value?.trim().toLowerCase();
-	if (normalized === "project") return "project";
-	if (normalized === "developer") return "developer";
-	return "strict";
+/**
+ * A known privacy mode, or undefined. The retired `developer` mode showed
+ * exactly what `project` shows, so saved prefs and env values using it keep
+ * working as `project`.
+ */
+export function normalizePrivacyMode(value: unknown): PresencePrivacyMode | undefined {
+	if (typeof value !== "string") return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "strict") return "strict";
+	if (normalized === "project" || normalized === "developer") return "project";
+	return undefined;
+}
+
+export function parsePrivacyMode(value: string | undefined): PresencePrivacyMode {
+	return normalizePrivacyMode(value) ?? "strict";
 }
 
 export function formatPublicMetrics(
@@ -123,7 +127,7 @@ export function formatSingleSessionState(
 		privacy,
 		showCost,
 	);
-	if (privacy === "project" || privacy === "developer") {
+	if (privacy === "project") {
 		const project = truncateText(record.projectName || "project", 48);
 		return truncateText(`${project} · ${metrics}`);
 	}

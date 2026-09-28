@@ -62,6 +62,7 @@ import {
   LARGE_IMAGE_ENV,
   PRIVACY_MODES,
   SMALL_IMAGES_ENV,
+  normalizePrivacyMode,
   parsePrivacyMode,
 } from "./discord/activity.ts";
 import type { PresencePrivacyMode } from "./discord/activity.ts";
@@ -144,6 +145,7 @@ export {
   formatSingleSessionDetails,
   formatSingleSessionState,
   isActivityEqual,
+  normalizePrivacyMode,
   parsePrivacyMode,
   summarizeModels,
 } from "./discord/activity.ts";
@@ -279,7 +281,14 @@ export interface DiscordPresencePrefs {
 export async function readPrefs(
 	filePath = DEFAULT_PREFS_PATH,
 ): Promise<DiscordPresencePrefs> {
-	return (asRecord(readJsonFile(filePath)) as DiscordPresencePrefs) ?? {};
+	const record = asRecord(readJsonFile(filePath));
+	if (!record) return {};
+	const prefs = { ...record } as DiscordPresencePrefs;
+	// Drop an unknown mode so the env/default applies; map legacy "developer".
+	const privacyMode = normalizePrivacyMode(record.privacyMode);
+	if (privacyMode) prefs.privacyMode = privacyMode;
+	else delete prefs.privacyMode;
+	return prefs;
 }
 
 export async function writePrefs(
