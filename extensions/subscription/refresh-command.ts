@@ -10,6 +10,8 @@ export interface RefreshResult {
 
 /** Unambiguous short names accepted as `/usage refresh <target>` aliases. */
 const PROVIDER_ALIASES: Readonly<Record<string, string>> = {
+	claude: "anthropic",
+	"claude-code": "anthropic",
 	opencode: "opencode-go",
 	"opencode-zen": "opencode-go",
 	zen: "opencode-go",

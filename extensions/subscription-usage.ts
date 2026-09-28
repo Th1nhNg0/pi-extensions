@@ -19,7 +19,8 @@
  * `/usage refresh [all|<provider>|active]` force-refetches every usage
  * provider (the default) or just one, bypassing the cooldown guards.
  *
- * Each window also shows a compact countdown (~) until it resets. OpenCode
+ * Each window also shows a compact countdown (~) until it resets. Claude
+ * (Pro/Max, `GET /api/oauth/usage`) reports `resets_at` (ISO) per bucket; OpenCode
  * reports `resetsAt` (ISO) per window; Codex reports `reset_at` (epoch s);
  * Antigravity reports `resetTime` (ISO) per bucket. DeepSeek bills on two UTC
  * peak windows, UTC weekdays only (01:00–04:00 and 06:00–10:00 UTC), rendered in
@@ -51,6 +52,10 @@ import type { UsageBalance, UsageData } from "./subscription/usage-cache.ts";
 export { normalizeUsageData };
 export type { UsageBalance, UsageData };
 import { codexWindowKey, parseCodexUsage } from "./subscription/codex-usage.ts";
+import { parseClaudeUsage, resolveClaudeCredential } from "./subscription/claude-usage.ts";
+import type { ClaudeUsageResponse } from "./subscription/claude-usage.ts";
+export { parseClaudeUsage, resolveClaudeCredential };
+export type { ClaudeUsageResponse };
 import type { CodexUsageResponse, RateLimitWindowSnapshot } from "./subscription/codex-usage.ts";
 export { codexWindowKey, parseCodexUsage };
 export type { CodexUsageResponse, RateLimitWindowSnapshot };
@@ -192,6 +197,12 @@ interface ProviderCfg {
 		modelId?: string,
 		style?: UsageStyle,
 	) => string;
+	/**
+	 * Show nothing (rather than a "no key" warning) when the account has no
+	 * usable credential — for providers where that is the normal case, e.g.
+	 * Anthropic used with a plain API key, which has no subscription windows.
+	 */
+	quietWithoutCredential?: boolean;
 }
 
 interface StatusCtx {
@@ -363,6 +374,41 @@ export const codexCfg: ProviderCfg = {
 
 		if (parts.length === 0) return "";
 		return joinParts(parts, theme);
+	},
+};
+
+/** Claude Pro/Max (Pi's `anthropic` OAuth login or Claude Code's): 5h and weekly limits. */
+export const claudeCfg: ProviderCfg = {
+	id: "anthropic",
+	quietWithoutCredential: true,
+	async fetchUsage(signal?: AbortSignal) {
+		const { access, plan } = resolveClaudeCredential();
+		const json = await fetchJson<ClaudeUsageResponse>(
+			"https://api.anthropic.com/api/oauth/usage",
+			{
+				headers: {
+					Authorization: `Bearer ${access}`,
+					"anthropic-beta": "oauth-2025-04-20",
+					Accept: "application/json",
+				},
+			},
+			signal,
+		);
+		return parseClaudeUsage(json, plan);
+	},
+	render(data, theme, modelId, style = "bars") {
+		const w = data.windows;
+		const keys: Array<[string, string]> = [
+			["5h", "5h"],
+			["weekly", "W"],
+		];
+		// Opus and Sonnet also have their own weekly cap; show the one in use.
+		if (modelId && /opus/i.test(modelId)) keys.push(["weekly-opus", "Opus"]);
+		else if (modelId && /sonnet/i.test(modelId)) keys.push(["weekly-sonnet", "Sonnet"]);
+		const parts = keys
+			.filter(([key]) => typeof w[key] === "number")
+			.map(([key, label]) => labeledWindow(label, w[key], data.resets, key, theme, style));
+		return parts.length === 0 ? "" : joinParts(parts, theme);
 	},
 };
 
@@ -609,6 +655,7 @@ export const antigravityCfg: ProviderCfg = {
  * refresh` fans out over this list unless a narrower target is given.
  */
 export const usageProviderCfgs: readonly ProviderCfg[] = [
+	claudeCfg,
 	opencodeCfg,
 	codexCfg,
 	antigravityCfg,
@@ -874,7 +921,9 @@ export default function (pi: ExtensionAPI) {
 					// this is availability, not failure — no backoff, no error log.
 					state.lastText = state.lastData
 						? renderText(cfg, state.lastData, ui, model?.id)
-						: ui.theme.fg("warning", `${cfg.id}: no key`);
+						: cfg.quietWithoutCredential
+							? undefined
+							: ui.theme.fg("warning", `${cfg.id}: no key`);
 					renderUi(ui, cfg.id, state.lastText);
 					return "skipped";
 				}
