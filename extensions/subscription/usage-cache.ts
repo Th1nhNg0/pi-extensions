@@ -52,8 +52,7 @@ function normalizeResets(value: unknown): Record<string, number> | undefined {
 function normalizeBalance(value: unknown): UsageBalance | undefined {
 	const record = asRecord(value);
 	if (!record) return undefined;
-	const currency =
-		typeof record.currency === "string" ? record.currency.trim().toUpperCase() : "";
+	const currency = typeof record.currency === "string" ? record.currency.trim().toUpperCase() : "";
 	const total = finiteNumber(record.total);
 	if (!currency || total === undefined) return undefined;
 	return { currency, total };
@@ -120,10 +119,7 @@ export async function loadDiskCache(): Promise<DiskCache> {
 	return diskCacheSnapshot;
 }
 
-export async function saveDiskCache(
-	providerId: string,
-	data: UsageData,
-): Promise<void> {
+export async function saveDiskCache(providerId: string, data: UsageData): Promise<void> {
 	const previous = diskCacheWriteQueue;
 	const operation = (async () => {
 		try {

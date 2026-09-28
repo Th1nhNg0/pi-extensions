@@ -42,10 +42,10 @@
 import fs from "node:fs";
 import { asRecord } from "./shared/record-guards.ts";
 import {
-  getCacheFile,
-  loadDiskCache,
-  normalizeUsageData,
-  saveDiskCache,
+	getCacheFile,
+	loadDiskCache,
+	normalizeUsageData,
+	saveDiskCache,
 } from "./subscription/usage-cache.ts";
 import type { UsageBalance, UsageData } from "./subscription/usage-cache.ts";
 export { normalizeUsageData };
@@ -57,10 +57,7 @@ export type { CodexUsageResponse, RateLimitWindowSnapshot };
 import { COOLDOWN_MS, MIN_FETCH_GAP_MS, nextDelay } from "./subscription/refresh-schedule.ts";
 import { parseAntigravityQuota } from "./subscription/antigravity-quota.ts";
 import type { AntigravityQuotaSummary } from "./subscription/antigravity-quota.ts";
-import {
-  OPENCODE_WINDOW_LABELS,
-  parseOpenCodeUsage,
-} from "./subscription/opencode-usage.ts";
+import { OPENCODE_WINDOW_LABELS, parseOpenCodeUsage } from "./subscription/opencode-usage.ts";
 import type { OpenCodeUsageResponse } from "./subscription/opencode-usage.ts";
 import { formatBalance, parseDeepSeekBalance } from "./subscription/balance.ts";
 import type { DeepSeekBalanceResponse } from "./subscription/balance.ts";
@@ -73,13 +70,13 @@ import {
 } from "./subscription/credentials.ts";
 export { MissingCredentialError };
 import {
-  bar,
-  detailBar,
-  fetchAgeLabel,
-  formatUsageDetails,
-  joinParts,
-  labeledWindow,
-  windowSegment,
+	bar,
+	detailBar,
+	fetchAgeLabel,
+	formatUsageDetails,
+	joinParts,
+	labeledWindow,
+	windowSegment,
 } from "./subscription/rendering.ts";
 import type { UsageStyle } from "./subscription/rendering.ts";
 export { bar, detailBar, fetchAgeLabel, formatUsageDetails, windowSegment };
@@ -99,7 +96,10 @@ import {
 	unknownSubcommand,
 	type CommandSpec,
 } from "./shared/command-kit.ts";
-import { formatRefreshNotice, resolveRefreshTargets as resolveRefreshTargetsImpl } from "./subscription/refresh-command.ts";
+import {
+	formatRefreshNotice,
+	resolveRefreshTargets as resolveRefreshTargetsImpl,
+} from "./subscription/refresh-command.ts";
 import type { RefreshOutcome, RefreshResult } from "./subscription/refresh-command.ts";
 export { formatRefreshNotice };
 export type { RefreshOutcome, RefreshResult };
@@ -142,8 +142,16 @@ export const USAGE_MODES: readonly UsageMode[] = ["bars", "percent", "off"];
 /** One table drives the help, the completions, and the unknown-subcommand message. */
 export const USAGE_SPECS: readonly CommandSpec[] = [
 	{ name: "", description: "detailed usage for every provider" },
-	{ name: "toggle", values: USAGE_MODES, description: "cycle the footer style: bars → percent → off" },
-	{ name: "refresh", hint: "[all|<provider>|active]", description: "force-refresh providers (default: every one)" },
+	{
+		name: "toggle",
+		values: USAGE_MODES,
+		description: "cycle the footer style: bars → percent → off",
+	},
+	{
+		name: "refresh",
+		hint: "[all|<provider>|active]",
+		description: "force-refresh providers (default: every one)",
+	},
 	{ name: "help", description: "show this help" },
 ];
 
@@ -175,9 +183,6 @@ export function normalizePrefs(value: unknown): UsagePrefs {
 	};
 }
 
-
-
-
 interface ProviderCfg {
 	id: string;
 	fetchUsage: (signal?: AbortSignal) => Promise<UsageData>;
@@ -188,7 +193,6 @@ interface ProviderCfg {
 		style?: UsageStyle,
 	) => string;
 }
-
 
 interface StatusCtx {
 	model?: { provider?: string; id?: string };
@@ -215,7 +219,6 @@ interface ProviderState {
 export function cap(s: string): string {
 	return s ? s[0].toUpperCase() + s.slice(1) : s;
 }
-
 
 /** OpenCode Go: rolling / weekly / monthly usage windows. */
 
@@ -267,16 +270,7 @@ export const opencodeCfg: ProviderCfg = {
 		for (const k of ["rolling", "weekly", "monthly"] as const) {
 			const val = w[k];
 			if (typeof val === "number") {
-				parts.push(
-					labeledWindow(
-						OPENCODE_WINDOW_LABELS[k],
-						val,
-						data.resets,
-						k,
-						theme,
-						style,
-					),
-				);
+				parts.push(labeledWindow(OPENCODE_WINDOW_LABELS[k], val, data.resets, k, theme, style));
 			}
 		}
 		if (parts.length === 0) return "";
@@ -387,20 +381,10 @@ const ANTIGRAVITY_ENDPOINTS = [
 	"https://daily-cloudcode-pa.sandbox.googleapis.com",
 	"https://cloudcode-pa.googleapis.com",
 ] as const;
-const RETRYABLE_ANTIGRAVITY_STATUSES = new Set([
-	403,
-	404,
-	429,
-	500,
-	502,
-	503,
-	504,
-]);
+const RETRYABLE_ANTIGRAVITY_STATUSES = new Set([403, 404, 429, 500, 502, 503, 504]);
 
 /** Match pi-antigravity's endpoint order so quota reads use the same pool. */
-export function antigravityEndpointCandidates(
-	env: NodeJS.ProcessEnv = process.env,
-): string[] {
+export function antigravityEndpointCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
 	const explicit = env.ANTIGRAVITY_BASE_URL?.trim();
 	return explicit ? [explicit] : [...ANTIGRAVITY_ENDPOINTS];
 }
@@ -427,8 +411,7 @@ async function refreshAntigravityToken(
 			headers: { "Content-Type": "application/x-www-form-urlencoded" },
 			body: new URLSearchParams({
 				client_id: process.env.ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_CLIENT_ID,
-				client_secret:
-					process.env.ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_CLIENT_SECRET,
+				client_secret: process.env.ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_CLIENT_SECRET,
 				refresh_token: refreshToken,
 				grant_type: "refresh_token",
 			}).toString(),
@@ -451,8 +434,7 @@ async function refreshAntigravityToken(
 export const antigravityCfg: ProviderCfg = {
 	id: "antigravity",
 	async fetchUsage(signal?: AbortSignal) {
-		const fromEnv =
-			process.env.ANTIGRAVITY_TOKEN || process.env.ANTIGRAVITY_API_KEY;
+		const fromEnv = process.env.ANTIGRAVITY_TOKEN || process.env.ANTIGRAVITY_API_KEY;
 		let access = fromEnv?.trim();
 		let refreshToken: string | undefined;
 		let expires = 0;
@@ -469,10 +451,7 @@ export const antigravityCfg: ProviderCfg = {
 		if (!access && !refreshToken)
 			throw new MissingCredentialError("no OAuth token or API key for antigravity");
 
-		if (
-			refreshToken &&
-			(!access || (expires > 0 && Date.now() >= expires - 60_000))
-		) {
+		if (refreshToken && (!access || (expires > 0 && Date.now() >= expires - 60_000))) {
 			try {
 				access = await refreshAntigravityToken(refreshToken, signal);
 			} catch (e) {
@@ -486,8 +465,7 @@ export const antigravityCfg: ProviderCfg = {
 			Authorization: `Bearer ${access}`,
 			"Content-Type": "application/json",
 			Accept: "application/json",
-			"User-Agent":
-				process.env.ANTIGRAVITY_USER_AGENT || "antigravity/1.15.8 windows/amd64",
+			"User-Agent": process.env.ANTIGRAVITY_USER_AGENT || "antigravity/1.15.8 windows/amd64",
 			"X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
 			"Client-Metadata": JSON.stringify({
 				ideType: "ANTIGRAVITY",
@@ -496,23 +474,18 @@ export const antigravityCfg: ProviderCfg = {
 			}),
 		};
 
-		async function queryQuota(
-			token: string,
-		): Promise<{ response: Response; endpoint: string }> {
+		async function queryQuota(token: string): Promise<{ response: Response; endpoint: string }> {
 			let lastResponse: Response | undefined;
 			let lastEndpoint: string | undefined;
 			let lastError: unknown;
 			for (const endpoint of endpoints) {
 				try {
-					const response = await fetch(
-						`${endpoint}/v1internal:retrieveUserQuotaSummary`,
-						{
-							method: "POST",
-							headers: { ...headers, Authorization: `Bearer ${token}` },
-							body: JSON.stringify({}),
-							signal: requestSignal(signal),
-						},
-					);
+					const response = await fetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
+						method: "POST",
+						headers: { ...headers, Authorization: `Bearer ${token}` },
+						body: JSON.stringify({}),
+						signal: requestSignal(signal),
+					});
 					lastResponse = response;
 					lastEndpoint = endpoint;
 					if (response.ok || !RETRYABLE_ANTIGRAVITY_STATUSES.has(response.status)) {
@@ -647,8 +620,8 @@ export function resolveRefreshTargets(
 	arg: string,
 	cfgs: readonly ProviderCfg[],
 	activeProviderId?: string,
- ): ProviderCfg[] | undefined {
- return resolveRefreshTargetsImpl(arg, cfgs, activeProviderId);
+): ProviderCfg[] | undefined {
+	return resolveRefreshTargetsImpl(arg, cfgs, activeProviderId);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -758,11 +731,7 @@ export default function (pi: ExtensionAPI) {
 	function startDiskCacheWatcher(): void {
 		if (cacheWatcherActive) return;
 		try {
-			fs.watchFile(
-				getCacheFile(),
-				{ interval: 1000, persistent: false },
-				onDiskCacheChange,
-			);
+			fs.watchFile(getCacheFile(), { interval: 1000, persistent: false }, onDiskCacheChange);
 			cacheWatcherActive = true;
 		} catch {
 			// Ignore watch error if the cache path is not accessible yet.
@@ -810,7 +779,6 @@ export default function (pi: ExtensionAPI) {
 			return undefined;
 		}
 	}
-
 
 	interface RefreshOptions {
 		/** Skip the event cooldown (session start, model switch, manual refresh). */
@@ -863,8 +831,7 @@ export default function (pi: ExtensionAPI) {
 				!force &&
 				!scheduled &&
 				state.lastText !== undefined &&
-				(now - state.lastAttempt < COOLDOWN_MS ||
-					(state.failStreak > 0 && !resetSoon))
+				(now - state.lastAttempt < COOLDOWN_MS || (state.failStreak > 0 && !resetSoon))
 			) {
 				const ui = safeUi(ctx);
 				if (ui && state.lastData) {
@@ -1004,9 +971,7 @@ export default function (pi: ExtensionAPI) {
 	 * registered below dispatches to these, so every usage control lives
 	 * under one `/usage` command (like `/discord`).
 	 */
-	type UsageCmdCtx = Parameters<
-		Parameters<typeof pi.registerCommand>[1]["handler"]
-	>[1];
+	type UsageCmdCtx = Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1];
 
 	/** `/usage toggle [bars|percent|off]` — cycle the footer style or set it directly. */
 	async function handleUsageToggle(args: string, ctx: UsageCmdCtx): Promise<void> {
@@ -1039,8 +1004,7 @@ export default function (pi: ExtensionAPI) {
 			state.lastText = renderText(cfg, state.lastData, ui, model?.id);
 			renderUi(ui, cfg.id, state.lastText);
 			// Leaving "off" killed this provider's timer — re-arm it.
-			if (!state.timer)
-				arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
+			if (!state.timer) arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
 		} else if (cfg && ui) {
 			// Nothing usable cached (e.g. first reveal after hiding) — fetch now.
 			poke(cfg, ctx, true);
@@ -1057,17 +1021,14 @@ export default function (pi: ExtensionAPI) {
 	 */
 	async function handleUsageRefresh(args: string, ctx: UsageCmdCtx): Promise<void> {
 		if (mode === "off") {
-			ctx.ui.notify(
-				"Subscription usage is hidden; use /usage toggle to enable refreshes",
-				"info",
-			);
+			ctx.ui.notify("Subscription usage is hidden; use /usage toggle to enable refreshes", "info");
 			return;
 		}
 		const targets = resolveRefreshTargets(args, cfgs, safeModel(ctx)?.provider);
 		if (!targets) {
 			ctx.ui.notify(
 				`Unknown usage provider "${args.trim()}". Known: ${cfgs.map((c) => c.id).join(", ")}` +
-				` (or "all"/"active")`,
+					` (or "all"/"active")`,
 				"warning",
 			);
 			return;
@@ -1075,10 +1036,12 @@ export default function (pi: ExtensionAPI) {
 		// Settle every target so one slow or failing provider cannot hide the
 		// outcome of the others. `refresh()` reports rather than throws.
 		const settled = await Promise.allSettled(
-			targets.map(async (cfg): Promise<RefreshResult> => ({
-				id: cfg.id,
-				outcome: await refresh(cfg, ctx, { force: true, hard: true }),
-			})),
+			targets.map(
+				async (cfg): Promise<RefreshResult> => ({
+					id: cfg.id,
+					outcome: await refresh(cfg, ctx, { force: true, hard: true }),
+				}),
+			),
 		);
 		const results: RefreshResult[] = settled.map((entry, index) =>
 			entry.status === "fulfilled"
@@ -1107,8 +1070,16 @@ export default function (pi: ExtensionAPI) {
 			argumentCompletions(USAGE_SPECS, prefix, (sub) =>
 				sub === "refresh"
 					? [
-							{ value: "refresh all", label: "refresh all", description: "Force-refresh every usage provider" },
-							{ value: "refresh active", label: "refresh active", description: "Force-refresh the active provider only" },
+							{
+								value: "refresh all",
+								label: "refresh all",
+								description: "Force-refresh every usage provider",
+							},
+							{
+								value: "refresh active",
+								label: "refresh active",
+								description: "Force-refresh the active provider only",
+							},
 							...cfgs.map((c) => ({
 								value: `refresh ${c.id}`,
 								label: `refresh ${c.id}`,
@@ -1116,7 +1087,7 @@ export default function (pi: ExtensionAPI) {
 							})),
 						]
 					: undefined,
-				),
+			),
 		handler: async (args, ctx) => {
 			const { sub, rest } = parseSubcommand(args);
 			switch (sub) {

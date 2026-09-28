@@ -57,13 +57,13 @@ import {
 	truncateText,
 } from "./discord/model-labels.ts";
 import {
-  BUTTONS_ENV,
-  DEFAULT_CLIENT_ID,
-  LARGE_IMAGE_ENV,
-  PRIVACY_MODES,
-  SMALL_IMAGES_ENV,
-  normalizePrivacyMode,
-  parsePrivacyMode,
+	BUTTONS_ENV,
+	DEFAULT_CLIENT_ID,
+	LARGE_IMAGE_ENV,
+	PRIVACY_MODES,
+	SMALL_IMAGES_ENV,
+	normalizePrivacyMode,
+	parsePrivacyMode,
 } from "./discord/activity.ts";
 import type { PresencePrivacyMode } from "./discord/activity.ts";
 import {
@@ -79,7 +79,12 @@ import type {
 	SessionRecord,
 	UsageTotals,
 } from "./discord/session-state.ts";
-import { CLIENT_ID_ENV, DiscordPresenceManager, PRIVACY_ENV, defaultLogger } from "./discord/publisher.ts";
+import {
+	CLIENT_ID_ENV,
+	DiscordPresenceManager,
+	PRIVACY_ENV,
+	defaultLogger,
+} from "./discord/publisher.ts";
 import { DEFAULT_STATE_PATH, FilePresenceStateStore } from "./discord/state-store.ts";
 import type { FilePresenceStateStoreOptions } from "./discord/state-store.ts";
 import {
@@ -108,7 +113,10 @@ export {
 	SUBAGENT_RPC_READY_EVENT,
 	SUBAGENT_RPC_REPLY_EVENT_PREFIX,
 } from "./discord/subagent-tracker.ts";
-export type { SubagentTrackerEventBus, SubagentTrackerOptions } from "./discord/subagent-tracker.ts";
+export type {
+	SubagentTrackerEventBus,
+	SubagentTrackerOptions,
+} from "./discord/subagent-tracker.ts";
 export type { DiscordPresenceTransport, DiscordTransportMode };
 export {
 	ACTION_BADGE_COLORS,
@@ -119,52 +127,47 @@ export {
 	pickHighestPriorityAction,
 };
 export type { PresenceAction, PresencePhase };
+export { formatDiscordModelLabel, formatModelLabel, isReasoningSupported, truncateText };
 export {
-	formatDiscordModelLabel,
-	formatModelLabel,
-	isReasoningSupported,
-	truncateText,
-};
-export {
-  BUTTONS_ENV,
-  DEFAULT_BUTTONS,
-  DEFAULT_CLIENT_ID,
-  DEFAULT_LARGE_IMAGE_KEY,
-  DEFAULT_LARGE_IMAGE_TEXT,
-  LARGE_IMAGE_ENV,
-  PRIVACY_MODES,
-  SMALL_IMAGES_ENV,
-  attachAssetsAndButtons,
-  buildActivity,
-  buildAggregateActivity,
-  buildMultiSessionActivity,
-  buildSingleSessionActivity,
-  formatMultiSessionDetails,
-  formatMultiSessionState,
-  formatPublicMetrics,
-  formatSingleSessionDetails,
-  formatSingleSessionState,
-  isActivityEqual,
-  normalizePrivacyMode,
-  parsePrivacyMode,
-  summarizeModels,
+	BUTTONS_ENV,
+	DEFAULT_BUTTONS,
+	DEFAULT_CLIENT_ID,
+	DEFAULT_LARGE_IMAGE_KEY,
+	DEFAULT_LARGE_IMAGE_TEXT,
+	LARGE_IMAGE_ENV,
+	PRIVACY_MODES,
+	SMALL_IMAGES_ENV,
+	attachAssetsAndButtons,
+	buildActivity,
+	buildAggregateActivity,
+	buildMultiSessionActivity,
+	buildSingleSessionActivity,
+	formatMultiSessionDetails,
+	formatMultiSessionState,
+	formatPublicMetrics,
+	formatSingleSessionDetails,
+	formatSingleSessionState,
+	isActivityEqual,
+	normalizePrivacyMode,
+	parsePrivacyMode,
+	summarizeModels,
 } from "./discord/activity.ts";
 export type {
-  ActivityBuildOptions,
-  PresenceActivity,
-  PresencePrivacyMode,
-  PresenceSnapshot,
+	ActivityBuildOptions,
+	PresenceActivity,
+	PresencePrivacyMode,
+	PresenceSnapshot,
 } from "./discord/activity.ts";
 export {
-  CLIENT_ID_ENV,
-  DEFAULT_MIN_PUBLISH_INTERVAL_MS,
-  DiscordPresenceManager,
-  isRateLimitError,
-  isRegistryLockError,
-  MIN_INTERVAL_ENV,
-  PRESENCE_REASSERT_INTERVAL_MS,
-  PRIVACY_ENV,
-  RATE_LIMIT_BACKOFF_MS,
+	CLIENT_ID_ENV,
+	DEFAULT_MIN_PUBLISH_INTERVAL_MS,
+	DiscordPresenceManager,
+	isRateLimitError,
+	isRegistryLockError,
+	MIN_INTERVAL_ENV,
+	PRESENCE_REASSERT_INTERVAL_MS,
+	PRIVACY_ENV,
+	RATE_LIMIT_BACKOFF_MS,
 } from "./discord/publisher.ts";
 export type { PresenceManagerOptions, PresenceStatus } from "./discord/publisher.ts";
 export {
@@ -182,13 +185,7 @@ export type {
 	SessionRecord,
 	UsageTotals,
 };
-export {
-	collectUsageFromEntries,
-	extractUsage,
-	formatCost,
-	formatTokenCount,
-	mergeUsageTotals,
-};
+export { collectUsageFromEntries, extractUsage, formatCost, formatTokenCount, mergeUsageTotals };
 export type { AggregateSummary, UsageDelta };
 
 export const SHOW_COST_ENV = "PI_DISCORD_SHOW_COST";
@@ -196,11 +193,8 @@ export const SHOW_COST_ENV = "PI_DISCORD_SHOW_COST";
 export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
 export const IS_SUBAGENT_ENV = "PI_IS_SUBAGENT";
 
-
 /** Detect whether the current process is running inside a subagent child run. */
-export function isSubagentEnvironment(
-	env: NodeJS.ProcessEnv = process.env,
-): boolean {
+export function isSubagentEnvironment(env: NodeJS.ProcessEnv = process.env): boolean {
 	return Boolean(
 		env.PI_SUBAGENT_CHILD === "1" ||
 			env.PI_SUBAGENT_CHILD === "true" ||
@@ -238,16 +232,12 @@ export function isSubagentSession(
 	return false;
 }
 
-
-
 export const DEFAULT_PREFS_PATH = agentFilePath("discord-presence-prefs.json");
-
 
 type GitCommandResult = {
 	stdout: string;
 	code: number;
 };
-
 
 /** One table drives the help, the completions, and the unknown-subcommand message. */
 export const DISCORD_SPECS: readonly CommandSpec[] = [
@@ -267,20 +257,7 @@ export interface DiscordPresencePrefs {
 	smallImages?: string;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-export async function readPrefs(
-	filePath = DEFAULT_PREFS_PATH,
-): Promise<DiscordPresencePrefs> {
+export async function readPrefs(filePath = DEFAULT_PREFS_PATH): Promise<DiscordPresencePrefs> {
 	const record = asRecord(readJsonFile(filePath));
 	if (!record) return {};
 	const prefs = { ...record } as DiscordPresencePrefs;
@@ -301,9 +278,6 @@ export async function writePrefs(
 		// Non-fatal if the filesystem is read-only
 	}
 }
-
-
-
 
 /**
  * A presence on/off switch: on unless the env variable holds an off value
@@ -329,10 +303,7 @@ export function displayThinkingLevel(
 export function basenameForAnyPlatform(value: string): string {
 	const normalized = value.trim().replace(/[\\/]+$/, "");
 	if (!normalized) return "project";
-	const separator = Math.max(
-		normalized.lastIndexOf("/"),
-		normalized.lastIndexOf("\\"),
-	);
+	const separator = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
 	return normalized.slice(separator + 1) || "project";
 }
 
@@ -340,12 +311,6 @@ export function parseClientId(value: string | undefined): string | undefined {
 	const clientId = value?.trim();
 	return clientId && /^\d{17,20}$/.test(clientId) ? clientId : undefined;
 }
-
-
-
-
-
-
 
 /** Resolve the Git repository basename, falling back to the current cwd. */
 export async function resolveProjectName(
@@ -364,13 +329,6 @@ export async function resolveProjectName(
 	}
 	return basenameForAnyPlatform(cwd);
 }
-
-
-
-
-
-
-
 
 export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void {
 	if (isSubagentEnvironment()) {
@@ -392,10 +350,7 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 		if (subagentTracker?.isInstalled()) {
 			text += `\nSubagents integration: active (${subagentTracker.getTotalActiveCount()} running)`;
 		}
-		ctx.ui.notify(
-			text,
-			manager?.getStatus() === "connected" ? "info" : "warning",
-		);
+		ctx.ui.notify(text, manager?.getStatus() === "connected" ? "info" : "warning");
 	}
 
 	async function handlePrivacy(
@@ -423,10 +378,7 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 			await manager.setPrivacyMode(nextMode);
 		}
 
-		ctx.ui.notify(
-			`Discord Presence privacy mode set to "${nextMode}" (saved).`,
-			"info",
-		);
+		ctx.ui.notify(`Discord Presence privacy mode set to "${nextMode}" (saved).`, "info");
 	}
 
 	async function handleToggle(
@@ -451,19 +403,13 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 				void manager.start();
 				ctx.ui.notify("Discord Presence enabled and running.", "info");
 			} else {
-				ctx.ui.notify(
-					"Discord Presence enabled. Reload or restart session to activate.",
-					"info",
-				);
+				ctx.ui.notify("Discord Presence enabled. Reload or restart session to activate.", "info");
 			}
 		} else {
 			if (manager) {
 				await manager.stop();
 			}
-			ctx.ui.notify(
-				"Discord Presence disabled (/discord toggle on to resume).",
-				"info",
-			);
+			ctx.ui.notify("Discord Presence disabled (/discord toggle on to resume).", "info");
 		}
 	}
 
@@ -475,17 +421,13 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 		const clientId = configuredClientId ?? DEFAULT_CLIENT_ID;
 		const isDefaultClient = clientId === DEFAULT_CLIENT_ID;
 		const privacy =
-			manager?.getPrivacyMode() ??
-			prefs.privacyMode ??
-			parsePrivacyMode(process.env[PRIVACY_ENV]);
+			manager?.getPrivacyMode() ?? prefs.privacyMode ?? parsePrivacyMode(process.env[PRIVACY_ENV]);
 		const enabled = prefs.enabled !== false;
 		const showCost = presenceSwitch(SHOW_COST_ENV, prefs.showCost);
 		const transportMode = resolveDiscordTransportMode();
 		const buttons = presenceSwitch(BUTTONS_ENV, prefs.buttons);
 		const largeImage =
-			process.env[LARGE_IMAGE_ENV] ??
-			prefs.largeImage ??
-			(isDefaultClient ? "pi" : "(none)");
+			process.env[LARGE_IMAGE_ENV] ?? prefs.largeImage ?? (isDefaultClient ? "pi" : "(none)");
 		const smallImages =
 			process.env[SMALL_IMAGES_ENV] ??
 			prefs.smallImages ??
@@ -509,8 +451,7 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 
 	// Unified /discord command
 	pi.registerCommand("discord", {
-		description:
-			"Manage Discord Rich Presence (/discord status | privacy | toggle | config)",
+		description: "Manage Discord Rich Presence (/discord status | privacy | toggle | config)",
 		getArgumentCompletions: (prefix) => argumentCompletions(DISCORD_SPECS, prefix),
 		handler: async (args, ctx) => {
 			const { sub, rest } = parseSubcommand(args);
@@ -540,9 +481,9 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 								{
 									heading: "Settings",
 									lines: [
-										`privacy: ${manager?.getPrivacyMode() ?? "strict"}` ,
-										`enabled: ${helpPrefs.enabled === false ? "no" : "yes"}` ,
-										`preferences: ${DEFAULT_PREFS_PATH}` ,
+										`privacy: ${manager?.getPrivacyMode() ?? "strict"}`,
+										`enabled: ${helpPrefs.enabled === false ? "no" : "yes"}`,
+										`preferences: ${DEFAULT_PREFS_PATH}`,
 									],
 								},
 							],
@@ -600,8 +541,7 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 		const initialUsage = collectUsageFromEntries(ctx.sessionManager.getBranch());
 		const initialContext = normalizeContextUsage(ctx.getContextUsage());
 
-		const privacyMode =
-			prefs.privacyMode ?? parsePrivacyMode(process.env[PRIVACY_ENV]);
+		const privacyMode = prefs.privacyMode ?? parsePrivacyMode(process.env[PRIVACY_ENV]);
 		const showCost = presenceSwitch(SHOW_COST_ENV, prefs.showCost);
 		const enableButtons = presenceSwitch(BUTTONS_ENV, prefs.buttons);
 

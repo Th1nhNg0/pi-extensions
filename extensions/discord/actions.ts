@@ -54,16 +54,12 @@ const ACTION_PHOSPHOR_ICONS: Record<PresenceAction, string> = {
 	idle: "pause-circle",
 };
 
-export const ACTION_BADGE_URLS: Record<PresenceAction, string> =
-	Object.fromEntries(
-		(Object.keys(ACTION_PHOSPHOR_ICONS) as PresenceAction[]).map((action) => [
-			action,
-			phosphorDuotoneBadge(
-				ACTION_PHOSPHOR_ICONS[action],
-				ACTION_BADGE_COLORS[action],
-			),
-		]),
-	) as Record<PresenceAction, string>;
+export const ACTION_BADGE_URLS: Record<PresenceAction, string> = Object.fromEntries(
+	(Object.keys(ACTION_PHOSPHOR_ICONS) as PresenceAction[]).map((action) => [
+		action,
+		phosphorDuotoneBadge(ACTION_PHOSPHOR_ICONS[action], ACTION_BADGE_COLORS[action]),
+	]),
+) as Record<PresenceAction, string>;
 
 export function formatPhase(phase: PresencePhase): string {
 	switch (phase) {
@@ -85,11 +81,7 @@ export function formatAction(
 ): string {
 	const effectiveAction = action ?? (phase === "tools" ? "tools" : phase);
 	if (subagents > 0) {
-		if (
-			phase === "idle" ||
-			effectiveAction === "idle" ||
-			effectiveAction === "subagents"
-		) {
+		if (phase === "idle" || effectiveAction === "idle" || effectiveAction === "subagents") {
 			return `${subagents} subagent${subagents === 1 ? "" : "s"} running`;
 		}
 		return `${formatActionName(effectiveAction, phase)} (${subagents} subagent${subagents === 1 ? "" : "s"})`;
@@ -97,10 +89,7 @@ export function formatAction(
 	return formatActionName(effectiveAction, phase);
 }
 
-function formatActionName(
-	effectiveAction: PresenceAction,
-	phase: PresencePhase = "idle",
-): string {
+function formatActionName(effectiveAction: PresenceAction, phase: PresencePhase = "idle"): string {
 	switch (effectiveAction) {
 		case "thinking":
 			return "Thinking";
@@ -131,9 +120,7 @@ function formatActionName(
  * Pure tool action classifier based only on the tool name identifier.
  * NEVER inspects tool arguments, command strings, filenames, or outputs.
  */
-export function classifyToolAction(
-	toolName: string | undefined,
-): PresenceAction {
+export function classifyToolAction(toolName: string | undefined): PresenceAction {
 	if (!toolName) return "tools";
 	const normalized = toolName.trim().toLowerCase().replace(/[-_]/g, " ");
 
@@ -236,9 +223,7 @@ const ACTION_PRIORITY: Record<PresenceAction, number> = {
 	idle: 0,
 };
 
-export function pickHighestPriorityAction(
-	actions: Iterable<PresenceAction>,
-): PresenceAction {
+export function pickHighestPriorityAction(actions: Iterable<PresenceAction>): PresenceAction {
 	let bestAction: PresenceAction = "tools";
 	let highestPriority = -1;
 	for (const action of actions) {

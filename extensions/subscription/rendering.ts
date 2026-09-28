@@ -169,8 +169,7 @@ export function formatUsageDetails(
 		}
 	}
 	if (typeof normalized.resetsLeft === "number") {
-		const label =
-			normalized.resetsLeft === 1 ? "1 left" : `${normalized.resetsLeft} left`;
+		const label = normalized.resetsLeft === 1 ? "1 left" : `${normalized.resetsLeft} left`;
 		lines.push(`\u2022 resets: ${label}`);
 	}
 	if (normalized.balance) {
@@ -184,7 +183,11 @@ export function formatUsageDetails(
 		lines.push(`\u2022 deepseek pool: ${tag}`);
 		lines.push(`\u2022 peak windows: ${formatDeepSeekPeakWindows(now)}`);
 	}
-	if (typeof options.fetchedAt === "number" && Number.isFinite(options.fetchedAt) && options.fetchedAt > 0) {
+	if (
+		typeof options.fetchedAt === "number" &&
+		Number.isFinite(options.fetchedAt) &&
+		options.fetchedAt > 0
+	) {
 		lines.push(`Updated ${fetchAgeLabel(options.fetchedAt, now)}`);
 	}
 	return lines.join("\n");

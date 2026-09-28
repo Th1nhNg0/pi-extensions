@@ -23,13 +23,9 @@ export interface CodexUsageResponse {
 	} | null;
 }
 
-export function codexWindowKey(
-	w: { limit_window_seconds?: number },
-	fallback = "primary",
-): string {
+export function codexWindowKey(w: { limit_window_seconds?: number }, fallback = "primary"): string {
 	const sec = w.limit_window_seconds;
-	if (typeof sec !== "number" || !Number.isFinite(sec) || sec <= 0)
-		return fallback;
+	if (typeof sec !== "number" || !Number.isFinite(sec) || sec <= 0) return fallback;
 	if (sec >= 14_400 && sec <= 21_600) return "5h"; // ~5h (18000s)
 	if (sec >= 72_000 && sec <= 100_000) return "daily"; // ~24h (86400s)
 	if (sec >= 500_000 && sec <= 700_000) return "weekly"; // ~7d (604800s)

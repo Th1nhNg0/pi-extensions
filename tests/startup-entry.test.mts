@@ -16,22 +16,24 @@ test("deferred cores preserve registration order and replay every session_start 
 	const calls: string[] = [];
 	let loads = 0;
 
-	const sessionStarts = await registerDeferredCores(pi, [{
-		name: "core",
-		load: async () => {
-			loads += 1;
-			return {
-				default: (deferredPi) => {
-					const events = deferredPi as unknown as {
-						on(event: string, handler: () => void): void;
-					};
-					events.on("session_start", () => calls.push("first"));
-					events.on("session_start", () => calls.push("second"));
-					events.on("agent_start", () => calls.push("forwarded"));
-				},
-			};
+	const sessionStarts = await registerDeferredCores(pi, [
+		{
+			name: "core",
+			load: async () => {
+				loads += 1;
+				return {
+					default: (deferredPi) => {
+						const events = deferredPi as unknown as {
+							on(event: string, handler: () => void): void;
+						};
+						events.on("session_start", () => calls.push("first"));
+						events.on("session_start", () => calls.push("second"));
+						events.on("agent_start", () => calls.push("forwarded"));
+					},
+				};
+			},
 		},
-	}]);
+	]);
 
 	assert.equal(loads, 1);
 	assert.equal(sessionStarts.length, 2);
@@ -80,7 +82,12 @@ test("a core that fails to load or register does not disable the others", async 
 		pi,
 		[
 			{ name: "before", load: async () => healthy("before") },
-			{ name: "broken-import", load: async () => { throw new Error("missing dependency"); } },
+			{
+				name: "broken-import",
+				load: async () => {
+					throw new Error("missing dependency");
+				},
+			},
 			{
 				name: "broken-register",
 				load: async () => ({
@@ -98,7 +105,8 @@ test("a core that fails to load or register does not disable the others", async 
 		(message) => logged.push(message),
 	);
 
-	for (const handler of sessionStarts) await handler({ type: "session_start" }, {} as ExtensionContext);
+	for (const handler of sessionStarts)
+		await handler({ type: "session_start" }, {} as ExtensionContext);
 	assert.deepEqual(calls, ["before", "after"]);
 	assert.deepEqual(logged, [
 		"[startup-entry] failed to load broken-import:",

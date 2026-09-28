@@ -74,11 +74,8 @@ export interface ThroughputPrefs {
 
 const DEFAULT_PREFS: ThroughputPrefs = { mode: "on" };
 
-export function normalizeThroughputMode(
-	value: unknown,
-): ThroughputMode | undefined {
-	return typeof value === "string" &&
-		(THROUGHPUT_MODES as readonly string[]).includes(value)
+export function normalizeThroughputMode(value: unknown): ThroughputMode | undefined {
+	return typeof value === "string" && (THROUGHPUT_MODES as readonly string[]).includes(value)
 		? (value as ThroughputMode)
 		: undefined;
 }
@@ -98,9 +95,7 @@ export const THROUGHPUT_SPECS: readonly CommandSpec[] = [
 
 /** Provider usage counts: finite and strictly positive, else undefined. */
 export function positiveNumber(value: unknown): number | undefined {
-	return typeof value === "number" && Number.isFinite(value) && value > 0
-		? value
-		: undefined;
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 /**
@@ -149,10 +144,7 @@ export function ageLabel(elapsedMs: number): string {
 }
 
 /** Footer text: the decode rate alone, prefixed with `~` while estimated. */
-export function rateStatusText(
-	tokensPerSecond: number,
-	approximate: boolean,
-): string {
+export function rateStatusText(tokensPerSecond: number, approximate: boolean): string {
 	return `${approximate ? "~" : ""}${Math.max(0, tokensPerSecond).toFixed(1)} tok/s`;
 }
 
@@ -337,7 +329,6 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 		startedLabel = {};
 	}
 
-
 	pi.on("session_start", async (_event, ctx) => {
 		clearMeasurement();
 		lastRun = undefined;
@@ -415,11 +406,7 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 		// A message Pi finalized without any observed stream or usage (for
 		// example a restored transcript entry) measured nothing; keep the
 		// previous line rather than replacing it with an empty one.
-		if (
-			observedTtft === undefined &&
-			outputTokens === undefined &&
-			streamedChars === 0
-		) {
+		if (observedTtft === undefined && outputTokens === undefined && streamedChars === 0) {
 			return;
 		}
 
@@ -452,10 +439,7 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 		if (enabled()) render(ctx, undefined);
 	});
 
-	async function handleToggle(
-		rest: string,
-		ctx: ExtensionCommandContext,
-	): Promise<void> {
+	async function handleToggle(rest: string, ctx: ExtensionCommandContext): Promise<void> {
 		const arg = rest.trim();
 		const parsed = parseMode(arg, THROUGHPUT_MODES);
 		if (arg.length > 0 && !parsed) {
@@ -470,10 +454,7 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 		if (next === "off") {
 			clearMeasurement();
 			render(ctx, undefined);
-			ctx.ui.notify(
-				"Live throughput hidden (/throughput toggle on restores it)",
-				"info",
-			);
+			ctx.ui.notify("Live throughput hidden (/throughput toggle on restores it)", "info");
 			return;
 		}
 		ctx.ui.notify("Live throughput shown", "info");
@@ -507,10 +488,7 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 					return;
 			}
 
-			const hidden =
-				mode === "off"
-					? "\n(Footer hidden — /throughput toggle on to show it)"
-					: "";
+			const hidden = mode === "off" ? "\n(Footer hidden — /throughput toggle on to show it)" : "";
 			ctx.ui.notify(runReadout(lastRun, Date.now()) + hidden, "info");
 		},
 	});

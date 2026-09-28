@@ -66,7 +66,8 @@ export function usageOf(command: string, spec: CommandSpec): string {
 	if (spec.name.length === 0) {
 		return spec.hint ? `${command} ${spec.hint}` : command;
 	}
-	const hint = spec.hint ?? (spec.values && spec.values.length > 0 ? `[${spec.values.join("|")}]` : "");
+	const hint =
+		spec.hint ?? (spec.values && spec.values.length > 0 ? `[${spec.values.join("|")}]` : "");
 	return hint.length > 0 ? `${command} ${spec.name} ${hint}` : `${command} ${spec.name}`;
 }
 
@@ -80,7 +81,11 @@ export function usageLine(command: string, specs: readonly CommandSpec[]): strin
 }
 
 /** One wording for every extension, derived from the same table as the help. */
-export function unknownSubcommand(command: string, sub: string, specs: readonly CommandSpec[]): string {
+export function unknownSubcommand(
+	command: string,
+	sub: string,
+	specs: readonly CommandSpec[],
+): string {
 	return `Unknown subcommand "${sub}". ${usageLine(command, specs)}`;
 }
 
@@ -108,7 +113,10 @@ export function argumentCompletions(
 	}
 
 	const sub = trimmed.slice(0, spaceIndex).toLowerCase();
-	const rest = trimmed.slice(spaceIndex + 1).trimStart().toLowerCase();
+	const rest = trimmed
+		.slice(spaceIndex + 1)
+		.trimStart()
+		.toLowerCase();
 	const spec = specs.find((candidate) => candidate.name.toLowerCase() === sub);
 	const provided = dynamic?.(sub, rest) ?? [];
 	const candidates =
@@ -119,7 +127,9 @@ export function argumentCompletions(
 					label: `${sub} ${value}`,
 					description: spec?.description ?? "",
 				}));
-	const matches = candidates.filter((item) => item.value.toLowerCase().startsWith(`${sub} ${rest}`));
+	const matches = candidates.filter((item) =>
+		item.value.toLowerCase().startsWith(`${sub} ${rest}`),
+	);
 	return matches.length > 0 ? matches : null;
 }
 
@@ -267,11 +277,7 @@ export async function writeTextFileAtomic(filePath: string, contents: string): P
 }
 
 /** Load a preferences file through its normalizer; defaults handle anything odd. */
-export function loadPrefs<T>(
-	fileName: string,
-	normalize: (value: unknown) => T,
-	dir?: string,
-): T {
+export function loadPrefs<T>(fileName: string, normalize: (value: unknown) => T, dir?: string): T {
 	return normalize(readJsonFile(agentFilePath(fileName, dir)));
 }
 

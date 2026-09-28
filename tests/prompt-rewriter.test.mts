@@ -106,7 +106,11 @@ function harness(t: TestContext, options: HarnessOptions = {}) {
 			.filter(([filePath]) => filePath.endsWith("prompt-rewriter-prefs.json"))
 			.map(([filePath, data]) => ({ path: filePath, data }));
 
-	const requests: Array<{ systemPrompt: unknown; userText: string; options: Record<string, unknown> }> = [];
+	const requests: Array<{
+		systemPrompt: unknown;
+		userText: string;
+		options: Record<string, unknown>;
+	}> = [];
 	const statuses = new Map<string, string | undefined>();
 	const notifications: Array<{ text: string; level: string | undefined }> = [];
 	const editorWrites: string[] = [];
@@ -130,7 +134,10 @@ function harness(t: TestContext, options: HarnessOptions = {}) {
 		if (options.streamResult) {
 			return options.streamResult();
 		}
-		return Promise.resolve({ stopReason: "stop", content: [{ type: "text", text: replyText(userText) }] });
+		return Promise.resolve({
+			stopReason: "stop",
+			content: [{ type: "text", text: replyText(userText) }],
+		});
 	};
 
 	const registry: Record<string, unknown> = {
@@ -194,7 +201,10 @@ function harness(t: TestContext, options: HarnessOptions = {}) {
 		},
 		registerCommand: (
 			name: string,
-			command: { description?: string; handler(args: string, ctx: ExtensionCommandContext): Promise<void> },
+			command: {
+				description?: string;
+				handler(args: string, ctx: ExtensionCommandContext): Promise<void>;
+			},
 		) => {
 			commands.set(name, command);
 		},
@@ -280,7 +290,10 @@ test("normalizePrefs falls back to defaults and validates what it reads", () => 
 		context: false,
 	});
 	// Bad values are dropped, never trusted.
-	assert.deepEqual(normalizePrefs({ model: "not-a-ref", context: 3 }), { model: null, context: true });
+	assert.deepEqual(normalizePrefs({ model: "not-a-ref", context: 3 }), {
+		model: null,
+		context: true,
+	});
 	assert.deepEqual(normalizePrefs("nope"), { model: null, context: true });
 });
 
@@ -345,15 +358,24 @@ test("protected tokens cover the things a rewrite must not touch", () => {
 });
 
 test("sanitizeRewrite strips wrappers and rejects unsafe output", () => {
-	const wrapped = sanitizeRewrite("make it better", "```\nImprove the button contrast in src/button.ts.\n```");
+	const wrapped = sanitizeRewrite(
+		"make it better",
+		"```\nImprove the button contrast in src/button.ts.\n```",
+	);
 	assert.equal(wrapped.ok, true);
 	assert.equal(wrapped.ok && wrapped.text, "Improve the button contrast in src/button.ts.");
 
-	const labelled = sanitizeRewrite("make it better", "Rewritten prompt: Improve the button contrast.");
+	const labelled = sanitizeRewrite(
+		"make it better",
+		"Rewritten prompt: Improve the button contrast.",
+	);
 	assert.equal(labelled.ok, true);
 	assert.equal(labelled.ok && labelled.text, "Improve the button contrast.");
 
-	const sentence = sanitizeRewrite("make it better", "Sure, here's the improved prompt: Improve it.");
+	const sentence = sanitizeRewrite(
+		"make it better",
+		"Sure, here's the improved prompt: Improve it.",
+	);
 	assert.equal(sentence.ok, true);
 	assert.equal(sentence.ok && sentence.text, "Improve it.");
 
@@ -366,7 +388,10 @@ test("sanitizeRewrite strips wrappers and rejects unsafe output", () => {
 		reason: "dropped src/a.ts",
 	});
 	assert.equal(
-		sanitizeRewrite("keep ```\ncode\n``` intact", "keep ```\ncode\n``` intact\n\nand more ```\nfence\n```").ok,
+		sanitizeRewrite(
+			"keep ```\ncode\n``` intact",
+			"keep ```\ncode\n``` intact\n\nand more ```\nfence\n```",
+		).ok,
 		false,
 	);
 	assert.deepEqual(sanitizeRewrite("short prompt", `${"padding ".repeat(200)}`), {
@@ -386,11 +411,26 @@ test("sanitizeRewrite strips wrappers and rejects unsafe output", () => {
 test("conversation excerpts stay small, labelled, and reference-only", () => {
 	const branch = [
 		{ type: "custom", customType: "x" },
-		{ type: "message", message: { role: "user", content: [{ type: "text", text: "first question" }] } },
-		{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "answer one" }] } },
-		{ type: "message", message: { role: "toolResult", content: [{ type: "text", text: "ignored" }] } },
-		{ type: "message", message: { role: "user", content: [{ type: "text", text: "y".repeat(900) }] } },
-		{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "answer two" }] } },
+		{
+			type: "message",
+			message: { role: "user", content: [{ type: "text", text: "first question" }] },
+		},
+		{
+			type: "message",
+			message: { role: "assistant", content: [{ type: "text", text: "answer one" }] },
+		},
+		{
+			type: "message",
+			message: { role: "toolResult", content: [{ type: "text", text: "ignored" }] },
+		},
+		{
+			type: "message",
+			message: { role: "user", content: [{ type: "text", text: "y".repeat(900) }] },
+		},
+		{
+			type: "message",
+			message: { role: "assistant", content: [{ type: "text", text: "answer two" }] },
+		},
 	];
 	const excerpt = excerptRecentContext(branch);
 	assert.ok(excerpt);
@@ -400,7 +440,10 @@ test("conversation excerpts stay small, labelled, and reference-only", () => {
 	assert.ok((excerpt!.match(/User:/g) ?? []).length <= 3);
 	assert.ok(excerpt!.length < 3 * 700 + 40, "excerpt stays truncated");
 	assert.equal(excerptRecentContext([]), undefined);
-	assert.equal(excerptRecentContext([{ type: "message", message: { role: "user", content: "  " } }]), undefined);
+	assert.equal(
+		excerptRecentContext([{ type: "message", message: { role: "user", content: "  " } }]),
+		undefined,
+	);
 });
 
 test("the rewrite request carries the request and optional context", () => {
@@ -419,7 +462,10 @@ test("the rewrite request carries the request and optional context", () => {
 
 test("command arguments map to actions", () => {
 	assert.deepEqual(parseRewriteArgs(""), { action: "improve", text: "" });
-	assert.deepEqual(parseRewriteArgs("make it better"), { action: "improve", text: "make it better" });
+	assert.deepEqual(parseRewriteArgs("make it better"), {
+		action: "improve",
+		text: "make it better",
+	});
 	assert.deepEqual(parseRewriteArgs("help"), { action: "help" });
 	assert.deepEqual(parseRewriteArgs("?"), { action: "help" });
 	assert.deepEqual(parseRewriteArgs("last"), { action: "last" });
@@ -472,7 +518,10 @@ test("formatters describe the last outcome and current settings", () => {
 	assert.ok(unavailable.includes("Reason: timed out"));
 	assert.ok(!unavailable.includes("Rewritten:"));
 
-	const help = formatHelp({ model: "openai/gpt-5.2", context: false }, readEnv({ PI_REWRITE_THINKING: "low" }));
+	const help = formatHelp(
+		{ model: "openai/gpt-5.2", context: false },
+		readEnv({ PI_REWRITE_THINKING: "low" }),
+	);
 	assert.ok(help.includes("model: openai/gpt-5.2"));
 	assert.ok(help.includes("context: off"));
 	assert.ok(help.includes("thinking: low"));
@@ -495,7 +544,11 @@ test("the extension registers one command and the session events, nothing else",
 	const h = harness(t);
 	assert.deepEqual([...h.commands.keys()], ["rewrite"]);
 	assert.deepEqual([...h.events.keys()].sort(), ["session_shutdown", "session_start"]);
-	assert.equal(h.events.has("input"), false, "no automatic rewriting: nothing hooks prompt submission");
+	assert.equal(
+		h.events.has("input"),
+		false,
+		"no automatic rewriting: nothing hooks prompt submission",
+	);
 });
 
 // ---------------------------------------------------------------------------
@@ -535,7 +588,6 @@ test("non-interactive modes reject rewrites before making a model call", async (
 	assert.equal(h.requests.length, 0);
 	assert.match(h.errors[0] ?? "", /requires TUI or RPC mode/);
 });
-
 
 test("an already-clear prompt is reported and put back exactly as typed", async (t) => {
 	const h = harness(t, { reply: (request) => request });
@@ -669,7 +721,10 @@ test("an unknown model is rejected before it can be saved", async (t) => {
 });
 
 test("a configured model is used for rewrites and reported by help", async (t) => {
-	const h = harness(t, { env: { PI_REWRITE_MODEL: "openai/gpt-5.2-mini" }, reply: () => "Better prompt." });
+	const h = harness(t, {
+		env: { PI_REWRITE_MODEL: "openai/gpt-5.2-mini" },
+		reply: () => "Better prompt.",
+	});
 	await h.command("help");
 	assert.match(h.lastNotification().text, /model: openai\/gpt-5\.2-mini/);
 	await h.command(ROUGH_PROMPT);
@@ -721,8 +776,14 @@ test("thinking can be handed to the provider default", async (t) => {
 
 test("conversation context is only sent when it is enabled", async (t) => {
 	const branch = [
-		{ type: "message", message: { role: "user", content: [{ type: "text", text: "the parser is broken" }] } },
-		{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "which parser?" }] } },
+		{
+			type: "message",
+			message: { role: "user", content: [{ type: "text", text: "the parser is broken" }] },
+		},
+		{
+			type: "message",
+			message: { role: "assistant", content: [{ type: "text", text: "which parser?" }] },
+		},
 	];
 	const withContext = harness(t, { branch });
 	await withContext.command("that one, obviously");

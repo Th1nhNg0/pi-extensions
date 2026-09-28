@@ -20,7 +20,6 @@ export interface DiscordPresenceTransport {
 	onDisconnected?(handler: () => void): () => void;
 }
 
-
 export const TRANSPORT_ENV = "PI_DISCORD_TRANSPORT";
 export const NPIPERELAY_ENV = "PI_DISCORD_NPIPERELAY";
 
@@ -82,8 +81,7 @@ function isMissingExecutableError(error: unknown): boolean {
  */
 export class WslDiscordIpcTransport extends EventEmitter {
 	private readonly client: TransportOptions["client"];
-	private readonly relayCommand =
-		process.env[NPIPERELAY_ENV]?.trim() || "npiperelay.exe";
+	private readonly relayCommand = process.env[NPIPERELAY_ENV]?.trim() || "npiperelay.exe";
 	private relay: ChildProcess | undefined;
 	private incomingChunks: Buffer[] = [];
 	private incomingBytes = 0;
@@ -249,9 +247,7 @@ export class WslDiscordIpcTransport extends EventEmitter {
 			};
 
 			const onData = (chunk: Buffer | string): void => {
-				this.handleIncomingData(
-					Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk),
-				);
+				this.handleIncomingData(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
 			};
 
 			const onSpawn = (): void => {
@@ -267,10 +263,7 @@ export class WslDiscordIpcTransport extends EventEmitter {
 				if (!settled) fail(error);
 			};
 
-			const onClose = (
-				code: number | null,
-				signal: NodeJS.Signals | null,
-			): void => {
+			const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
 				if (!ready) {
 					fail(
 						new Error(
@@ -337,10 +330,7 @@ export class WslDiscordIpcTransport extends EventEmitter {
 						reason = message;
 					} else {
 						const record = asRecord(message);
-						if (
-							typeof record?.code === "number" &&
-							typeof record.message === "string"
-						)
+						if (typeof record?.code === "number" && typeof record.message === "string")
 							reason = { code: record.code, message: record.message };
 					}
 					this.emit("close", reason);
@@ -357,8 +347,7 @@ export class WslDiscordIpcTransport extends EventEmitter {
 
 	private writePacket(message: unknown, opcode: number): void {
 		const stdin = this.relay?.stdin;
-		if (!stdin || stdin.destroyed)
-			throw new Error("The npiperelay stdin stream is unavailable");
+		if (!stdin || stdin.destroyed) throw new Error("The npiperelay stdin stream is unavailable");
 		const payload = Buffer.from(JSON.stringify(message) ?? "");
 		const packet = Buffer.alloc(8);
 		packet.writeUInt32LE(opcode, 0);
@@ -426,9 +415,7 @@ export async function createDiscordPresenceTransport(
 			? {
 					clientId,
 					transport: {
-						type: WslDiscordIpcTransport as unknown as new (
-							options: TransportOptions,
-						) => Transport,
+						type: WslDiscordIpcTransport as unknown as new (options: TransportOptions) => Transport,
 					},
 				}
 			: { clientId };
@@ -456,4 +443,3 @@ export async function createDiscordPresenceTransport(
 		},
 	};
 }
-

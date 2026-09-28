@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test, { type TestContext } from "node:test";
-import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 import subscriptionUsage, {
 	antigravityCfg,
 	codexCfg,
@@ -36,13 +40,22 @@ function harness(t: TestContext, mode = "bars") {
 	// unmocked provider would attempt a real network request.
 	const fetch = t.mock.method(codexCfg, "fetchUsage", async () => ({ windows: { "5h": 12 } }));
 	const providerFetches = {
-		"opencode-go": t.mock.method(opencodeCfg, "fetchUsage", async () => ({ windows: { rolling: 5 } })),
+		"opencode-go": t.mock.method(opencodeCfg, "fetchUsage", async () => ({
+			windows: { rolling: 5 },
+		})),
 		"openai-codex": fetch,
-		antigravity: t.mock.method(antigravityCfg, "fetchUsage", async () => ({ windows: { "gemini-5h": 8 } })),
-		deepseek: t.mock.method(deepseekCfg, "fetchUsage", async () => ({ windows: { "deepseek-5h": 3 } })),
+		antigravity: t.mock.method(antigravityCfg, "fetchUsage", async () => ({
+			windows: { "gemini-5h": 8 },
+		})),
+		deepseek: t.mock.method(deepseekCfg, "fetchUsage", async () => ({
+			windows: { "deepseek-5h": 3 },
+		})),
 	};
 	const events = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
-	const commands = new Map<string, { handler(args: string, ctx: ExtensionCommandContext): Promise<void> }>();
+	const commands = new Map<
+		string,
+		{ handler(args: string, ctx: ExtensionCommandContext): Promise<void> }
+	>();
 	const statuses = new Map<string, string | undefined>();
 	const ctx = {
 		model: { provider: "openai-codex", id: "gpt-5" },
@@ -53,16 +66,32 @@ function harness(t: TestContext, mode = "bars") {
 		},
 	} as unknown as ExtensionCommandContext;
 	subscriptionUsage({
-		on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => events.set(name, handler),
-		registerCommand: (name: string, command: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> }) => commands.set(name, command),
+		on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) =>
+			events.set(name, handler),
+		registerCommand: (
+			name: string,
+			command: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> },
+		) => commands.set(name, command),
 	} as unknown as ExtensionAPI);
 	async function event(name: string) {
 		await events.get(name)!({}, ctx);
 		await flush();
 	}
-	t.after(async () => { await event("session_shutdown"); });
-	return { watch, unwatch, fetch, providerFetches, statuses, ctx, event, commands,
-		get watchListener() { return watchListener; },
+	t.after(async () => {
+		await event("session_shutdown");
+	});
+	return {
+		watch,
+		unwatch,
+		fetch,
+		providerFetches,
+		statuses,
+		ctx,
+		event,
+		commands,
+		get watchListener() {
+			return watchListener;
+		},
 	};
 }
 
@@ -111,7 +140,12 @@ test("manual refresh while hidden does not fetch, render, or start polling", asy
 test("hiding usage discards an outstanding provider result", async (t) => {
 	const h = harness(t);
 	let finish!: (data: { windows: Record<string, number> }) => void;
-	h.fetch.mock.mockImplementation(() => new Promise<{ windows: Record<string, number> }>((resolve) => { finish = resolve; }));
+	h.fetch.mock.mockImplementation(
+		() =>
+			new Promise<{ windows: Record<string, number> }>((resolve) => {
+				finish = resolve;
+			}),
+	);
 	await h.event("session_start");
 	await h.commands.get("usage")!.handler("toggle off", h.ctx);
 	finish({ windows: { "5h": 12 } });
@@ -126,14 +160,26 @@ test("disk sync cannot restore polling after shutdown during a cache read", asyn
 	const h = harness(t);
 	await h.event("session_start");
 	let finish!: (data: string) => void;
-	t.mock.method(fs.promises, "readFile", () => new Promise<string>((resolve) => { finish = resolve; }));
+	t.mock.method(
+		fs.promises,
+		"readFile",
+		() =>
+			new Promise<string>((resolve) => {
+				finish = resolve;
+			}),
+	);
 	h.watchListener({ mtimeMs: 2 } as fs.Stats, { mtimeMs: 1 } as fs.Stats);
 	t.mock.timers.tick(100);
 	await flush();
 	await h.event("session_shutdown");
-	finish(JSON.stringify({ "openai-codex": {
-		data: { windows: { "5h": 99 } }, fetchedAt: Date.now() + 1,
-	} }));
+	finish(
+		JSON.stringify({
+			"openai-codex": {
+				data: { windows: { "5h": 99 } },
+				fetchedAt: Date.now() + 1,
+			},
+		}),
+	);
 	await flush();
 	assert.equal(h.statuses.get("openai-codex"), undefined);
 	t.mock.timers.tick(600_000);
@@ -146,7 +192,8 @@ test("/usage shows all providers", async (t) => {
 	await h.event("session_start");
 	assert.ok(h.commands.has("usage"));
 	const notices: string[] = [];
-	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) =>
+		notices.push(msg);
 	h.fetch.mock.mockImplementation(async () => ({
 		windows: { "5h": 12, weekly: 34 },
 		resets: { "5h": Date.now() + 3600_000, weekly: Date.now() + 86400_000 },
@@ -167,7 +214,8 @@ test("/usage works while hidden without fetching", async (t) => {
 	const h = harness(t, "off");
 	await h.event("session_start");
 	const notices: string[] = [];
-	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) =>
+		notices.push(msg);
 	await h.commands.get("usage")!.handler("", h.ctx);
 	await flush();
 	assert.equal(h.fetch.mock.callCount(), 0);
@@ -179,7 +227,8 @@ test("/usage toggle cycles footer style", async (t) => {
 	const h = harness(t);
 	await h.event("session_start");
 	const notices: string[] = [];
-	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) =>
+		notices.push(msg);
 	await h.commands.get("usage")!.handler("toggle", h.ctx);
 	await flush();
 	assert.match(notices.at(-1)!, /Subscription usage style: percent/);
@@ -193,7 +242,8 @@ test("/usage refresh force-fetches every provider by default", async (t) => {
 	await h.event("session_start");
 	assert.equal(h.fetch.mock.callCount(), 1);
 	const notices: string[] = [];
-	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) =>
+		notices.push(msg);
 	await h.commands.get("usage")!.handler("refresh", h.ctx);
 	await flush();
 	// Session start fetched the active provider only; the default refresh
@@ -210,7 +260,8 @@ test("/usage refresh <provider> refreshes only that provider", async (t) => {
 	const h = harness(t);
 	await h.event("session_start");
 	const notices: string[] = [];
-	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) =>
+		notices.push(msg);
 	await h.commands.get("usage")!.handler("refresh deepseek", h.ctx);
 	await flush();
 	assert.equal(h.providerFetches.deepseek.mock.callCount(), 1);
@@ -223,7 +274,8 @@ test("/usage refresh active and provider aliases target one provider", async (t)
 	const h = harness(t);
 	await h.event("session_start");
 	const notices: string[] = [];
-	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) =>
+		notices.push(msg);
 	await h.commands.get("usage")!.handler("refresh active", h.ctx);
 	await flush();
 	assert.equal(notices.at(-1), "Usage refreshed for openai-codex");
@@ -239,8 +291,10 @@ test("/usage refresh with an unknown target warns without any request", async (t
 	const h = harness(t);
 	await h.event("session_start");
 	const notices: { msg: string; level?: string }[] = [];
-	(h.ctx.ui as unknown as { notify: (msg: string, level?: string) => void }).notify = (msg, level) =>
-		notices.push({ msg, level });
+	(h.ctx.ui as unknown as { notify: (msg: string, level?: string) => void }).notify = (
+		msg,
+		level,
+	) => notices.push({ msg, level });
 	const before = [h.fetch.mock.callCount(), h.providerFetches.deepseek.mock.callCount()];
 	await h.commands.get("usage")!.handler("refresh bogus", h.ctx);
 	await flush();
@@ -269,7 +323,8 @@ test("a provider without credentials is reported as skipped, not failed", async 
 		throw new MissingCredentialError("no API key (DEEPSEEK_API_KEY or auth.json)");
 	});
 	const notices: string[] = [];
-	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) =>
+		notices.push(msg);
 	await h.commands.get("usage")!.handler("refresh", h.ctx);
 	await flush();
 	assert.match(notices.at(-1)!, /no credentials: deepseek/);
@@ -283,7 +338,8 @@ test("a provider whose fetch rejects is reported as failed", async (t) => {
 		throw new Error("HTTP 503");
 	});
 	const notices: string[] = [];
-	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) =>
+		notices.push(msg);
 	await h.commands.get("usage")!.handler("refresh", h.ctx);
 	await flush();
 	assert.match(notices.at(-1)!, /failed: deepseek/);
@@ -293,7 +349,8 @@ test("/usage help and unknown subcommands notify", async (t) => {
 	const h = harness(t);
 	await h.event("session_start");
 	const notices: string[] = [];
-	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) => notices.push(msg);
+	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) =>
+		notices.push(msg);
 	// Outside TUI, multi-line help goes through the notification channel.
 	Object.assign(h.ctx, { hasUI: true, mode: "rpc" });
 	await h.commands.get("usage")!.handler("help", h.ctx);
@@ -350,7 +407,12 @@ test("toggling usage off aborts active fetch via signal", async (t) => {
 test("concurrent model selections coalesce in-flight fetch without duplicate HTTP requests", async (t) => {
 	const h = harness(t);
 	let finish!: (d: { windows: Record<string, number> }) => void;
-	h.fetch.mock.mockImplementation(async () => new Promise<{ windows: Record<string, number> }>((resolve) => { finish = resolve; }));
+	h.fetch.mock.mockImplementation(
+		async () =>
+			new Promise<{ windows: Record<string, number> }>((resolve) => {
+				finish = resolve;
+			}),
+	);
 
 	await h.event("session_start");
 	assert.equal(h.fetch.mock.callCount(), 1);

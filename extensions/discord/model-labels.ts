@@ -1,10 +1,7 @@
 /** Model capability and user-facing model-label formatting for Discord presence. */
 
 const MAX_ACTIVITY_TEXT_LENGTH = 128;
-export function truncateText(
-	value: string,
-	maxLength = MAX_ACTIVITY_TEXT_LENGTH,
-): string {
+export function truncateText(value: string, maxLength = MAX_ACTIVITY_TEXT_LENGTH): string {
 	const safeValue = value
 		.replace(/[\u0000-\u001f\u007f]/g, " ")
 		.replace(/\s+/g, " ")
@@ -48,10 +45,7 @@ export function formatModelLabel(
 	modelId?: string,
 	thinkingLevel?: string,
 ): string {
-	const base =
-		provider && modelId
-			? `${provider}/${modelId}`
-			: (modelId ?? provider ?? "Pi");
+	const base = provider && modelId ? `${provider}/${modelId}` : (modelId ?? provider ?? "Pi");
 	const effectiveThinking = thinkingLevel?.trim().toLowerCase();
 	const label = effectiveThinking ? `${base} (${effectiveThinking})` : base;
 	return truncateText(label, 96);
@@ -142,15 +136,7 @@ function formatModelWords(value: string, _capitalizeFirst = true): string {
 		.join(" ");
 }
 
-const VALID_THINKING_LEVELS = new Set([
-	"off",
-	"minimal",
-	"low",
-	"medium",
-	"high",
-	"xhigh",
-	"max",
-]);
+const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 /** Human-readable model label for Discord Rich Presence. */
 export function formatDiscordModelLabel(
@@ -161,9 +147,7 @@ export function formatDiscordModelLabel(
 	let effectiveThinking = thinkingLevel?.trim().toLowerCase();
 
 	if (!modelId?.trim()) {
-		const baseLabel = !provider?.trim()
-			? "Pi"
-			: formatProviderFallback(provider);
+		const baseLabel = !provider?.trim() ? "Pi" : formatProviderFallback(provider);
 		if (effectiveThinking) {
 			return truncateText(`${baseLabel} (${effectiveThinking})`, 48);
 		}
@@ -193,10 +177,7 @@ export function formatDiscordModelLabel(
 		baseLabel = raw.toLowerCase();
 	} else {
 		// Convert version numbers separated by dashes (e.g. 4-1 -> 4.1, 3-7 -> 3.7, 2-5 -> 2.5)
-		const transformed = raw.replace(
-			/(?<=[a-zA-Z]|^)-(\d+)-(\d+)(?=-|[a-zA-Z]|$)/g,
-			"-$1.$2",
-		);
+		const transformed = raw.replace(/(?<=[a-zA-Z]|^)-(\d+)-(\d+)(?=-|[a-zA-Z]|$)/g, "-$1.$2");
 
 		let matched = false;
 		for (const [pattern, prefix] of KNOWN_PREFIXES) {

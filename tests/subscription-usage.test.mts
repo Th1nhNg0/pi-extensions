@@ -78,10 +78,7 @@ test("usage payload normalization clamps percentages and drops malformed data", 
 			windows: { okay: 10 },
 		},
 	);
-	assert.equal(
-		normalizeUsageData({ windows: { invalid: Number.NaN } }),
-		undefined,
-	);
+	assert.equal(normalizeUsageData({ windows: { invalid: Number.NaN } }), undefined);
 	assert.equal(normalizeUsageData([]), undefined);
 });
 
@@ -104,10 +101,7 @@ test("codexWindowKey classifies window durations", () => {
 	assert.equal(codexWindowKey({ limit_window_seconds: 2_592_000 }), "monthly");
 	assert.equal(codexWindowKey({ limit_window_seconds: 7_200 }), "2h");
 	assert.equal(codexWindowKey({}, "fallback-key"), "fallback-key");
-	assert.equal(
-		codexWindowKey({ limit_window_seconds: 0 }, "fallback-key"),
-		"fallback-key",
-	);
+	assert.equal(codexWindowKey({ limit_window_seconds: 0 }, "fallback-key"), "fallback-key");
 });
 
 test("parseCodexUsage parses dual-window response (5h + weekly)", () => {
@@ -230,10 +224,7 @@ test("codexCfg.render renders windows without a provider prefix", () => {
 	assert.doesNotMatch(rendered, /Codex|plus/i);
 
 	// Percent style: bare colorized percentages with countdowns.
-	assert.equal(
-		codexCfg.render(data, mockTheme, undefined, "percent"),
-		"5h 5% ~<1m · W 50% ~<1m",
-	);
+	assert.equal(codexCfg.render(data, mockTheme, undefined, "percent"), "5h 5% ~<1m · W 50% ~<1m");
 });
 
 test("codexCfg.render handles weekly-only window", () => {
@@ -282,14 +273,8 @@ test("codexCfg.render displays banked resets when available", () => {
 test("windowSegment renders bars and percent styles", () => {
 	const resets = { k: 1_000_000 + 120_000 };
 	const now = 1_000_000;
-	assert.match(
-		windowSegment(50, resets, "k", mockTheme, "bars", now),
-		/███░░░\s+50% ~2m/,
-	);
-	assert.equal(
-		windowSegment(50, resets, "k", mockTheme, "percent", now),
-		"50% ~2m",
-	);
+	assert.match(windowSegment(50, resets, "k", mockTheme, "bars", now), /███░░░\s+50% ~2m/);
+	assert.equal(windowSegment(50, resets, "k", mockTheme, "percent", now), "50% ~2m");
 });
 
 test("normalizeUsageStyle/Mode/Prefs validate input", () => {
@@ -484,7 +469,10 @@ test("DeepSeek peak billing skips the weekend in full", () => {
 
 test("DeepSeek peak windows expose bounds and local ranges", () => {
 	// Windows stay anchored to the UTC clock regardless of local timezone.
-	assert.deepEqual(DEEPSEEK_PEAK_WINDOWS, [[60, 240], [360, 600]]);
+	assert.deepEqual(DEEPSEEK_PEAK_WINDOWS, [
+		[60, 240],
+		[360, 600],
+	]);
 
 	const t0100 = Date.parse("2026-09-07T01:00:00.000Z");
 	const active = getDeepSeekPeakInfo(t0100);
@@ -496,7 +484,10 @@ test("DeepSeek peak windows expose bounds and local ranges", () => {
 	assert.equal(offPeak.windowEndMs, Date.parse("2026-09-08T04:00:00.000Z"));
 
 	// Local range is a 3-hour span for window 1 and always parses as HH:MM–HH:MM.
-	assert.match(formatLocalTimeRange(active.windowStartMs, active.windowEndMs, t0100), /^\d{2}:\d{2}( [+-]1)?–\d{2}:\d{2}( [+-]1)?$/);
+	assert.match(
+		formatLocalTimeRange(active.windowStartMs, active.windowEndMs, t0100),
+		/^\d{2}:\d{2}( [+-]1)?–\d{2}:\d{2}( [+-]1)?$/,
+	);
 	const label = formatDeepSeekPeakWindows(t0100);
 	assert.match(label, /01:00–04:00 UTC/);
 	assert.match(label, /06:00–10:00 UTC/);
@@ -527,7 +518,6 @@ test("DeepSeek peak windows follow the coming weekday across a DST change", () =
 		if (original === undefined) delete process.env.TZ;
 		else process.env.TZ = original;
 	}
-
 });
 
 test("usesDeepSeekPeakPricing covers the DeepSeek API and DeepSeek models", () => {
@@ -545,14 +535,14 @@ test("formatBalance renders symbols and falls back to the currency code", () => 
 });
 
 test("normalizeUsageData keeps balance-only payloads for pay-as-you-go providers", () => {
-	assert.deepEqual(
-		normalizeUsageData({ windows: {}, balance: { currency: "usd", total: 7.5 } }),
-		{ windows: {}, balance: { currency: "USD", total: 7.5 } },
-	);
-	assert.deepEqual(
-		normalizeUsageData({ balance: { currency: "USD", total: 1 } }),
-		{ windows: {}, balance: { currency: "USD", total: 1 } },
-	);
+	assert.deepEqual(normalizeUsageData({ windows: {}, balance: { currency: "usd", total: 7.5 } }), {
+		windows: {},
+		balance: { currency: "USD", total: 7.5 },
+	});
+	assert.deepEqual(normalizeUsageData({ balance: { currency: "USD", total: 1 } }), {
+		windows: {},
+		balance: { currency: "USD", total: 1 },
+	});
 	// Malformed balances are dropped, and empty payloads still normalize to undefined.
 	assert.equal(normalizeUsageData({ windows: {}, balance: { currency: "USD" } }), undefined);
 	assert.equal(normalizeUsageData({ windows: {}, balance: { total: 5 } }), undefined);
@@ -581,7 +571,15 @@ test("deepseekCfg.render shows the local peak window plus the account balance", 
 	const now = Date.now();
 	const expectedColor = getDeepSeekPeakInfo(now).isPeak ? "warning" : "dim";
 	const colors: string[] = [];
-	deepSeekPeakTag({ fg: (color, text) => { colors.push(color); return text; } }, now);
+	deepSeekPeakTag(
+		{
+			fg: (color, text) => {
+				colors.push(color);
+				return text;
+			},
+		},
+		now,
+	);
 	assert.deepEqual(colors, [expectedColor]);
 });
 
@@ -609,7 +607,10 @@ test("formatUsageDetails reports the DeepSeek balance and both peak windows", ()
 		"deepseek",
 		{ now: Date.parse("2026-09-05T06:00:00.000Z") },
 	);
-	assert.match(weekendText, /• deepseek pool: Off-peak ~1d until peak \(weekend\) — resumes 2026-09-07 01:00 UTC$/m);
+	assert.match(
+		weekendText,
+		/• deepseek pool: Off-peak ~1d until peak \(weekend\) — resumes 2026-09-07 01:00 UTC$/m,
+	);
 });
 
 test("earliestReset falls back to standard interval if expired reset was already fetched", () => {
@@ -624,8 +625,14 @@ test("earliestReset falls back to standard interval if expired reset was already
 
 test("resolveRefreshTargets defaults to every provider and honours narrowing", () => {
 	const all = usageProviderCfgs.map((c) => c.id);
-	assert.deepEqual(resolveRefreshTargets("", usageProviderCfgs)?.map((c) => c.id), all);
-	assert.deepEqual(resolveRefreshTargets("  ALL  ", usageProviderCfgs)?.map((c) => c.id), all);
+	assert.deepEqual(
+		resolveRefreshTargets("", usageProviderCfgs)?.map((c) => c.id),
+		all,
+	);
+	assert.deepEqual(
+		resolveRefreshTargets("  ALL  ", usageProviderCfgs)?.map((c) => c.id),
+		all,
+	);
 	assert.deepEqual(
 		resolveRefreshTargets("active", usageProviderCfgs, "openai-codex")?.map((c) => c.id),
 		["openai-codex"],
@@ -635,15 +642,18 @@ test("resolveRefreshTargets defaults to every provider and honours narrowing", (
 		["opencode-go"],
 	);
 	// Unambiguous aliases resolve to exactly one provider.
-	assert.deepEqual(resolveRefreshTargets("codex", usageProviderCfgs)?.map((c) => c.id), [
-		"openai-codex",
-	]);
-	assert.deepEqual(resolveRefreshTargets("zen", usageProviderCfgs)?.map((c) => c.id), [
-		"opencode-go",
-	]);
-	assert.deepEqual(resolveRefreshTargets("google", usageProviderCfgs)?.map((c) => c.id), [
-		"antigravity",
-	]);
+	assert.deepEqual(
+		resolveRefreshTargets("codex", usageProviderCfgs)?.map((c) => c.id),
+		["openai-codex"],
+	);
+	assert.deepEqual(
+		resolveRefreshTargets("zen", usageProviderCfgs)?.map((c) => c.id),
+		["opencode-go"],
+	);
+	assert.deepEqual(
+		resolveRefreshTargets("google", usageProviderCfgs)?.map((c) => c.id),
+		["antigravity"],
+	);
 });
 
 test("resolveRefreshTargets returns undefined for unresolvable targets", () => {
@@ -671,10 +681,7 @@ test("formatRefreshNotice summarises single and fan-out outcomes", () => {
 		formatRefreshNotice([{ id: "deepseek", outcome: "skipped" }]),
 		/skipped for deepseek \(no credentials\)/,
 	);
-	assert.match(
-		formatRefreshNotice([{ id: "deepseek", outcome: "failed" }]),
-		/failed for deepseek/,
-	);
+	assert.match(formatRefreshNotice([{ id: "deepseek", outcome: "failed" }]), /failed for deepseek/);
 	assert.equal(
 		formatRefreshNotice([
 			{ id: "a", outcome: "fetched" },
@@ -708,7 +715,9 @@ test("envValue returns the first non-empty trimmed variable", async () => {
 });
 
 test("resolveApiKey prefers the environment and names every variable when missing", async () => {
-	const { resolveApiKey, MissingCredentialError } = await import("../extensions/subscription/credentials.ts");
+	const { resolveApiKey, MissingCredentialError } = await import(
+		"../extensions/subscription/credentials.ts"
+	);
 	assert.equal(resolveApiKey("pi-test-no-such-provider", ["KEY"], { KEY: " k " }), "k");
 	assert.throws(
 		() => resolveApiKey("pi-test-no-such-provider", ["KEY_A", "KEY_B"], {}),

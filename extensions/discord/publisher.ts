@@ -80,7 +80,9 @@ export interface PresenceManagerOptions {
 	startedAt?: number;
 	initialUsage?: UsageTotals;
 	initialContext?: ContextSnapshot;
-	createTransport?: (clientId: string) => DiscordPresenceTransport | Promise<DiscordPresenceTransport>;
+	createTransport?: (
+		clientId: string,
+	) => DiscordPresenceTransport | Promise<DiscordPresenceTransport>;
 	stateStore?: PresenceStateStore;
 	logger?: (message: string) => void;
 	now?: () => number;
@@ -128,9 +130,7 @@ export function isRateLimitError(error: unknown): boolean {
 
 export function isRegistryLockError(error: unknown): boolean {
 	if (!error) return false;
-	const message = (
-		error instanceof Error ? error.message : String(error)
-	).toLowerCase();
+	const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
 	return (
 		message.includes("lock") ||
 		message.includes("ownership lost") ||
@@ -143,16 +143,10 @@ function wait(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function awaitWithTimeout<T>(
-	promise: Promise<T>,
-	timeoutMs: number,
-): Promise<T> {
+async function awaitWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const timeout = new Promise<never>((_, reject) => {
-		timer = setTimeout(
-			() => reject(new Error("Discord RPC request timed out")),
-			timeoutMs,
-		);
+		timer = setTimeout(() => reject(new Error("Discord RPC request timed out")), timeoutMs);
 		timer.unref?.();
 	});
 	try {
@@ -215,15 +209,13 @@ export class DiscordPresenceManager {
 	constructor(options: PresenceManagerOptions) {
 		this.clientId = options.clientId;
 		this.stateStore = options.stateStore ?? new FilePresenceStateStore();
-		this.createTransport =
-			options.createTransport ?? createDiscordPresenceTransport;
+		this.createTransport = options.createTransport ?? createDiscordPresenceTransport;
 		this.logger = options.logger ?? defaultLogger;
 		this.now = options.now ?? Date.now;
 		this.heartbeatMs = options.heartbeatMs ?? HEARTBEAT_INTERVAL_MS;
 		this.retryBaseMs = options.retryBaseMs ?? RETRY_BASE_MS;
 		this.retryCapMs = options.retryCapMs ?? RETRY_CAP_MS;
-		this.privacyMode =
-			options.privacyMode ?? parsePrivacyMode(process.env[PRIVACY_ENV]);
+		this.privacyMode = options.privacyMode ?? parsePrivacyMode(process.env[PRIVACY_ENV]);
 		this.readPrivacyMode = options.readPrivacyMode;
 		this.showCost = options.showCost ?? true;
 		this.enableButtons = options.enableButtons;
@@ -254,8 +246,7 @@ export class DiscordPresenceManager {
 			usage: cloneUsage(options.initialUsage ?? emptyUsageTotals()),
 			context: options.initialContext ? { ...options.initialContext } : undefined,
 			activeSubagents:
-				options.initialActiveSubagents !== undefined &&
-				options.initialActiveSubagents > 0
+				options.initialActiveSubagents !== undefined && options.initialActiveSubagents > 0
 					? Math.floor(options.initialActiveSubagents)
 					: undefined,
 			isSubagent: options.isSubagent,
@@ -334,11 +325,7 @@ export class DiscordPresenceManager {
 		await this.refresh();
 	}
 
-	setModel(
-		provider?: string,
-		modelId?: string,
-		thinkingLevel?: string,
-	): Promise<void> {
+	setModel(provider?: string, modelId?: string, thinkingLevel?: string): Promise<void> {
 		if (
 			this.record.provider === provider &&
 			this.record.modelId === modelId &&
@@ -383,9 +370,15 @@ export class DiscordPresenceManager {
 
 	setContextUsage(context: ContextSnapshot | undefined): Promise<void> {
 		const current = this.record.context;
-		if (current === context || (current && context &&
-			current.tokens === context.tokens && current.contextWindow === context.contextWindow &&
-			current.percent === context.percent)) return this.registryDrain ?? Promise.resolve();
+		if (
+			current === context ||
+			(current &&
+				context &&
+				current.tokens === context.tokens &&
+				current.contextWindow === context.contextWindow &&
+				current.percent === context.percent)
+		)
+			return this.registryDrain ?? Promise.resolve();
 		this.record.context = context ? { ...context } : undefined;
 		return this.enqueueRegistryUpdate();
 	}
@@ -421,18 +414,14 @@ export class DiscordPresenceManager {
 		}
 		const records = orderedSessions(state);
 		const publisherLabel = state.publisherId
-			? truncateText(
-					state.sessions[state.publisherId]?.projectName ?? "unknown",
-					96,
-				)
+			? truncateText(state.sessions[state.publisherId]?.projectName ?? "unknown", 96)
 			: "none";
 		const lines = [
 			`Discord presence: ${this.getStatusText()} · Privacy: ${this.privacyMode}`,
 			`Publisher: ${publisherLabel}`,
 			`Sessions: ${records.length}`,
 		];
-		for (const record of records)
-			lines.push(formatDiagnosticSession(record, this.now()));
+		for (const record of records) lines.push(formatDiagnosticSession(record, this.now()));
 		return lines.join("\n");
 	}
 
@@ -441,8 +430,12 @@ export class DiscordPresenceManager {
 		const stopping = this.stopInternal();
 		this.stopPromise = stopping;
 		void stopping.then(
-			() => { if (this.stopPromise === stopping) this.stopPromise = undefined; },
-			() => { if (this.stopPromise === stopping) this.stopPromise = undefined; },
+			() => {
+				if (this.stopPromise === stopping) this.stopPromise = undefined;
+			},
+			() => {
+				if (this.stopPromise === stopping) this.stopPromise = undefined;
+			},
 		);
 		return stopping;
 	}
@@ -508,16 +501,9 @@ export class DiscordPresenceManager {
 
 						await assertOwnership();
 						try {
-							await awaitWithTimeout(
-								transport.clearActivity(),
-								RPC_WRITE_TIMEOUT_MS,
-							);
+							await awaitWithTimeout(transport.clearActivity(), RPC_WRITE_TIMEOUT_MS);
 						} catch (error) {
-							if (
-								attempt === 0 &&
-								isRateLimitError(error) &&
-								transport.isConnected()
-							) {
+							if (attempt === 0 && isRateLimitError(error) && transport.isConnected()) {
 								this.logger(
 									"[discord-presence] Presence cleanup was rate-limited; retrying after backoff.",
 								);
@@ -576,7 +562,9 @@ export class DiscordPresenceManager {
 					void this.enqueueRegistryUpdate();
 				}
 			},
-			() => { if (this.registryDrain === drain) this.registryDrain = undefined; },
+			() => {
+				if (this.registryDrain === drain) this.registryDrain = undefined;
+			},
 		);
 		return drain;
 	}
@@ -606,10 +594,7 @@ export class DiscordPresenceManager {
 		if (waitForPresence) await publish;
 	}
 
-	private enqueuePresencePublish(
-		state: PresenceState,
-		force = false,
-	): Promise<void> {
+	private enqueuePresencePublish(state: PresenceState, force = false): Promise<void> {
 		this.pendingPresenceState = state;
 		this.pendingPresenceForce ||= force;
 		if (force) this.clearPublishTimer();
@@ -655,7 +640,12 @@ export class DiscordPresenceManager {
 			() => {
 				if (this.presenceDrain !== drain) return;
 				this.presenceDrain = undefined;
-				if (this.pendingPresenceState && !this.publishThrottleTimer && !this.disposed && this.publisher) {
+				if (
+					this.pendingPresenceState &&
+					!this.publishThrottleTimer &&
+					!this.disposed &&
+					this.publisher
+				) {
 					void this.enqueuePresencePublish(this.pendingPresenceState);
 				}
 			},
@@ -716,20 +706,14 @@ export class DiscordPresenceManager {
 						return true;
 					}
 					const sendActivity = async (): Promise<void> => {
-						await awaitWithTimeout(
-							transport.setActivity(activity),
-							RPC_WRITE_TIMEOUT_MS,
-						);
+						await awaitWithTimeout(transport.setActivity(activity), RPC_WRITE_TIMEOUT_MS);
 					};
 
 					const deferRateLimit = (): void => {
 						this.consecutiveRateLimits += 1;
 						this.rateLimitBackoffUntil =
 							this.now() +
-							Math.min(
-								RETRY_CAP_MS,
-								RATE_LIMIT_BACKOFF_MS * 2 ** (this.consecutiveRateLimits - 1),
-							);
+							Math.min(RETRY_CAP_MS, RATE_LIMIT_BACKOFF_MS * 2 ** (this.consecutiveRateLimits - 1));
 						// Do not replace a newer update received while this RPC was pending.
 						this.pendingPresenceState ??= state;
 					};
@@ -851,9 +835,7 @@ export class DiscordPresenceManager {
 		}
 	}
 
-	private async handleUnavailable(
-		expectedTransport?: DiscordPresenceTransport,
-	): Promise<void> {
+	private async handleUnavailable(expectedTransport?: DiscordPresenceTransport): Promise<void> {
 		if (
 			this.disposed ||
 			!this.started ||
@@ -863,9 +845,7 @@ export class DiscordPresenceManager {
 			return;
 		this.status = "reconnecting";
 		if (!this.outageWarningShown) {
-			this.logger(
-				"[discord-presence] Discord Desktop is unavailable; retrying in the background.",
-			);
+			this.logger("[discord-presence] Discord Desktop is unavailable; retrying in the background.");
 			this.outageWarningShown = true;
 		}
 		await this.closeTransport(expectedTransport);
@@ -873,12 +853,8 @@ export class DiscordPresenceManager {
 	}
 
 	private scheduleRetry(): void {
-		if (this.disposed || !this.started || !this.publisher || this.retryTimer)
-			return;
-		const delay = Math.min(
-			this.retryCapMs,
-			this.retryBaseMs * 2 ** this.retryAttempt,
-		);
+		if (this.disposed || !this.started || !this.publisher || this.retryTimer) return;
+		const delay = Math.min(this.retryCapMs, this.retryBaseMs * 2 ** this.retryAttempt);
 		this.retryAttempt = Math.min(this.retryAttempt + 1, 30);
 		this.retryTimer = setTimeout(() => {
 			this.retryTimer = undefined;
@@ -893,9 +869,7 @@ export class DiscordPresenceManager {
 		this.retryTimer = undefined;
 	}
 
-	private async closeTransport(
-		expectedTransport?: DiscordPresenceTransport,
-	): Promise<void> {
+	private async closeTransport(expectedTransport?: DiscordPresenceTransport): Promise<void> {
 		const transport = this.transport;
 		if (expectedTransport && transport !== expectedTransport) return;
 		this.transport = undefined;
@@ -915,9 +889,7 @@ export class DiscordPresenceManager {
 		this.status = this.publisher ? "reconnecting" : "standby";
 		if (this.registryWarningShown) return;
 		this.registryWarningShown = true;
-		this.logger(
-			"[discord-presence] Shared session registry is unavailable; retrying.",
-		);
+		this.logger("[discord-presence] Shared session registry is unavailable; retrying.");
 	}
 }
 
@@ -930,16 +902,8 @@ function formatDuration(ms: number): string {
 }
 
 function formatDiagnosticSession(record: SessionRecord, now: number): string {
-	const model = formatModelLabel(
-		record.provider,
-		record.modelId,
-		record.thinkingLevel,
-	);
-	const action = formatAction(
-		record.action,
-		record.phase,
-		record.activeSubagents ?? 0,
-	);
+	const model = formatModelLabel(record.provider, record.modelId, record.thinkingLevel);
+	const action = formatAction(record.action, record.phase, record.activeSubagents ?? 0);
 	const context =
 		record.context?.percent === null || record.context?.percent === undefined
 			? "ctx ?"

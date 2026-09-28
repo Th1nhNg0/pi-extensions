@@ -86,10 +86,7 @@ export function formatPublicMetrics(
 	parts.push(`${formatTokenCount(usage.total)} tok`);
 
 	if (context && context.percent !== null && Number.isFinite(context.percent)) {
-		const clampedPercent = Math.min(
-			100,
-			Math.max(0, Math.round(context.percent)),
-		);
+		const clampedPercent = Math.min(100, Math.max(0, Math.round(context.percent)));
 		parts.push(`ctx ${clampedPercent}%`);
 	}
 
@@ -103,16 +100,8 @@ export function formatPublicMetrics(
 }
 
 export function formatSingleSessionDetails(record: SessionRecord): string {
-	const actionText = formatAction(
-		record.action,
-		record.phase,
-		record.activeSubagents ?? 0,
-	);
-	const modelText = formatDiscordModelLabel(
-		record.provider,
-		record.modelId,
-		record.thinkingLevel,
-	);
+	const actionText = formatAction(record.action, record.phase, record.activeSubagents ?? 0);
+	const modelText = formatDiscordModelLabel(record.provider, record.modelId, record.thinkingLevel);
 	return truncateText(`${actionText} · ${modelText}`);
 }
 
@@ -121,12 +110,7 @@ export function formatSingleSessionState(
 	privacy: PresencePrivacyMode = "strict",
 	showCost = true,
 ): string {
-	const metrics = formatPublicMetrics(
-		record.usage,
-		record.context,
-		privacy,
-		showCost,
-	);
+	const metrics = formatPublicMetrics(record.usage, record.context, privacy, showCost);
 	if (privacy === "project") {
 		const project = truncateText(record.projectName || "project", 48);
 		return truncateText(`${project} · ${metrics}`);
@@ -137,9 +121,7 @@ export function formatSingleSessionState(
 export function summarizeModels(records: readonly SessionRecord[]): string {
 	if (records.length === 0) return "Pi";
 	const labels = new Set(
-		records.map((r) =>
-			formatDiscordModelLabel(r.provider, r.modelId, r.thinkingLevel),
-		),
+		records.map((r) => formatDiscordModelLabel(r.provider, r.modelId, r.thinkingLevel)),
 	);
 	if (labels.size === 1) return labels.values().next().value ?? "Pi";
 	return "multiple models";
@@ -151,9 +133,7 @@ export function formatMultiSessionDetails(
 	showCost = true,
 ): string {
 	const costPart =
-		showCost && summary.usage.cost !== undefined
-			? ` · ${formatCost(summary.usage)}`
-			: "";
+		showCost && summary.usage.cost !== undefined ? ` · ${formatCost(summary.usage)}` : "";
 	return truncateText(
 		`${sessionCount} Pi sessions · ${formatTokenCount(summary.usage.total)} tok${costPart}`,
 	);
@@ -240,8 +220,7 @@ export function attachAssetsAndButtons(
 		if (subagents > 0 && (phase === "idle" || effectiveAction === "idle")) {
 			effectiveAction = "subagents";
 		}
-		let smallKey: string =
-			ACTION_BADGE_URLS[effectiveAction] ?? ACTION_BADGE_URLS.tools;
+		let smallKey: string = ACTION_BADGE_URLS[effectiveAction] ?? ACTION_BADGE_URLS.tools;
 		if (
 			smallImagesEnv &&
 			smallImagesEnv !== "on" &&
@@ -252,8 +231,7 @@ export function attachAssetsAndButtons(
 			smallKey = smallImagesEnv;
 		}
 
-		const smallText =
-			options.smallImageText ?? formatAction(effectiveAction, phase, subagents);
+		const smallText = options.smallImageText ?? formatAction(effectiveAction, phase, subagents);
 
 		if (smallKey.startsWith("http://") || smallKey.startsWith("https://")) {
 			activity.smallImageUrl = smallKey;
@@ -404,10 +382,7 @@ function compareSessions(a: SessionRecord, b: SessionRecord): number {
 	);
 }
 
-export function isActivityEqual(
-	a?: PresenceActivity,
-	b?: PresenceActivity,
-): boolean {
+export function isActivityEqual(a?: PresenceActivity, b?: PresenceActivity): boolean {
 	if (a === b) return true;
 	if (!a || !b) return false;
 	if (
@@ -431,10 +406,7 @@ export function isActivityEqual(
 	if (!aButtons || !bButtons) return false;
 	if (aButtons.length !== bButtons.length) return false;
 	for (let i = 0; i < aButtons.length; i++) {
-		if (
-			aButtons[i]?.label !== bButtons[i]?.label ||
-			aButtons[i]?.url !== bButtons[i]?.url
-		) {
+		if (aButtons[i]?.label !== bButtons[i]?.label || aButtons[i]?.url !== bButtons[i]?.url) {
 			return false;
 		}
 	}
@@ -442,12 +414,8 @@ export function isActivityEqual(
 }
 
 export function orderedSessions(state: PresenceState): SessionRecord[] {
-	const records = Object.values(state.sessions).filter(
-		(r) => !isSubagentRecord(r),
-	);
-	const publisher = state.publisherId
-		? state.sessions[state.publisherId]
-		: undefined;
+	const records = Object.values(state.sessions).filter((r) => !isSubagentRecord(r));
+	const publisher = state.publisherId ? state.sessions[state.publisherId] : undefined;
 	return records.sort((a, b) => {
 		const aActive = a.phase !== "idle" || (a.activeSubagents ?? 0) > 0;
 		const bActive = b.phase !== "idle" || (b.activeSubagents ?? 0) > 0;

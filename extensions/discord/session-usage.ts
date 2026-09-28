@@ -28,11 +28,9 @@ export function extractUsage(message: unknown): UsageDelta | undefined {
 	const cacheWrite = finiteNonNegative(usage.cacheWrite);
 	const explicitTotal = finiteNonNegative(usage.total ?? usage.totalTokens);
 	const total =
-		explicitTotal ??
-		(input ?? 0) + (output ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0);
+		explicitTotal ?? (input ?? 0) + (output ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0);
 	const costRecord = asRecord(usage.cost);
-	const cost =
-		finiteNonNegative(costRecord?.total) ?? finiteNonNegative(usage.cost);
+	const cost = finiteNonNegative(costRecord?.total) ?? finiteNonNegative(usage.cost);
 
 	if (
 		input === undefined &&
@@ -48,17 +46,11 @@ export function extractUsage(message: unknown): UsageDelta | undefined {
 	return { input, output, cacheRead, cacheWrite, total, cost };
 }
 
-export function mergeUsageTotals(
-	base: UsageTotals,
-	delta: UsageDelta,
-): UsageTotals {
+export function mergeUsageTotals(base: UsageTotals, delta: UsageDelta): UsageTotals {
 	const hasCost = delta.cost !== undefined;
 	const deltaTotal =
 		delta.total ??
-		(delta.input ?? 0) +
-			(delta.output ?? 0) +
-			(delta.cacheRead ?? 0) +
-			(delta.cacheWrite ?? 0);
+		(delta.input ?? 0) + (delta.output ?? 0) + (delta.cacheRead ?? 0) + (delta.cacheWrite ?? 0);
 	return {
 		input: base.input + (delta.input ?? 0),
 		output: base.output + (delta.output ?? 0),
@@ -70,9 +62,7 @@ export function mergeUsageTotals(
 	};
 }
 
-export function collectUsageFromEntries(
-	entries: readonly unknown[],
-): UsageTotals {
+export function collectUsageFromEntries(entries: readonly unknown[]): UsageTotals {
 	let totals = emptyUsageTotals();
 	for (const entry of entries) {
 		const record = asRecord(entry);
@@ -108,12 +98,9 @@ export function summarizeRecords(records: readonly SessionRecord[]): AggregateSu
 		usage.cacheRead += record.usage.cacheRead;
 		usage.cacheWrite += record.usage.cacheWrite;
 		usage.total += record.usage.total;
-		if (record.usage.cost !== undefined)
-			usage.cost = (usage.cost ?? 0) + record.usage.cost;
+		if (record.usage.cost !== undefined) usage.cost = (usage.cost ?? 0) + record.usage.cost;
 		usage.costComplete =
-			usage.costComplete &&
-			record.usage.costComplete &&
-			record.usage.cost !== undefined;
+			usage.costComplete && record.usage.costComplete && record.usage.cost !== undefined;
 		subagentCount += record.activeSubagents ?? 0;
 	}
 	return {
@@ -135,9 +122,7 @@ export function formatTokenCount(tokens: number): string {
 	return Math.round(tokens).toString();
 }
 
-export function formatCost(
-	usage: Pick<UsageTotals, "cost" | "costComplete">,
-): string {
+export function formatCost(usage: Pick<UsageTotals, "cost" | "costComplete">): string {
 	if (usage.cost === undefined) return "cost n/a";
 	const prefix = usage.costComplete ? "$" : "~$";
 	return `${prefix}${usage.cost.toFixed(2)}`;

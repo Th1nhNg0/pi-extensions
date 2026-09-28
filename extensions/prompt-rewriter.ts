@@ -52,9 +52,21 @@ const STATUS_KEY = "prompt-rewriter";
 
 /** One table drives help, completions, and unknown-subcommand usage. */
 export const REWRITE_SPECS: readonly CommandSpec[] = [
-	{ name: "", hint: "<prompt>", description: "rewrite the prompt and load the result into the editor" },
-	{ name: "model", hint: "<provider/id>|reset", description: "rewrite model (default: session model)" },
-	{ name: "context", values: ["on", "off"], description: "include a short recent-conversation excerpt" },
+	{
+		name: "",
+		hint: "<prompt>",
+		description: "rewrite the prompt and load the result into the editor",
+	},
+	{
+		name: "model",
+		hint: "<provider/id>|reset",
+		description: "rewrite model (default: session model)",
+	},
+	{
+		name: "context",
+		values: ["on", "off"],
+		description: "include a short recent-conversation excerpt",
+	},
 	{ name: "last", description: "show the last rewrite" },
 	{ name: "help", description: "show this help" },
 ];
@@ -86,7 +98,6 @@ Make it actionable:
 - Do not add conditions, policies, or alternatives the author did not ask for (no "ask me first", no extra options to choose from).
 
 Length: keep it close to the original, never more than about twice as long.`;
-
 
 /** Thinking levels accepted by the provider-neutral stream options. */
 export type RewriteThinking = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -137,7 +148,6 @@ function asBoolean(value: unknown): boolean | undefined {
 	}
 	return undefined;
 }
-
 
 export function normalizeThinking(value: unknown): RewriteThinking | "default" | undefined {
 	if (typeof value !== "string") {
@@ -193,8 +203,8 @@ export function resolvePrefs(fileValue: unknown, env: RewriteEnv): RewritePrefs 
 	const prefs = normalizePrefs(fileValue);
 	const hasModelPref = Boolean(
 		record &&
-		Object.prototype.hasOwnProperty.call(record, "model") &&
-		(record.model === null || normalizeModelRef(record.model) !== undefined),
+			Object.prototype.hasOwnProperty.call(record, "model") &&
+			(record.model === null || normalizeModelRef(record.model) !== undefined),
 	);
 	const hasContextPref = typeof record?.context === "boolean";
 	return {
@@ -202,7 +212,6 @@ export function resolvePrefs(fileValue: unknown, env: RewriteEnv): RewritePrefs 
 		context: hasContextPref ? prefs.context : (env.context ?? prefs.context),
 	};
 }
-
 
 export function parseModelRef(value: string): { provider: string; modelId: string } | undefined {
 	const trimmed = value.trim();
@@ -259,7 +268,9 @@ export function protectedTokens(text: string): string[] {
 	];
 	const unique = [...new Set(tokens)];
 	// Drop nested tokens ("a.ts" inside "src/a.ts") so reports name the longest form.
-	return unique.filter((token) => !unique.some((other) => other !== token && other.includes(token)));
+	return unique.filter(
+		(token) => !unique.some((other) => other !== token && other.includes(token)),
+	);
 }
 
 export function missingProtectedTokens(original: string, candidate: string): string[] {
@@ -294,7 +305,10 @@ function stripLeadingLabel(text: string): string {
 	if (!LEADING_LABEL.test(firstLine)) {
 		return withoutSentence;
 	}
-	return firstLine.replace(LEADING_LABEL, "") + (firstLineEnd === -1 ? "" : withoutSentence.slice(firstLineEnd));
+	return (
+		firstLine.replace(LEADING_LABEL, "") +
+		(firstLineEnd === -1 ? "" : withoutSentence.slice(firstLineEnd))
+	);
 }
 
 const ASSISTANT_VOICE =
@@ -472,7 +486,11 @@ interface RewriteRegistryBridge {
 		context: unknown,
 		options?: Record<string, unknown>,
 	): { result(): Promise<MessageLike> };
-	complete?(model: ModelLike, context: unknown, options?: Record<string, unknown>): Promise<MessageLike>;
+	complete?(
+		model: ModelLike,
+		context: unknown,
+		options?: Record<string, unknown>,
+	): Promise<MessageLike>;
 }
 
 function registryBridge(ctx: ExtensionContext): RewriteRegistryBridge {
@@ -557,7 +575,8 @@ export async function rewritePrompt(options: RewriteOptions): Promise<RewriteOut
 		options.signal?.addEventListener("abort", cancel, { once: true });
 	}
 
-	const reasoning = options.thinking && options.thinking !== "default" ? options.thinking : undefined;
+	const reasoning =
+		options.thinking && options.thinking !== "default" ? options.thinking : undefined;
 	const bridge = registryBridge(options.ctx);
 	const baseOptions: Record<string, unknown> = {
 		signal: controller.signal,
@@ -597,9 +616,11 @@ export async function rewritePrompt(options: RewriteOptions): Promise<RewriteOut
 
 	try {
 		const pending = useStream
-			? bridge
-					.streamSimple!(resolved.model, context, reasoning ? { ...baseOptions, reasoning } : baseOptions)
-					.result()
+			? bridge.streamSimple!(
+					resolved.model,
+					context,
+					reasoning ? { ...baseOptions, reasoning } : baseOptions,
+				).result()
 			: bridge.complete!(resolved.model, context, baseOptions);
 		const message = await Promise.race([pending, timeoutPromise]);
 		if (!message) {
@@ -754,7 +775,6 @@ function canEdit(ctx: ExtensionContext): boolean {
 	return ctx.hasUI && (ctx.mode === "tui" || ctx.mode === "rpc");
 }
 
-
 /** Run one rewrite with a transient footer line as its progress indicator. */
 async function runWithStatus(
 	state: RewriterState,
@@ -815,7 +835,6 @@ function clearTransientStatus(ctx: ExtensionContext): void {
 	}
 }
 
-
 function contextFor(state: RewriterState, ctx: ExtensionContext): string | undefined {
 	if (!currentPrefs(state).context) {
 		return undefined;
@@ -847,7 +866,12 @@ async function runRewrite(
 	state.last = {
 		kind: outcome.status,
 		original: text,
-		text: outcome.status === "rewritten" ? outcome.text : outcome.status === "unchanged" ? outcome.text : undefined,
+		text:
+			outcome.status === "rewritten"
+				? outcome.text
+				: outcome.status === "unchanged"
+					? outcome.text
+					: undefined,
 		reason: outcome.reason,
 		at: Date.now(),
 	};
@@ -893,7 +917,11 @@ async function improveDraft(
 		notify(ctx, "Rewrite cancelled — your draft is back in the editor.", "info");
 		return;
 	}
-	notify(ctx, `Rewrite unavailable: ${outcome.reason ?? "unknown reason"}. Your draft is back in the editor.`, "warning");
+	notify(
+		ctx,
+		`Rewrite unavailable: ${outcome.reason ?? "unknown reason"}. Your draft is back in the editor.`,
+		"warning",
+	);
 }
 
 export default function promptRewriter(pi: ExtensionAPI): void {
@@ -914,7 +942,6 @@ export default function promptRewriter(pi: ExtensionAPI): void {
 			await runRewriteCommand(state, args, ctx);
 		},
 	});
-
 }
 
 async function runRewriteCommand(
