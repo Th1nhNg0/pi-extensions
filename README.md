@@ -426,6 +426,18 @@ To reload extensions during an active Pi session:
 
 ---
 
+## 🛠️ Development
+
+```bash
+npm ci
+npm run check        # format:check + typecheck + tests (what CI runs)
+npm run format       # apply Biome formatting
+```
+
+Each extension is loaded independently at `session_start`: if one fails to import or register, it is logged and skipped while the others keep working.
+
+---
+
 ## 📄 License
 
 [MIT](LICENSE) © [Thinh Ngo](https://github.com/Th1nhNg0)
