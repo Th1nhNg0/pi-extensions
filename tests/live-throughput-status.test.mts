@@ -102,10 +102,8 @@ function harness(t: TestContext, options: HarnessOptions = {}) {
 	} as unknown as ExtensionCommandContext;
 
 	liveThroughput({
-		on: (
-			name: string,
-			handler: (event: unknown, ctx: ExtensionContext) => unknown,
-		) => events.set(name, handler),
+		on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) =>
+			events.set(name, handler),
 		registerCommand: (
 			name: string,
 			command: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> },
@@ -166,11 +164,7 @@ async function beginTurn(h: Harness): Promise<void> {
 	await h.fire("message_start", { message: assistant });
 }
 
-async function sendDelta(
-	h: Harness,
-	chars: number,
-	type = "text_delta",
-): Promise<void> {
+async function sendDelta(h: Harness, chars: number, type = "text_delta"): Promise<void> {
 	await h.fire("message_update", {
 		message: assistant,
 		assistantMessageEvent: { type, delta: "x".repeat(chars) },
@@ -185,11 +179,7 @@ async function endTurn(h: Harness, usage: unknown): Promise<void> {
  * One assistant turn: 400 chars at t+1.24s (the TTFT), then 400 more a second
  * later — a 1.0s decode window carrying 200 estimated tokens.
  */
-async function streamTurn(
-	h: Harness,
-	t: TestContext,
-	usage: unknown = {},
-): Promise<void> {
+async function streamTurn(h: Harness, t: TestContext, usage: unknown = {}): Promise<void> {
 	await beginTurn(h);
 	t.mock.timers.tick(1_240);
 	await sendDelta(h, 400);
@@ -443,7 +433,6 @@ test("model switches drop the stale rate and measure anew", async (t) => {
 	assert.equal(assertRateOnly(h.text()), "~200.0 tok/s");
 	await endTurn(h, {});
 
-
 	await h.command("");
 	assert.match(h.lastNotification().text, /• TTFT: 0\.75s/);
 });
@@ -524,19 +513,10 @@ test("finalRateText prefers usage, then the estimate, then nothing", () => {
 		finalRateText({ outputTokens: 5, streamedChars: 400, decodeSeconds: 2 }),
 		"2.0 tok/s",
 	);
-	assert.equal(
-		finalRateText({ streamedChars: 400, decodeSeconds: 2 }),
-		"~50.0 tok/s",
-	);
-	assert.equal(
-		finalRateText({ outputTokens: 1, decodeSeconds: 0, streamedChars: 0 }),
-		undefined,
-	);
+	assert.equal(finalRateText({ streamedChars: 400, decodeSeconds: 2 }), "~50.0 tok/s");
+	assert.equal(finalRateText({ outputTokens: 1, decodeSeconds: 0, streamedChars: 0 }), undefined);
 	assert.equal(finalRateText({ streamedChars: 0 }), undefined);
-	assert.equal(
-		processedInputTokens({ uncachedInputTokens: 10, cacheWriteTokens: 5 }),
-		15,
-	);
+	assert.equal(processedInputTokens({ uncachedInputTokens: 10, cacheWriteTokens: 5 }), 15);
 });
 
 test("compact, ageLabel, normalizePrefs, and runReadout handle edge inputs", () => {
@@ -551,15 +531,9 @@ test("compact, ageLabel, normalizePrefs, and runReadout handle edge inputs", () 
 	assert.deepEqual(normalizePrefs(undefined), { mode: "on" });
 	assert.deepEqual(normalizePrefs({ mode: "off" }), { mode: "off" });
 	assert.deepEqual(normalizePrefs("off"), { mode: "on" });
+	assert.equal(runReadout(undefined, START), "No measurement yet — send a prompt first.");
 	assert.equal(
-		runReadout(undefined, START),
-		"No measurement yet — send a prompt first.",
-	);
-	assert.equal(
-		runReadout(
-			{ provider: "local-llm", model: "qwen3-32b", streamedChars: 0, at: START },
-			START,
-		),
+		runReadout({ provider: "local-llm", model: "qwen3-32b", streamedChars: 0, at: START }, START),
 		[
 			"Live throughput — local-llm • qwen3-32b",
 			"• TTFT: unavailable",

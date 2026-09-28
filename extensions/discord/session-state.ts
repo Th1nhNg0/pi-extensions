@@ -74,11 +74,8 @@ export interface PresenceStateStore {
 	): Promise<T | undefined>;
 }
 
-
 export function finiteNonNegative(value: unknown): number | undefined {
-	return typeof value === "number" && Number.isFinite(value) && value >= 0
-		? value
-		: undefined;
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 export function finiteNumber(value: unknown): number | undefined {
@@ -96,20 +93,16 @@ export function emptyUsageTotals(): UsageTotals {
 	};
 }
 
-export function normalizeContextUsage(
-	value: unknown,
-): ContextSnapshot | undefined {
+export function normalizeContextUsage(value: unknown): ContextSnapshot | undefined {
 	const record = asRecord(value);
 	if (!record) return undefined;
 	const contextWindow = finiteNonNegative(record.contextWindow);
 	if (contextWindow === undefined) return undefined;
 	const tokensValue = record.tokens;
 	const percentValue = record.percent;
-	const percent =
-		percentValue === null ? null : (finiteNumber(percentValue) ?? null);
+	const percent = percentValue === null ? null : (finiteNumber(percentValue) ?? null);
 	return {
-		tokens:
-			tokensValue === null ? null : (finiteNonNegative(tokensValue) ?? null),
+		tokens: tokensValue === null ? null : (finiteNonNegative(tokensValue) ?? null),
 		contextWindow,
 		percent: percent === null ? null : Math.min(100, Math.max(0, percent)),
 	};

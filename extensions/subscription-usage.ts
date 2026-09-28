@@ -42,10 +42,10 @@
 import fs from "node:fs";
 import { asRecord } from "./shared/record-guards.ts";
 import {
-  getCacheFile,
-  loadDiskCache,
-  normalizeUsageData,
-  saveDiskCache,
+	getCacheFile,
+	loadDiskCache,
+	normalizeUsageData,
+	saveDiskCache,
 } from "./subscription/usage-cache.ts";
 import type { UsageBalance, UsageData } from "./subscription/usage-cache.ts";
 export { normalizeUsageData };
@@ -57,24 +57,26 @@ export type { CodexUsageResponse, RateLimitWindowSnapshot };
 import { COOLDOWN_MS, MIN_FETCH_GAP_MS, nextDelay } from "./subscription/refresh-schedule.ts";
 import { parseAntigravityQuota } from "./subscription/antigravity-quota.ts";
 import type { AntigravityQuotaSummary } from "./subscription/antigravity-quota.ts";
-import {
-  OPENCODE_WINDOW_LABELS,
-  parseOpenCodeUsage,
-} from "./subscription/opencode-usage.ts";
+import { OPENCODE_WINDOW_LABELS, parseOpenCodeUsage } from "./subscription/opencode-usage.ts";
 import type { OpenCodeUsageResponse } from "./subscription/opencode-usage.ts";
 import { formatBalance, parseDeepSeekBalance } from "./subscription/balance.ts";
 import type { DeepSeekBalanceResponse } from "./subscription/balance.ts";
 export { formatBalance };
-import { MissingCredentialError, readStoredCredential } from "./subscription/credentials.ts";
+import {
+	MissingCredentialError,
+	envValue,
+	readStoredCredential,
+	resolveApiKey,
+} from "./subscription/credentials.ts";
 export { MissingCredentialError };
 import {
-  bar,
-  detailBar,
-  fetchAgeLabel,
-  formatUsageDetails,
-  joinParts,
-  labeledWindow,
-  windowSegment,
+	bar,
+	detailBar,
+	fetchAgeLabel,
+	formatUsageDetails,
+	joinParts,
+	labeledWindow,
+	windowSegment,
 } from "./subscription/rendering.ts";
 import type { UsageStyle } from "./subscription/rendering.ts";
 export { bar, detailBar, fetchAgeLabel, formatUsageDetails, windowSegment };
@@ -94,7 +96,10 @@ import {
 	unknownSubcommand,
 	type CommandSpec,
 } from "./shared/command-kit.ts";
-import { formatRefreshNotice, resolveRefreshTargets as resolveRefreshTargetsImpl } from "./subscription/refresh-command.ts";
+import {
+	formatRefreshNotice,
+	resolveRefreshTargets as resolveRefreshTargetsImpl,
+} from "./subscription/refresh-command.ts";
 import type { RefreshOutcome, RefreshResult } from "./subscription/refresh-command.ts";
 export { formatRefreshNotice };
 export type { RefreshOutcome, RefreshResult };
@@ -137,8 +142,16 @@ export const USAGE_MODES: readonly UsageMode[] = ["bars", "percent", "off"];
 /** One table drives the help, the completions, and the unknown-subcommand message. */
 export const USAGE_SPECS: readonly CommandSpec[] = [
 	{ name: "", description: "detailed usage for every provider" },
-	{ name: "toggle", values: USAGE_MODES, description: "cycle the footer style: bars → percent → off" },
-	{ name: "refresh", hint: "[all|<provider>|active]", description: "force-refresh providers (default: every one)" },
+	{
+		name: "toggle",
+		values: USAGE_MODES,
+		description: "cycle the footer style: bars → percent → off",
+	},
+	{
+		name: "refresh",
+		hint: "[all|<provider>|active]",
+		description: "force-refresh providers (default: every one)",
+	},
 	{ name: "help", description: "show this help" },
 ];
 
@@ -170,9 +183,6 @@ export function normalizePrefs(value: unknown): UsagePrefs {
 	};
 }
 
-
-
-
 interface ProviderCfg {
 	id: string;
 	fetchUsage: (signal?: AbortSignal) => Promise<UsageData>;
@@ -183,7 +193,6 @@ interface ProviderCfg {
 		style?: UsageStyle,
 	) => string;
 }
-
 
 interface StatusCtx {
 	model?: { provider?: string; id?: string };
@@ -211,7 +220,6 @@ export function cap(s: string): string {
 	return s ? s[0].toUpperCase() + s.slice(1) : s;
 }
 
-
 /** OpenCode Go: rolling / weekly / monthly usage windows. */
 
 function anySignal(a?: AbortSignal, b?: AbortSignal): AbortSignal {
@@ -220,26 +228,40 @@ function anySignal(a?: AbortSignal, b?: AbortSignal): AbortSignal {
 	return AbortSignal.any([a, b]);
 }
 
+const FETCH_TIMEOUT_MS = 10_000;
+
+/** Signal for one provider request: the caller's abort plus a hard timeout. */
+function requestSignal(signal?: AbortSignal): AbortSignal {
+	return anySignal(signal, AbortSignal.timeout(FETCH_TIMEOUT_MS));
+}
+
+/**
+ * One provider request: timeout-bounded, the body drained on a non-2xx status
+ * so the socket is released, and an `${errorPrefix}HTTP <status>` error.
+ */
+async function fetchJson<T>(
+	url: string,
+	init: RequestInit,
+	signal?: AbortSignal,
+	errorPrefix = "",
+): Promise<T> {
+	const res = await fetch(url, { ...init, signal: requestSignal(signal) });
+	if (!res.ok) {
+		await res.body?.cancel().catch(() => undefined);
+		throw new Error(`${errorPrefix}HTTP ${res.status}`);
+	}
+	return (await res.json()) as T;
+}
+
 export const opencodeCfg: ProviderCfg = {
 	id: "opencode-go",
 	async fetchUsage(signal?: AbortSignal) {
-		const rawEnv = process.env.OPENCODE_API_KEY?.trim();
-		const cred = rawEnv ? undefined : readStoredCredential("opencode-go");
-		const key =
-			(rawEnv && rawEnv.length > 0 ? rawEnv : undefined) ??
-			(cred && cred.type === "api_key" ? cred.key : undefined);
-		if (!key)
-			throw new MissingCredentialError("no API key (OPENCODE_API_KEY or auth.json)");
-
-		const res = await fetch("https://opencode.ai/zen/go/v1/usage", {
-			headers: { Authorization: `Bearer ${key}` },
-			signal: anySignal(signal, AbortSignal.timeout(10_000)),
-		});
-		if (!res.ok) {
-			await res.body?.cancel().catch(() => undefined);
-			throw new Error(`HTTP ${res.status}`);
-		}
-		const json = (await res.json()) as OpenCodeUsageResponse;
+		const key = resolveApiKey("opencode-go", ["OPENCODE_API_KEY"]);
+		const json = await fetchJson<OpenCodeUsageResponse>(
+			"https://opencode.ai/zen/go/v1/usage",
+			{ headers: { Authorization: `Bearer ${key}` } },
+			signal,
+		);
 		return parseOpenCodeUsage(json);
 	},
 	render(data, theme, modelId, style = "bars") {
@@ -248,16 +270,7 @@ export const opencodeCfg: ProviderCfg = {
 		for (const k of ["rolling", "weekly", "monthly"] as const) {
 			const val = w[k];
 			if (typeof val === "number") {
-				parts.push(
-					labeledWindow(
-						OPENCODE_WINDOW_LABELS[k],
-						val,
-						data.resets,
-						k,
-						theme,
-						style,
-					),
-				);
+				parts.push(labeledWindow(OPENCODE_WINDOW_LABELS[k], val, data.resets, k, theme, style));
 			}
 		}
 		if (parts.length === 0) return "";
@@ -273,23 +286,12 @@ export const opencodeCfg: ProviderCfg = {
 export const deepseekCfg: ProviderCfg = {
 	id: "deepseek",
 	async fetchUsage(signal?: AbortSignal) {
-		const rawEnv = process.env.DEEPSEEK_API_KEY?.trim();
-		const cred = rawEnv ? undefined : readStoredCredential("deepseek");
-		const key =
-			(rawEnv && rawEnv.length > 0 ? rawEnv : undefined) ??
-			(cred && cred.type === "api_key" ? cred.key : undefined);
-		if (!key)
-			throw new MissingCredentialError("no API key (DEEPSEEK_API_KEY or auth.json)");
-
-		const res = await fetch("https://api.deepseek.com/user/balance", {
-			headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
-			signal: anySignal(signal, AbortSignal.timeout(10_000)),
-		});
-		if (!res.ok) {
-			await res.body?.cancel().catch(() => undefined);
-			throw new Error(`HTTP ${res.status}`);
-		}
-		const json = (await res.json()) as DeepSeekBalanceResponse;
+		const key = resolveApiKey("deepseek", ["DEEPSEEK_API_KEY"]);
+		const json = await fetchJson<DeepSeekBalanceResponse>(
+			"https://api.deepseek.com/user/balance",
+			{ headers: { Authorization: `Bearer ${key}`, Accept: "application/json" } },
+			signal,
+		);
 		const balance = parseDeepSeekBalance(json);
 		return { windows: {}, balance };
 	},
@@ -308,34 +310,29 @@ const CODEX_WINDOW_LABELS: Record<string, string> = {
 	daily: "1d",
 };
 
+const CODEX_BROWSER_USER_AGENT =
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
 export const codexCfg: ProviderCfg = {
 	id: "openai-codex",
 	async fetchUsage(signal?: AbortSignal) {
-		const fromEnv = (
-			process.env.OPENAI_CODEX_TOKEN ||
-			process.env.CODEX_ACCESS_TOKEN ||
-			process.env.CHATGPT_ACCESS_TOKEN
-		)?.trim();
+		const fromEnv = envValue(["OPENAI_CODEX_TOKEN", "CODEX_ACCESS_TOKEN", "CHATGPT_ACCESS_TOKEN"]);
 		const cred = fromEnv ? undefined : readStoredCredential("openai-codex");
-		const access =
-			(fromEnv && fromEnv.length > 0 ? fromEnv : undefined) ??
-			(cred && cred.type === "oauth" ? cred.access : undefined);
+		const access = fromEnv ?? (cred?.type === "oauth" ? cred.access : undefined);
 		if (!access) throw new MissingCredentialError("no OAuth token for openai-codex");
 
-		const res = await fetch("https://chatgpt.com/backend-api/codex/usage", {
-			headers: {
-				Authorization: `Bearer ${access}`,
-				"User-Agent":
-					"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-				Accept: "application/json",
+		const json = await fetchJson<CodexUsageResponse>(
+			"https://chatgpt.com/backend-api/codex/usage",
+			{
+				headers: {
+					Authorization: `Bearer ${access}`,
+					// Cloudflare rejects non-browser agents; override when this one goes stale.
+					"User-Agent": envValue(["CODEX_USER_AGENT"]) ?? CODEX_BROWSER_USER_AGENT,
+					Accept: "application/json",
+				},
 			},
-			signal: anySignal(signal, AbortSignal.timeout(10_000)),
-		});
-		if (!res.ok) {
-			await res.body?.cancel().catch(() => undefined);
-			throw new Error(`HTTP ${res.status}`);
-		}
-		const json = (await res.json()) as CodexUsageResponse;
+			signal,
+		);
 		return parseCodexUsage(json);
 	},
 	render(data, theme, _modelId, style = "bars") {
@@ -384,20 +381,10 @@ const ANTIGRAVITY_ENDPOINTS = [
 	"https://daily-cloudcode-pa.sandbox.googleapis.com",
 	"https://cloudcode-pa.googleapis.com",
 ] as const;
-const RETRYABLE_ANTIGRAVITY_STATUSES = new Set([
-	403,
-	404,
-	429,
-	500,
-	502,
-	503,
-	504,
-]);
+const RETRYABLE_ANTIGRAVITY_STATUSES = new Set([403, 404, 429, 500, 502, 503, 504]);
 
 /** Match pi-antigravity's endpoint order so quota reads use the same pool. */
-export function antigravityEndpointCandidates(
-	env: NodeJS.ProcessEnv = process.env,
-): string[] {
+export function antigravityEndpointCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
 	const explicit = env.ANTIGRAVITY_BASE_URL?.trim();
 	return explicit ? [explicit] : [...ANTIGRAVITY_ENDPOINTS];
 }
@@ -417,23 +404,21 @@ async function refreshAntigravityToken(
 	if (cachedAntigravityToken && Date.now() < cachedAntigravityToken.expiresAt) {
 		return cachedAntigravityToken.token;
 	}
-	const res = await fetch("https://oauth2.googleapis.com/token", {
-		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
-		body: new URLSearchParams({
-			client_id: process.env.ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_CLIENT_ID,
-			client_secret:
-				process.env.ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_CLIENT_SECRET,
-			refresh_token: refreshToken,
-			grant_type: "refresh_token",
-		}).toString(),
-		signal: anySignal(signal, AbortSignal.timeout(10_000)),
-	});
-	if (!res.ok) {
-		await res.body?.cancel().catch(() => undefined);
-		throw new Error(`token refresh HTTP ${res.status}`);
-	}
-	const data = (await res.json()) as { access_token?: unknown; expires_in?: unknown };
+	const data = await fetchJson<{ access_token?: unknown; expires_in?: unknown }>(
+		"https://oauth2.googleapis.com/token",
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			body: new URLSearchParams({
+				client_id: process.env.ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_CLIENT_ID,
+				client_secret: process.env.ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_CLIENT_SECRET,
+				refresh_token: refreshToken,
+				grant_type: "refresh_token",
+			}).toString(),
+		},
+		signal,
+		"token refresh ",
+	);
 	if (typeof data.access_token !== "string" || !data.access_token) {
 		throw new Error("token refresh response did not include an access token");
 	}
@@ -449,8 +434,7 @@ async function refreshAntigravityToken(
 export const antigravityCfg: ProviderCfg = {
 	id: "antigravity",
 	async fetchUsage(signal?: AbortSignal) {
-		const fromEnv =
-			process.env.ANTIGRAVITY_TOKEN || process.env.ANTIGRAVITY_API_KEY;
+		const fromEnv = process.env.ANTIGRAVITY_TOKEN || process.env.ANTIGRAVITY_API_KEY;
 		let access = fromEnv?.trim();
 		let refreshToken: string | undefined;
 		let expires = 0;
@@ -467,10 +451,7 @@ export const antigravityCfg: ProviderCfg = {
 		if (!access && !refreshToken)
 			throw new MissingCredentialError("no OAuth token or API key for antigravity");
 
-		if (
-			refreshToken &&
-			(!access || (expires > 0 && Date.now() >= expires - 60_000))
-		) {
+		if (refreshToken && (!access || (expires > 0 && Date.now() >= expires - 60_000))) {
 			try {
 				access = await refreshAntigravityToken(refreshToken, signal);
 			} catch (e) {
@@ -484,8 +465,7 @@ export const antigravityCfg: ProviderCfg = {
 			Authorization: `Bearer ${access}`,
 			"Content-Type": "application/json",
 			Accept: "application/json",
-			"User-Agent":
-				process.env.ANTIGRAVITY_USER_AGENT || "antigravity/1.15.8 windows/amd64",
+			"User-Agent": process.env.ANTIGRAVITY_USER_AGENT || "antigravity/1.15.8 windows/amd64",
 			"X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
 			"Client-Metadata": JSON.stringify({
 				ideType: "ANTIGRAVITY",
@@ -494,23 +474,18 @@ export const antigravityCfg: ProviderCfg = {
 			}),
 		};
 
-		async function queryQuota(
-			token: string,
-		): Promise<{ response: Response; endpoint: string }> {
+		async function queryQuota(token: string): Promise<{ response: Response; endpoint: string }> {
 			let lastResponse: Response | undefined;
 			let lastEndpoint: string | undefined;
 			let lastError: unknown;
 			for (const endpoint of endpoints) {
 				try {
-					const response = await fetch(
-						`${endpoint}/v1internal:retrieveUserQuotaSummary`,
-						{
-							method: "POST",
-							headers: { ...headers, Authorization: `Bearer ${token}` },
-							body: JSON.stringify({}),
-							signal: anySignal(signal, AbortSignal.timeout(10_000)),
-						},
-					);
+					const response = await fetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
+						method: "POST",
+						headers: { ...headers, Authorization: `Bearer ${token}` },
+						body: JSON.stringify({}),
+						signal: requestSignal(signal),
+					});
 					lastResponse = response;
 					lastEndpoint = endpoint;
 					if (response.ok || !RETRYABLE_ANTIGRAVITY_STATUSES.has(response.status)) {
@@ -560,7 +535,7 @@ export const antigravityCfg: ProviderCfg = {
 							pluginType: "GEMINI",
 						},
 					}),
-					signal: anySignal(signal, AbortSignal.timeout(10_000)),
+					signal: requestSignal(signal),
 				});
 				if (resAssist.ok) {
 					const assistJson = (await resAssist.json()) as {
@@ -645,8 +620,8 @@ export function resolveRefreshTargets(
 	arg: string,
 	cfgs: readonly ProviderCfg[],
 	activeProviderId?: string,
- ): ProviderCfg[] | undefined {
- return resolveRefreshTargetsImpl(arg, cfgs, activeProviderId);
+): ProviderCfg[] | undefined {
+	return resolveRefreshTargetsImpl(arg, cfgs, activeProviderId);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -756,11 +731,7 @@ export default function (pi: ExtensionAPI) {
 	function startDiskCacheWatcher(): void {
 		if (cacheWatcherActive) return;
 		try {
-			fs.watchFile(
-				getCacheFile(),
-				{ interval: 1000, persistent: false },
-				onDiskCacheChange,
-			);
+			fs.watchFile(getCacheFile(), { interval: 1000, persistent: false }, onDiskCacheChange);
 			cacheWatcherActive = true;
 		} catch {
 			// Ignore watch error if the cache path is not accessible yet.
@@ -809,15 +780,20 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	interface RefreshOptions {
+		/** Skip the event cooldown (session start, model switch, manual refresh). */
+		force?: boolean;
+		/** Also skip the MIN_FETCH_GAP_MS burst guard and replace an in-flight
+		 *  request, so a manual /usage refresh always performs a live request. */
+		hard?: boolean;
+		/** A timer wake: its delay already encodes the cooldown/backoff policy. */
+		scheduled?: boolean;
+	}
 
-	// `hard` (manual /usage refresh) also bypasses the MIN_FETCH_GAP_MS
-	// burst guard, so one keystroke always performs a live provider request.
 	async function refresh(
 		cfg: ProviderCfg,
 		ctx: StatusCtx,
-		force: boolean,
-		hard = false,
-		scheduled = false,
+		{ force = false, hard = false, scheduled = false }: RefreshOptions = {},
 	): Promise<RefreshOutcome> {
 		const state = cache.get(cfg.id) ?? freshState();
 		cache.set(cfg.id, state);
@@ -855,8 +831,7 @@ export default function (pi: ExtensionAPI) {
 				!force &&
 				!scheduled &&
 				state.lastText !== undefined &&
-				(now - state.lastAttempt < COOLDOWN_MS ||
-					(state.failStreak > 0 && !resetSoon))
+				(now - state.lastAttempt < COOLDOWN_MS || (state.failStreak > 0 && !resetSoon))
 			) {
 				const ui = safeUi(ctx);
 				if (ui && state.lastData) {
@@ -939,7 +914,7 @@ export default function (pi: ExtensionAPI) {
 			state.timerDeadline = undefined;
 			void (async () => {
 				if (!safeUi(ctx) || cache.get(cfg.id) !== state) return;
-				await refresh(cfg, ctx, false, false, true);
+				await refresh(cfg, ctx, { scheduled: true });
 				if (!safeUi(ctx) || cache.get(cfg.id) !== state) return;
 				const model = safeModel(ctx);
 				arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
@@ -952,7 +927,7 @@ export default function (pi: ExtensionAPI) {
 	function poke(cfg: ProviderCfg, ctx: StatusCtx, force: boolean) {
 		void (async () => {
 			if (!safeUi(ctx)) return;
-			const outcome = await refresh(cfg, ctx, force);
+			const outcome = await refresh(cfg, ctx, { force });
 			const s = cache.get(cfg.id);
 			const model = safeModel(ctx);
 			if (s && safeUi(ctx)) {
@@ -996,9 +971,7 @@ export default function (pi: ExtensionAPI) {
 	 * registered below dispatches to these, so every usage control lives
 	 * under one `/usage` command (like `/discord`).
 	 */
-	type UsageCmdCtx = Parameters<
-		Parameters<typeof pi.registerCommand>[1]["handler"]
-	>[1];
+	type UsageCmdCtx = Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1];
 
 	/** `/usage toggle [bars|percent|off]` — cycle the footer style or set it directly. */
 	async function handleUsageToggle(args: string, ctx: UsageCmdCtx): Promise<void> {
@@ -1031,8 +1004,7 @@ export default function (pi: ExtensionAPI) {
 			state.lastText = renderText(cfg, state.lastData, ui, model?.id);
 			renderUi(ui, cfg.id, state.lastText);
 			// Leaving "off" killed this provider's timer — re-arm it.
-			if (!state.timer)
-				arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
+			if (!state.timer) arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
 		} else if (cfg && ui) {
 			// Nothing usable cached (e.g. first reveal after hiding) — fetch now.
 			poke(cfg, ctx, true);
@@ -1049,17 +1021,14 @@ export default function (pi: ExtensionAPI) {
 	 */
 	async function handleUsageRefresh(args: string, ctx: UsageCmdCtx): Promise<void> {
 		if (mode === "off") {
-			ctx.ui.notify(
-				"Subscription usage is hidden; use /usage toggle to enable refreshes",
-				"info",
-			);
+			ctx.ui.notify("Subscription usage is hidden; use /usage toggle to enable refreshes", "info");
 			return;
 		}
 		const targets = resolveRefreshTargets(args, cfgs, safeModel(ctx)?.provider);
 		if (!targets) {
 			ctx.ui.notify(
 				`Unknown usage provider "${args.trim()}". Known: ${cfgs.map((c) => c.id).join(", ")}` +
-				` (or "all"/"active")`,
+					` (or "all"/"active")`,
 				"warning",
 			);
 			return;
@@ -1067,10 +1036,12 @@ export default function (pi: ExtensionAPI) {
 		// Settle every target so one slow or failing provider cannot hide the
 		// outcome of the others. `refresh()` reports rather than throws.
 		const settled = await Promise.allSettled(
-			targets.map(async (cfg): Promise<RefreshResult> => ({
-				id: cfg.id,
-				outcome: await refresh(cfg, ctx, true, true),
-			})),
+			targets.map(
+				async (cfg): Promise<RefreshResult> => ({
+					id: cfg.id,
+					outcome: await refresh(cfg, ctx, { force: true, hard: true }),
+				}),
+			),
 		);
 		const results: RefreshResult[] = settled.map((entry, index) =>
 			entry.status === "fulfilled"
@@ -1099,8 +1070,16 @@ export default function (pi: ExtensionAPI) {
 			argumentCompletions(USAGE_SPECS, prefix, (sub) =>
 				sub === "refresh"
 					? [
-							{ value: "refresh all", label: "refresh all", description: "Force-refresh every usage provider" },
-							{ value: "refresh active", label: "refresh active", description: "Force-refresh the active provider only" },
+							{
+								value: "refresh all",
+								label: "refresh all",
+								description: "Force-refresh every usage provider",
+							},
+							{
+								value: "refresh active",
+								label: "refresh active",
+								description: "Force-refresh the active provider only",
+							},
 							...cfgs.map((c) => ({
 								value: `refresh ${c.id}`,
 								label: `refresh ${c.id}`,
@@ -1108,7 +1087,7 @@ export default function (pi: ExtensionAPI) {
 							})),
 						]
 					: undefined,
-				),
+			),
 		handler: async (args, ctx) => {
 			const { sub, rest } = parseSubcommand(args);
 			switch (sub) {
@@ -1144,7 +1123,7 @@ export default function (pi: ExtensionAPI) {
 			// While hidden (`off`) there are no fetches at all; render from cache.
 			if (activeCfg && mode !== "off") {
 				try {
-					await refresh(activeCfg, ctx, true, true);
+					await refresh(activeCfg, ctx, { force: true, hard: true });
 				} catch {
 					// refresh() already renders footer errors; details fall back to cache below.
 				}

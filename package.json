@@ -17,13 +17,16 @@
     "pi-coding-agent",
     "pi-extension"
   ],
-  "main": "extensions/subscription-usage.ts",
+  "main": "extensions/startup-entry.ts",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19"
   },
   "scripts": {
     "test": "bash scripts/test.sh",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "check": "npm run format:check && npm run typecheck && npm test"
   },
   "pi": {
     "extensions": [
@@ -34,7 +37,11 @@
   "dependencies": {
     "@xhayper/discord-rpc": "1.3.4"
   },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
   "devDependencies": {
+    "@biomejs/biome": "2.5.14",
     "@earendil-works/pi-coding-agent": "*",
     "typescript": "^7.0.2"
   }

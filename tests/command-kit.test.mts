@@ -96,14 +96,20 @@ test("parseSubcommand splits the subcommand from the rest", () => {
 	assert.deepEqual(parseSubcommand("toggle"), { sub: "toggle", rest: "" });
 	assert.deepEqual(parseSubcommand("TOGGLE   off "), { sub: "toggle", rest: "off" });
 	assert.deepEqual(parseSubcommand(" refresh all "), { sub: "refresh", rest: "all" });
-	assert.deepEqual(parseSubcommand("model openai/gpt-5.2"), { sub: "model", rest: "openai/gpt-5.2" });
+	assert.deepEqual(parseSubcommand("model openai/gpt-5.2"), {
+		sub: "model",
+		rest: "openai/gpt-5.2",
+	});
 });
 
 test("usageOf renders the bare command, enum values, and explicit hints", () => {
 	assert.equal(usageOf("/usage", SPECS[0]), "/usage");
 	assert.equal(usageOf("/usage", SPECS[1]), "/usage toggle [bars|percent|off]");
 	assert.equal(usageOf("/usage", SPECS[2]), "/usage refresh [all|<provider>|active]");
-	assert.equal(usageOf("/rewrite", { name: "", description: "", hint: "<prompt>" }), "/rewrite <prompt>");
+	assert.equal(
+		usageOf("/rewrite", { name: "", description: "", hint: "<prompt>" }),
+		"/rewrite <prompt>",
+	);
 });
 
 test("usageLine lists every entry", () => {
@@ -111,10 +117,11 @@ test("usageLine lists every entry", () => {
 		usageLine("/usage", SPECS),
 		"Usage: /usage | toggle [bars|percent|off] | refresh [all|<provider>|active] | help",
 	);
-	assert.equal(usageLine("/discord", [{ name: "status", description: "" }]), "Usage: /discord status");
+	assert.equal(
+		usageLine("/discord", [{ name: "status", description: "" }]),
+		"Usage: /discord status",
+	);
 });
-
-
 
 test("unknownSubcommand reuses the same table as the help", () => {
 	assert.equal(
@@ -128,13 +135,12 @@ test("unknownSubcommand reuses the same table as the help", () => {
 
 test("completions cover both levels and fall back to null", () => {
 	const first = argumentCompletions(SPECS, "to");
-	assert.deepEqual(first, [{ value: "toggle", label: "toggle", description: "cycle the footer style" }]);
+	assert.deepEqual(first, [
+		{ value: "toggle", label: "toggle", description: "cycle the footer style" },
+	]);
 	assert.equal(argumentCompletions(SPECS, "zz"), null);
 	// The bare entry is not a suggestion.
-	assert.deepEqual(
-		argumentCompletions([{ name: "", description: "bare" }], ""),
-		null,
-	);
+	assert.deepEqual(argumentCompletions([{ name: "", description: "bare" }], ""), null);
 
 	const second = argumentCompletions(SPECS, "toggle ");
 	assert.deepEqual(
@@ -248,7 +254,10 @@ test("the agent directory follows PI_CODING_AGENT_DIR", () => {
 		assert.equal(agentDirPath(), path.join(os.homedir(), "elsewhere"));
 
 		delete process.env.PI_CODING_AGENT_DIR;
-		assert.equal(agentFilePath("prefs.json"), path.join(os.homedir(), ".pi", "agent", "prefs.json"));
+		assert.equal(
+			agentFilePath("prefs.json"),
+			path.join(os.homedir(), ".pi", "agent", "prefs.json"),
+		);
 		assert.equal(agentFilePath("prefs.json", "/tmp/dir"), path.join("/tmp/dir", "prefs.json"));
 	} finally {
 		if (previous === undefined) {
@@ -268,7 +277,10 @@ test("loadPrefs reads through the normalizer and defaults on anything odd", (t) 
 	assert.deepEqual(prefs, { mode: "off" });
 
 	fsMock(t, { read: "{oops" });
-	assert.deepEqual(loadPrefs("x-prefs.json", () => ({ mode: "bars" })), { mode: "bars" });
+	assert.deepEqual(
+		loadPrefs("x-prefs.json", () => ({ mode: "bars" })),
+		{ mode: "bars" },
+	);
 });
 
 test("writeJsonFile writes a temp file and renames it over the target", async (t) => {
@@ -278,7 +290,7 @@ test("writeJsonFile writes a temp file and renames it over the target", async (t
 
 	assert.deepEqual(mock.mkdirs, ["/tmp/agent"]);
 	assert.equal(mock.writes.length, 1);
-	assert.match(mock.writes[0].path, /x-prefs\.json\.\d+\.\d+\.tmp$/);
+	assert.match(mock.writes[0].path, /x-prefs\.json\.\d+\.\d+\.[a-z0-9]+\.tmp$/);
 	assert.deepEqual(JSON.parse(mock.writes[0].data), { mode: "off" });
 	assert.equal(mock.writes[0].data.endsWith("\n"), true);
 	assert.deepEqual(mock.renames, [{ from: mock.writes[0].path, to: target }]);

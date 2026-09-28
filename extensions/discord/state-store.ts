@@ -1,14 +1,6 @@
 /** File-backed multi-session registry and its serialized-state protocol. */
 import { randomUUID } from "node:crypto";
-import {
-	mkdir,
-	readFile,
-	rename,
-	rm,
-	stat,
-	utimes,
-	writeFile,
-} from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { agentFilePath } from "../shared/command-kit.ts";
 import {
@@ -53,10 +45,7 @@ function cloneState(state: PresenceState): PresenceState {
 		publisherGeneration: state.publisherGeneration,
 		updatedAt: state.updatedAt,
 		sessions: Object.fromEntries(
-			Object.entries(state.sessions).map(([id, record]) => [
-				id,
-				cloneRecord(record),
-			]),
+			Object.entries(state.sessions).map(([id, record]) => [id, cloneRecord(record)]),
 		),
 	};
 }
@@ -116,17 +105,14 @@ function parseAction(value: unknown): PresenceAction | undefined {
 function parseSessionRecord(value: unknown): SessionRecord | undefined {
 	const record = asRecord(value);
 	if (!record) return undefined;
-	const sessionId =
-		typeof record.sessionId === "string" ? record.sessionId : undefined;
-	const projectName =
-		typeof record.projectName === "string" ? record.projectName : undefined;
+	const sessionId = typeof record.sessionId === "string" ? record.sessionId : undefined;
+	const projectName = typeof record.projectName === "string" ? record.projectName : undefined;
 	const phase = record.phase;
 	const startedAt = finiteNumber(record.startedAt);
 	const lastSeenAt = finiteNumber(record.lastSeenAt);
 	const usage = parseUsage(record.usage);
 	const activeSubagents = finiteNonNegative(record.activeSubagents);
-	const isSubagent =
-		typeof record.isSubagent === "boolean" ? record.isSubagent : undefined;
+	const isSubagent = typeof record.isSubagent === "boolean" ? record.isSubagent : undefined;
 	if (
 		!sessionId ||
 		projectName === undefined ||
@@ -142,26 +128,19 @@ function parseSessionRecord(value: unknown): SessionRecord | undefined {
 		projectName,
 		provider: typeof record.provider === "string" ? record.provider : undefined,
 		modelId: typeof record.modelId === "string" ? record.modelId : undefined,
-		thinkingLevel:
-			typeof record.thinkingLevel === "string" ? record.thinkingLevel : undefined,
+		thinkingLevel: typeof record.thinkingLevel === "string" ? record.thinkingLevel : undefined,
 		phase,
 		action: parseAction(record.action),
 		startedAt: startedAt as number,
 		lastSeenAt: lastSeenAt as number,
 		usage,
 		context: parseContext(record.context),
-		...(activeSubagents !== undefined && activeSubagents > 0
-			? { activeSubagents }
-			: {}),
+		...(activeSubagents !== undefined && activeSubagents > 0 ? { activeSubagents } : {}),
 		...(isSubagent ? { isSubagent: true } : {}),
 	};
 }
 
-function pruneState(
-	state: PresenceState,
-	now: number,
-	staleAfterMs: number,
-): PresenceState {
+function pruneState(state: PresenceState, now: number, staleAfterMs: number): PresenceState {
 	const previousPublisherId = state.publisherId;
 	for (const [sessionId, record] of Object.entries(state.sessions)) {
 		if (now - record.lastSeenAt > staleAfterMs || isSubagentRecord(record)) {
@@ -170,43 +149,33 @@ function pruneState(
 	}
 	if (
 		state.publisherId &&
-		(!state.sessions[state.publisherId] ||
-			isSubagentRecord(state.sessions[state.publisherId]))
+		(!state.sessions[state.publisherId] || isSubagentRecord(state.sessions[state.publisherId]))
 	) {
 		state.publisherId = undefined;
 	}
 	if (!state.publisherId) {
 		const next = Object.values(state.sessions)
 			.filter((r) => !isSubagentRecord(r))
-			.sort(
-				(a, b) =>
-					a.startedAt - b.startedAt || a.sessionId.localeCompare(b.sessionId),
-			)[0];
+			.sort((a, b) => a.startedAt - b.startedAt || a.sessionId.localeCompare(b.sessionId))[0];
 		state.publisherId = next?.sessionId;
 	}
 	if (state.publisherId !== previousPublisherId) state.publisherGeneration += 1;
 	return state;
 }
 
-function parseState(
-	raw: unknown,
-	now: number,
-	staleAfterMs: number,
-): PresenceState {
+function parseState(raw: unknown, now: number, staleAfterMs: number): PresenceState {
 	const record = asRecord(raw);
 	const sessionsRecord = asRecord(record?.sessions);
 	const sessions: Record<string, SessionRecord> = {};
 	if (sessionsRecord) {
 		for (const [sessionId, value] of Object.entries(sessionsRecord)) {
 			const session = parseSessionRecord(value);
-			if (session && session.sessionId === sessionId)
-				sessions[sessionId] = session;
+			if (session && session.sessionId === sessionId) sessions[sessionId] = session;
 		}
 	}
 	const state: PresenceState = {
 		version: 1,
-		publisherId:
-			typeof record?.publisherId === "string" ? record.publisherId : undefined,
+		publisherId: typeof record?.publisherId === "string" ? record.publisherId : undefined,
 		publisherGeneration: finiteNonNegative(record?.publisherGeneration) ?? 0,
 		sessions,
 		updatedAt: finiteNumber(record?.updatedAt) ?? now,
@@ -227,10 +196,7 @@ async function readStateFile(
 	}
 }
 
-async function writeStateFile(
-	filePath: string,
-	state: PresenceState,
-): Promise<void> {
+async function writeStateFile(filePath: string, state: PresenceState): Promise<void> {
 	await mkdir(dirname(filePath), { recursive: true });
 	const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 	const contents = JSON.stringify(state, null, 2);
@@ -294,10 +260,7 @@ async function reclaimFileLock(
 	return true;
 }
 
-async function releaseFileLock(
-	lockPath: string,
-	ownerToken: string,
-): Promise<void> {
+async function releaseFileLock(lockPath: string, ownerToken: string): Promise<void> {
 	await reclaimFileLock(lockPath, ownerToken);
 }
 
@@ -371,10 +334,7 @@ export class FilePresenceStateStore implements PresenceStateStore {
 	private readonly now: () => number;
 	private readonly staleAfterMs: number;
 
-	constructor(
-		filePath = DEFAULT_STATE_PATH,
-		options: FilePresenceStateStoreOptions = {},
-	) {
+	constructor(filePath = DEFAULT_STATE_PATH, options: FilePresenceStateStoreOptions = {}) {
 		this.filePath = filePath;
 		this.lockPath = `${filePath}.lock`;
 		this.publisherLockPath = `${filePath}.publisher.lock`;
@@ -412,10 +372,7 @@ export class FilePresenceStateStore implements PresenceStateStore {
 			this.publisherLockPath,
 			async (assertOwnership) => {
 				const state = await this.read();
-				if (
-					state.publisherId !== sessionId ||
-					state.publisherGeneration !== publisherGeneration
-				) {
+				if (state.publisherId !== sessionId || state.publisherGeneration !== publisherGeneration) {
 					return undefined;
 				}
 				return operation(assertOwnership);
@@ -439,9 +396,7 @@ export class FilePresenceStateStore implements PresenceStateStore {
 			mutation(state, now);
 			pruneState(state, now, this.staleAfterMs);
 
-			const persist = async (
-				assertPublisherLock?: AssertLockOwnership,
-			): Promise<PresenceState> => {
+			const persist = async (assertPublisherLock?: AssertLockOwnership): Promise<PresenceState> => {
 				await assertStateLock();
 				await assertPublisherLock?.();
 				state.updatedAt = now;

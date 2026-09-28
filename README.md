@@ -59,6 +59,19 @@ All controls live under one `/usage` command:
 - `/usage toggle` cycles the status line through bar cells (`bars`), bare percentages (`percent`), and hidden (`off`). Pass a mode to jump straight to it, e.g. `/usage toggle percent`. While hidden, no status is shown and no provider requests are made; toggling back re-renders (or refetches) immediately. The choice persists across sessions in the Pi agent directory.
 - `/usage refresh [all|<provider>|active]` requests fresh usage immediately, bypassing cooldowns. It refreshes **every** configured provider by default; pass `active` for just the provider behind the current model, or a provider id/alias (`opencode-go`, `zen`, `openai-codex`, `codex`, `antigravity`, `deepseek`, …) for a single one. An unknown target warns without issuing any request. Providers with no stored credential are reported as *skipped* rather than failed, and only the provider active at completion owns the footer status and wake timer. When the display is `off`, this command makes no requests; enable it with `/usage toggle` first. Automatic retries recover from temporary provider failures without needing a model switch or reload.
 
+#### Credentials & Environment Variables
+
+Each provider reads its credential from the first non-empty environment variable, then from Pi's `auth.json`:
+
+| Provider | Environment variables | `auth.json` entry |
+| :--- | :--- | :--- |
+| OpenCode Go | `OPENCODE_API_KEY` | `opencode-go` (API key) |
+| DeepSeek API | `DEEPSEEK_API_KEY` | `deepseek` (API key) |
+| OpenAI Codex | `OPENAI_CODEX_TOKEN`, `CODEX_ACCESS_TOKEN`, `CHATGPT_ACCESS_TOKEN` | `openai-codex` (OAuth) |
+| Antigravity | `ANTIGRAVITY_TOKEN`, `ANTIGRAVITY_API_KEY` | `antigravity` (OAuth, auto-refreshed) |
+
+The Codex usage endpoint sits behind Cloudflare and needs a browser User-Agent; set `CODEX_USER_AGENT` to replace the built-in one if it starts getting rejected. Antigravity similarly honors `ANTIGRAVITY_USER_AGENT` and `ANTIGRAVITY_BASE_URL`.
+
 ```text
 Subscription usage — openai-codex (plus) • gpt-5
 • 5h: 1% ░░░░░░ — resets ~4h (2026-09-06 16:00 UTC)
@@ -119,7 +132,7 @@ Discord Presence **never** sends:
 
 #### 🛡️ Privacy Modes
 
-Configure how much metadata is visible in Discord via `/discord privacy [strict|project|developer]` or `PI_DISCORD_PRIVACY`:
+Configure how much metadata is visible in Discord via `/discord privacy [strict|project]` or `PI_DISCORD_PRIVACY`:
 
 * `strict` (**Default**): Hides the project name completely for maximum privacy. Price is included by default when pricing is available.
 
@@ -135,12 +148,7 @@ Configure how much metadata is visible in Discord via `/discord privacy [strict|
   spring2026 · 42k tok · ctx 38% · $0.84
   ```
 
-* `developer`: Explicit developer view including project basename, tokens, context %, and pricing.
-
-  ```text
-  Thinking · Claude 3.7 Sonnet (high)
-  spring2026 · 42k tok · ctx 38% · $0.84
-  ```
+The former `developer` mode showed exactly what `project` shows; saved preferences and `PI_DISCORD_PRIVACY=developer` still work and are treated as `project`.
 
 #### 🎮 Slash Commands
 
@@ -149,7 +157,7 @@ All presence controls are consolidated under a single clean `/discord` command:
 | Command | Usage | Description |
 | :--- | :--- | :--- |
 | `/discord status` | `/discord status` | View live connection status, publisher details, active models, token metrics, and per-session diagnostics. |
-| `/discord privacy` | `/discord privacy [strict\|project\|developer]` | Cycle or set privacy mode immediately without restarting Pi. Persists across sessions. |
+| `/discord privacy` | `/discord privacy [strict\|project]` | Cycle or set privacy mode immediately without restarting Pi. Persists across sessions. |
 | `/discord toggle` | `/discord toggle [on\|off]` | Turn Discord Presence publishing on or off on the fly. Persists in preferences. |
 | `/discord config` | `/discord config` | View an overview of all active settings, client ID, image keys, and preferences. |
 
@@ -160,11 +168,11 @@ All variables are optional; defaults work without configuring any of them. The e
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `PI_DISCORD_CLIENT_ID` | `1541350417143955466` | Custom Discord Application Client ID snowflake. Custom IDs disable default assets unless explicitly configured. |
-| `PI_DISCORD_PRIVACY` | `strict` | Privacy level: `strict`, `project`, or `developer`. |
-| `PI_DISCORD_BUTTONS` | `on` | Set to `off` to disable the default static Discord profile buttons. |
+| `PI_DISCORD_PRIVACY` | `strict` | Privacy level: `strict` or `project`. |
+| `PI_DISCORD_BUTTONS` | `on` | Set to `off` (or `false`/`0`/`no`) to disable the default static Discord profile buttons. |
 | `PI_DISCORD_LARGE_IMAGE` | `pi` | Large Rich Presence asset key or image URL. Set to `off` to disable. |
 | `PI_DISCORD_SMALL_IMAGES` | `on` | Action badge asset key (`thinking`, `reading`, `editing`, `searching`, `running`, `testing`, `browsing`, `idle`), custom asset key, or image URL. Set to `off` to disable. |
-| `PI_DISCORD_SHOW_COST` | `on` | Set to `off` to hide price from public Discord presence. |
+| `PI_DISCORD_SHOW_COST` | `on` | Set to `off` (or `false`/`0`/`no`) to hide price from public Discord presence. |
 | `PI_DISCORD_TRANSPORT` | `auto` | `ipc` or `wsl`; WSL auto-selects the `npiperelay.exe` bridge for Windows Discord. |
 | `PI_DISCORD_NPIPERELAY` | `npiperelay.exe` | Optional Windows path/name of the `npiperelay.exe` bridge used from WSL. |
 | `PI_DISCORD_MIN_INTERVAL_MS` | `15000` | Minimum milliseconds between Discord presence updates. Discord accepts about one Rich Presence update per 15 seconds; lower values can make Discord silently clear the presence or close the RPC socket. |
@@ -287,10 +295,10 @@ sent:   Improve the auth flow in `src/auth.ts`: refresh the session before it ex
 
 | Trigger | Behaviour |
 | :--- | :--- |
-| `/rewrite <prompt>` | Rewrites the given text and loads it into the editor. |
+| `/rewrite <prompt>` | Rewrites the given text and loads it into the editor. A prompt may start with a subcommand word (`help me…`, `context menu is broken`, `model the user table…`): it is only read as a subcommand when the rest matches that subcommand's arguments. |
 | `/rewrite last` | Shows the previous rewrite: original, rewritten, or why it was unavailable. |
 
-Rewrites run while the footer shows `✦ rewriting prompt…`. TUI and RPC modes place the result in the editor for review; print/JSON modes reject the rewrite before making a model call because there is no editor to review it in. Nothing is sent until you press Enter — the improved prompt is an ordinary user message, with no extra conversation message.
+Rewrites run while the footer shows `✦ rewriting prompt…`; in the TUI, **Esc** cancels. TUI and RPC modes place the result in the editor for review, and if the rewrite is unchanged, rejected, cancelled, or fails, your original draft is put back in the editor instead. A second `/rewrite` while one is running is refused (its draft is also put back); print/JSON modes reject the rewrite before making a model call because there is no editor to review it in. Nothing is sent until you press Enter — the improved prompt is an ordinary user message, with no extra conversation message.
 
 #### 🛡️ What the rewriter may not change
 
@@ -299,7 +307,7 @@ The rewrite is validated before it can replace a prompt:
 * Verbatim tokens are compared: file paths, filenames, backticked spans, CLI flags, env vars, `SCREAMING_SNAKE_CASE` constants, `snake_case`/`camelCase`/`PascalCase` identifiers, and URLs must all survive. A dropped token rejects the rewrite and names what was lost.
 * Code fences must match, and the result may not grow past ~3× the original or shrink below ~⅓.
 * Assistant-voice output (`Sure!`, `Here's …`, `I'll …`) and empty output are rejected.
-* A rewrite that returns the prompt unchanged is reported as *already clear*, and the input text is left exactly as typed.
+* A rewrite that returns the prompt unchanged is reported as *already clear*, and the input text is put back in the editor exactly as typed.
 #### 🧠 The rewrite call
 
 One nested model call with its own system prompt, `cacheRetention: "none"`, a fresh `sessionId`, capped `maxTokens`, and minimal thinking, so it does not disturb the session's prompt cache or budget. The session model is used by default; `/rewrite model <provider/id>` points it at a cheaper one. Passed to the model: your prompt plus, optionally, the last three conversation messages (truncated) so references like "it" or "that test" still resolve. When the rewritten prompt comes back, no conversation history is rewritten, and nothing about the rewriting reaches the model that acts on it.
@@ -343,7 +351,7 @@ All four extensions expose one slash command with subcommands, a help screen, an
 
 | Surface | Before | Now |
 | :--- | :--- | :--- |
-| Help layout | 3 layouts (bullet lists vs. aligned columns) and 2 display channels | `commandHelp()` through `showText()`: the TUI opens the scrollable viewer, other modes get a notification |
+| Help layout | 3 layouts (bullet lists vs. aligned columns) and 2 display channels | `commandHelp()` through `showHelp()`: always an on-screen notification, never the editor |
 | Unknown subcommand | 3 different wordings, one per extension | `Unknown subcommand "x". Usage: /usage \| toggle [bars\|percent\|off] \| refresh [all\|<provider>\|active] \| help` |
 | Completions | 3 hand-written implementations, none for `/rewrite` | `argumentCompletions()` from the same table, with dynamic values for `/usage refresh` |
 | on/off and enum parsing | the same parse and error message written 3 times | `parseOnOff()`, `parseMode()`, `cycleMode()`, `unknownMode()` |
@@ -351,7 +359,7 @@ All four extensions expose one slash command with subcommands, a help screen, an
 
 Behaviour changes that came with it:
 
-* Multi-line output (help, `/discord config`, `/rewrite last`) opens in the TUI viewer instead of a one-line status message; RPC keeps the notification because `editor` is a blocking dialog there.
+* Help is always shown as a notification. Longer readouts (`/discord config`, `/rewrite last`) open in the TUI viewer through `showText()`; RPC keeps the notification because `editor` is a blocking dialog there. The `/usage` and `/throughput` readouts are notifications too, so they stay visible next to the footer they explain.
 * All extension preferences, the usage cache/auth lookup, and Discord's shared state now use `PI_CODING_AGENT_DIR` when set (otherwise `~/.pi/agent`). Preference/state writes are atomic where supported.
 * Usage lines list every subcommand, including `help`: `/usage | toggle [bars|percent|off] | refresh [all|<provider>|active] | help`.
 
@@ -415,6 +423,18 @@ To reload extensions during an active Pi session:
 ```text
 /reload
 ```
+
+---
+
+## 🛠️ Development
+
+```bash
+npm ci
+npm run check        # format:check + typecheck + tests (what CI runs)
+npm run format       # apply Biome formatting
+```
+
+Each extension is loaded independently at `session_start`: if one fails to import or register, it is logged and skipped while the others keep working.
 
 ---
 

@@ -6,6 +6,8 @@ import test from "node:test";
 import type { SetActivity } from "@xhayper/discord-rpc";
 import {
 	BUTTONS_ENV,
+	displayThinkingLevel,
+	presenceSwitch,
 	TRANSPORT_ENV,
 	DEFAULT_CLIENT_ID,
 	DEFAULT_LARGE_IMAGE_KEY,
@@ -208,14 +210,16 @@ function makeRecord(
 // ---------------------------------------------------------------------------
 
 test("context usage normalization clamps unsafe percentages", () => {
-	assert.deepEqual(
-		normalizeContextUsage({ tokens: 120, contextWindow: 1000, percent: 150 }),
-		{ tokens: 120, contextWindow: 1000, percent: 100 },
-	);
-	assert.deepEqual(
-		normalizeContextUsage({ tokens: 120, contextWindow: 1000, percent: -5 }),
-		{ tokens: 120, contextWindow: 1000, percent: 0 },
-	);
+	assert.deepEqual(normalizeContextUsage({ tokens: 120, contextWindow: 1000, percent: 150 }), {
+		tokens: 120,
+		contextWindow: 1000,
+		percent: 100,
+	});
+	assert.deepEqual(normalizeContextUsage({ tokens: 120, contextWindow: 1000, percent: -5 }), {
+		tokens: 120,
+		contextWindow: 1000,
+		percent: 0,
+	});
 	assert.equal(normalizeContextUsage([]), undefined);
 	assert.equal(normalizeContextUsage(null), undefined);
 });
@@ -334,10 +338,7 @@ test("pickHighestPriorityAction chooses deterministic display priority", () => {
 	const actions: PresenceAction[] = ["reading", "testing", "running"];
 	assert.equal(pickHighestPriorityAction(actions), "testing");
 
-	assert.equal(
-		pickHighestPriorityAction(["running", "browsing", "searching"]),
-		"browsing",
-	);
+	assert.equal(pickHighestPriorityAction(["running", "browsing", "searching"]), "browsing");
 	assert.equal(pickHighestPriorityAction(["reading", "editing"]), "editing");
 	assert.equal(pickHighestPriorityAction(["running", "reading"]), "reading");
 	assert.equal(pickHighestPriorityAction([]), "tools");
@@ -358,55 +359,22 @@ test("formatDiscordModelLabel normalizes popular and custom model names", () => 
 	assert.equal(formatDiscordModelLabel("openai", "o4-mini"), "o4-mini");
 
 	// Anthropic Claude models
-	assert.equal(
-		formatDiscordModelLabel("anthropic", "claude-opus-4-1"),
-		"Claude Opus 4.1",
-	);
-	assert.equal(
-		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet"),
-		"Claude 3.7 Sonnet",
-	);
-	assert.equal(
-		formatDiscordModelLabel("anthropic", "claude-sonnet-4"),
-		"Claude Sonnet 4",
-	);
-	assert.equal(
-		formatDiscordModelLabel("anthropic", "claude-3-5-haiku"),
-		"Claude 3.5 Haiku",
-	);
+	assert.equal(formatDiscordModelLabel("anthropic", "claude-opus-4-1"), "Claude Opus 4.1");
+	assert.equal(formatDiscordModelLabel("anthropic", "claude-3-7-sonnet"), "Claude 3.7 Sonnet");
+	assert.equal(formatDiscordModelLabel("anthropic", "claude-sonnet-4"), "Claude Sonnet 4");
+	assert.equal(formatDiscordModelLabel("anthropic", "claude-3-5-haiku"), "Claude 3.5 Haiku");
 
 	// Google Gemini models
-	assert.equal(
-		formatDiscordModelLabel("google", "gemini-3.7-pro"),
-		"Gemini 3.7 Pro",
-	);
-	assert.equal(
-		formatDiscordModelLabel("google", "gemini-2.5-flash"),
-		"Gemini 2.5 Flash",
-	);
+	assert.equal(formatDiscordModelLabel("google", "gemini-3.7-pro"), "Gemini 3.7 Pro");
+	assert.equal(formatDiscordModelLabel("google", "gemini-2.5-flash"), "Gemini 2.5 Flash");
 
 	// Other known architectures
 	assert.equal(formatDiscordModelLabel("zhipu", "glm-5"), "GLM-5");
-	assert.equal(
-		formatDiscordModelLabel("deepseek", "deepseek-r1"),
-		"DeepSeek R1",
-	);
-	assert.equal(
-		formatDiscordModelLabel("deepseek", "deepseek-v3"),
-		"DeepSeek V3",
-	);
-	assert.equal(
-		formatDiscordModelLabel("qwen", "qwen-2.5-coder"),
-		"Qwen 2.5 Coder",
-	);
-	assert.equal(
-		formatDiscordModelLabel("meta", "llama-3.3-70b"),
-		"Llama 3.3 70B",
-	);
-	assert.equal(
-		formatDiscordModelLabel("mistral", "mistral-large"),
-		"Mistral Large",
-	);
+	assert.equal(formatDiscordModelLabel("deepseek", "deepseek-r1"), "DeepSeek R1");
+	assert.equal(formatDiscordModelLabel("deepseek", "deepseek-v3"), "DeepSeek V3");
+	assert.equal(formatDiscordModelLabel("qwen", "qwen-2.5-coder"), "Qwen 2.5 Coder");
+	assert.equal(formatDiscordModelLabel("meta", "llama-3.3-70b"), "Llama 3.3 70B");
+	assert.equal(formatDiscordModelLabel("mistral", "mistral-large"), "Mistral Large");
 	assert.equal(formatDiscordModelLabel("mistral", "codestral"), "Codestral");
 	assert.equal(formatDiscordModelLabel("moonshot", "kimi-k2.5"), "Kimi K2.5");
 
@@ -418,10 +386,7 @@ test("formatDiscordModelLabel normalizes popular and custom model names", () => 
 	);
 
 	// Unknown model fallback
-	assert.equal(
-		formatDiscordModelLabel("custom", "my-custom-assistant"),
-		"My Custom Assistant",
-	);
+	assert.equal(formatDiscordModelLabel("custom", "my-custom-assistant"), "My Custom Assistant");
 
 	// Provider-only fallback
 	assert.equal(formatDiscordModelLabel("openai-codex"), "OpenAI Codex");
@@ -429,10 +394,7 @@ test("formatDiscordModelLabel normalizes popular and custom model names", () => 
 	assert.equal(formatDiscordModelLabel(), "Pi");
 
 	// Raw diagnostic label
-	assert.equal(
-		formatModelLabel("anthropic", "claude-3-7-sonnet"),
-		"anthropic/claude-3-7-sonnet",
-	);
+	assert.equal(formatModelLabel("anthropic", "claude-3-7-sonnet"), "anthropic/claude-3-7-sonnet");
 	assert.equal(formatModelLabel(undefined, "gpt-5"), "gpt-5");
 	assert.equal(formatModelLabel(), "Pi");
 	assert.equal(
@@ -473,10 +435,7 @@ test("formatDiscordModelLabel normalizes popular and custom model names", () => 
 		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet", "max"),
 		"Claude 3.7 Sonnet (max)",
 	);
-	assert.equal(
-		formatDiscordModelLabel("openai", "o3-mini", "high"),
-		"o3-mini (high)",
-	);
+	assert.equal(formatDiscordModelLabel("openai", "o3-mini", "high"), "o3-mini (high)");
 	assert.equal(
 		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet:high"),
 		"Claude 3.7 Sonnet (high)",
@@ -485,10 +444,7 @@ test("formatDiscordModelLabel normalizes popular and custom model names", () => 
 		formatDiscordModelLabel("anthropic", "claude-3-7-sonnet", undefined),
 		"Claude 3.7 Sonnet",
 	);
-	assert.equal(
-		formatDiscordModelLabel(undefined, undefined, "high"),
-		"Pi (high)",
-	);
+	assert.equal(formatDiscordModelLabel(undefined, undefined, "high"), "Pi (high)");
 });
 
 // ---------------------------------------------------------------------------
@@ -498,22 +454,20 @@ test("formatDiscordModelLabel normalizes popular and custom model names", () => 
 test("parsePrivacyMode validates input and defaults to strict", () => {
 	assert.equal(parsePrivacyMode("strict"), "strict");
 	assert.equal(parsePrivacyMode("project"), "project");
-	assert.equal(parsePrivacyMode("developer"), "developer");
+	// Retired mode: it showed exactly what "project" shows.
+	assert.equal(parsePrivacyMode("developer"), "project");
 	assert.equal(parsePrivacyMode("STRICT"), "strict");
 	assert.equal(parsePrivacyMode("Project"), "project");
 	assert.equal(parsePrivacyMode("invalid-mode"), "strict");
 	assert.equal(parsePrivacyMode(undefined), "strict");
-	assert.deepEqual(PRIVACY_MODES, ["strict", "project", "developer"]);
+	assert.deepEqual(PRIVACY_MODES, ["strict", "project"]);
 	assert.equal(PRIVACY_ENV, "PI_DISCORD_PRIVACY");
 });
 
 test("isReasoningSupported identifies models with reasoning support", () => {
 	assert.equal(isReasoningSupported({ reasoning: true }), true);
 	assert.equal(isReasoningSupported({ reasoning: false }), false);
-	assert.equal(
-		isReasoningSupported({ thinkingLevelMap: { high: "high" } }),
-		true,
-	);
+	assert.equal(isReasoningSupported({ thinkingLevelMap: { high: "high" } }), true);
 	assert.equal(isReasoningSupported({ id: "claude-3-7-sonnet" }), true);
 	assert.equal(isReasoningSupported({ id: "claude-sonnet-4" }), true);
 	assert.equal(isReasoningSupported({ id: "o1-preview" }), true);
@@ -535,52 +489,30 @@ test("formatPublicMetrics formats tokens, context percentage, and cost by defaul
 	const context = { tokens: 5000, contextWindow: 128_000, percent: 38.2 };
 
 	// Shows price by default in strict mode
-	assert.equal(
-		formatPublicMetrics(usage, context, "strict"),
-		"42k tok · ctx 38% · $0.84",
-	);
+	assert.equal(formatPublicMetrics(usage, context, "strict"), "42k tok · ctx 38% · $0.84");
 
 	// Shows price by default in project mode
-	assert.equal(
-		formatPublicMetrics(usage, context, "project"),
-		"42k tok · ctx 38% · $0.84",
-	);
-
-	// Developer mode: includes cost
-	assert.equal(
-		formatPublicMetrics(usage, context, "developer"),
-		"42k tok · ctx 38% · $0.84",
-	);
+	assert.equal(formatPublicMetrics(usage, context, "project"), "42k tok · ctx 38% · $0.84");
 
 	// Incomplete cost prefix ~$
 	const incompleteUsage = { ...usage, costComplete: false };
 	assert.equal(
-		formatPublicMetrics(incompleteUsage, context, "developer"),
+		formatPublicMetrics(incompleteUsage, context, "project"),
 		"42k tok · ctx 38% · ~$0.84",
 	);
 
 	// When cost is disabled explicitly (showCost = false)
-	assert.equal(
-		formatPublicMetrics(usage, context, "strict", false),
-		"42k tok · ctx 38%",
-	);
+	assert.equal(formatPublicMetrics(usage, context, "strict", false), "42k tok · ctx 38%");
 
 	// Without context percent: context is omitted cleanly, never ctx ?
 	assert.equal(
-		formatPublicMetrics(
-			usage,
-			{ tokens: null, contextWindow: 8000, percent: null },
-			"strict",
-		),
+		formatPublicMetrics(usage, { tokens: null, contextWindow: 8000, percent: null }, "strict"),
 		"42k tok · $0.84",
 	);
 
 	// When usage cost is undefined: price is omitted cleanly
 	const noCostUsage = { ...emptyUsageTotals(), total: 42_000 };
-	assert.equal(
-		formatPublicMetrics(noCostUsage, context, "strict"),
-		"42k tok · ctx 38%",
-	);
+	assert.equal(formatPublicMetrics(noCostUsage, context, "strict"), "42k tok · ctx 38%");
 });
 
 // ---------------------------------------------------------------------------
@@ -723,10 +655,7 @@ test("multi-session activity summarizes workload, models, and projects", () => {
 	state.sessions.s2.provider = "anthropic";
 	const mixedModelActivity = buildMultiSessionActivity(state);
 	assert.equal(mixedModelActivity.details, "3 Pi sessions · 82k tok · $1.24");
-	assert.equal(
-		mixedModelActivity.state,
-		"2 active · multiple models · 3 projects",
-	);
+	assert.equal(mixedModelActivity.state, "2 active · multiple models · 3 projects");
 
 	// All sessions idle
 	state.sessions.s1.phase = "idle";
@@ -841,14 +770,9 @@ test("default action badges use Phosphor Duotone icons and distinct colors", () 
 		idle: "pause-circle",
 	};
 
-	assert.equal(
-		new Set(Object.values(ACTION_BADGE_COLORS)).size,
-		Object.keys(expectedIcons).length,
-	);
+	assert.equal(new Set(Object.values(ACTION_BADGE_COLORS)).size, Object.keys(expectedIcons).length);
 
-	for (const [action, icon] of Object.entries(expectedIcons) as Array<
-		[PresenceAction, string]
-	>) {
+	for (const [action, icon] of Object.entries(expectedIcons) as Array<[PresenceAction, string]>) {
 		const badgeUrl = new URL(ACTION_BADGE_URLS[action]);
 		assert.equal(badgeUrl.origin, "https://wsrv.nl");
 		assert.equal(badgeUrl.searchParams.get("output"), "png");
@@ -1032,10 +956,7 @@ test("pure formatting helpers format single and multi session components", () =>
 		phase: "idle",
 		action: "idle",
 	});
-	assert.equal(
-		formatSingleSessionDetails(recordWithThinkingOff),
-		"Idle · Claude 3.7 Sonnet (off)",
-	);
+	assert.equal(formatSingleSessionDetails(recordWithThinkingOff), "Idle · Claude 3.7 Sonnet (off)");
 	const recordTestingThinking = makeRecord("s1", 100, {
 		provider: "anthropic",
 		modelId: "claude-3-7-sonnet",
@@ -1047,16 +968,9 @@ test("pure formatting helpers format single and multi session components", () =>
 		formatSingleSessionDetails(recordTestingThinking),
 		"Running tests · Claude 3.7 Sonnet (high)",
 	);
-	assert.equal(
-		formatSingleSessionState(record, "strict"),
-		"42k tok · ctx 38% · $0.84",
-	);
+	assert.equal(formatSingleSessionState(record, "strict"), "42k tok · ctx 38% · $0.84");
 	assert.equal(
 		formatSingleSessionState(record, "project"),
-		"my-project · 42k tok · ctx 38% · $0.84",
-	);
-	assert.equal(
-		formatSingleSessionState(record, "developer"),
 		"my-project · 42k tok · ctx 38% · $0.84",
 	);
 
@@ -1118,14 +1032,8 @@ test("pure formatting helpers format single and multi session components", () =>
 		projectCount: 2,
 		startTimestamp: 100,
 	};
-	assert.equal(
-		formatMultiSessionDetails(summary, 2),
-		"2 Pi sessions · 50k tok · $1.00",
-	);
-	assert.equal(
-		formatMultiSessionState(records, 2),
-		"1 active · GPT-5.6 · 2 projects",
-	);
+	assert.equal(formatMultiSessionDetails(summary, 2), "2 Pi sessions · 50k tok · $1.00");
+	assert.equal(formatMultiSessionState(records, 2), "1 active · GPT-5.6 · 2 projects");
 	assert.equal(
 		formatMultiSessionState(records, 2, 3),
 		"1 active (3 subagents) · GPT-5.6 · 2 projects",
@@ -1184,6 +1092,12 @@ test("preferences read and write persist custom settings", async () => {
 
 		const restored = await readPrefs(path);
 		assert.deepEqual(restored, prefs);
+
+		// A legacy "developer" mode reads back as "project"; junk falls back to env/default.
+		await writePrefs({ privacyMode: "developer" as never, enabled: true }, path);
+		assert.deepEqual(await readPrefs(path), { privacyMode: "project", enabled: true });
+		await writePrefs({ privacyMode: "loud" as never }, path);
+		assert.deepEqual(await readPrefs(path), {});
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}
@@ -1257,9 +1171,7 @@ test("file registry elects a replacement after a stale publisher", async () => {
 });
 
 test("file registry recovers a dead stale lock directory", async () => {
-	const directory = await mkdtemp(
-		join(os.tmpdir(), "pi-presence-stale-lock-test-"),
-	);
+	const directory = await mkdtemp(join(os.tmpdir(), "pi-presence-stale-lock-test-"));
 	const path = join(directory, "state.json");
 	const lockPath = `${path}.lock`;
 	try {
@@ -1301,15 +1213,9 @@ test("parseClientId accepts Discord snowflakes and rejects unsafe values", () =>
 });
 
 test("detects WSL and selects the named-pipe relay transport", () => {
-	assert.equal(
-		isWslEnvironment({}, "linux", "5.15.90.1-microsoft-standard-WSL2"),
-		true,
-	);
+	assert.equal(isWslEnvironment({}, "linux", "5.15.90.1-microsoft-standard-WSL2"), true);
 	assert.equal(isWslEnvironment({}, "linux", "6.8.0-generic"), false);
-	assert.equal(
-		isWslEnvironment({ WSL_INTEROP: "/run/WSL/123" }, "linux", "6.8.0-generic"),
-		true,
-	);
+	assert.equal(isWslEnvironment({ WSL_INTEROP: "/run/WSL/123" }, "linux", "6.8.0-generic"), true);
 	assert.equal(
 		resolveDiscordTransportMode({}, "linux", "5.15.90.1-microsoft-standard-WSL2"),
 		"wsl-relay",
@@ -1458,9 +1364,7 @@ test("extension registers only unified 'discord' command and no redundant alias"
 		},
 		on: () => {},
 	};
-	discordPresenceExtension(
-		dummyPi as unknown as Parameters<typeof discordPresenceExtension>[0],
-	);
+	discordPresenceExtension(dummyPi as unknown as Parameters<typeof discordPresenceExtension>[0]);
 	assert.deepEqual(registeredCommands, ["discord"]);
 });
 
@@ -1511,9 +1415,7 @@ test("extension registers thinking_level_select and model_select event handlers"
 			handlers[event] = handler;
 		},
 	};
-	discordPresenceExtension(
-		dummyPi as unknown as Parameters<typeof discordPresenceExtension>[0],
-	);
+	discordPresenceExtension(dummyPi as unknown as Parameters<typeof discordPresenceExtension>[0]);
 	assert.ok(registeredEvents.includes("thinking_level_select"));
 	assert.ok(registeredEvents.includes("model_select"));
 	assert.ok(typeof handlers["thinking_level_select"] === "function");
@@ -1524,8 +1426,11 @@ test("presence can restart after a completed stop", async (t) => {
 	const stateStore = new MemoryStateStore();
 	const transport = new MockTransport();
 	const manager = new DiscordPresenceManager({
-		clientId: CLIENT_ID, projectName: "restart", stateStore,
-		createTransport: () => transport, logger: () => {},
+		clientId: CLIENT_ID,
+		projectName: "restart",
+		stateStore,
+		createTransport: () => transport,
+		logger: () => {},
 	});
 	t.after(() => manager.stop());
 	await manager.start();
@@ -1548,9 +1453,14 @@ test("heartbeat and phase updates respect reconnect backoff", async (t) => {
 		throw new Error("Discord is offline");
 	};
 	const manager = new DiscordPresenceManager({
-		clientId: CLIENT_ID, projectName: "retry", stateStore,
-		createTransport: () => transport, logger: () => {},
-		heartbeatMs: 1_000, retryBaseMs: 10_000, retryCapMs: 60_000,
+		clientId: CLIENT_ID,
+		projectName: "retry",
+		stateStore,
+		createTransport: () => transport,
+		logger: () => {},
+		heartbeatMs: 1_000,
+		retryBaseMs: 10_000,
+		retryCapMs: 60_000,
 	});
 	t.after(() => manager.stop());
 	await manager.start();
@@ -1576,16 +1486,29 @@ test("publisher reloads shared privacy after a standby session changes it", asyn
 	const transport = new MockTransport();
 	let privacyMode: "project" | "strict" = "project";
 	const first = new DiscordPresenceManager({
-		clientId: CLIENT_ID, projectName: "private-project", startedAt: 1_000,
-		privacyMode, readPrivacyMode: async () => privacyMode, stateStore,
-		createTransport: () => transport, logger: () => {},
+		clientId: CLIENT_ID,
+		projectName: "private-project",
+		startedAt: 1_000,
+		privacyMode,
+		readPrivacyMode: async () => privacyMode,
+		stateStore,
+		createTransport: () => transport,
+		logger: () => {},
 	});
 	const second = new DiscordPresenceManager({
-		clientId: CLIENT_ID, projectName: "standby", startedAt: 2_000,
-		privacyMode, readPrivacyMode: async () => privacyMode, stateStore,
-		createTransport: () => new MockTransport(), logger: () => {},
+		clientId: CLIENT_ID,
+		projectName: "standby",
+		startedAt: 2_000,
+		privacyMode,
+		readPrivacyMode: async () => privacyMode,
+		stateStore,
+		createTransport: () => new MockTransport(),
+		logger: () => {},
 	});
-	t.after(async () => { await second.stop(); await first.stop(); });
+	t.after(async () => {
+		await second.stop();
+		await first.stop();
+	});
 	await first.start();
 	assert.match(transport.activities.at(-1)?.state ?? "", /private-project/);
 	await second.start();
@@ -1808,42 +1731,27 @@ test("DiscordPresenceManager setThinkingLevel and setModel updates presence deta
 	});
 
 	await manager.start();
-	assert.equal(
-		transport.activities.at(-1)?.details,
-		"Idle · Claude 3.7 Sonnet (high)",
-	);
+	assert.equal(transport.activities.at(-1)?.details, "Idle · Claude 3.7 Sonnet (high)");
 
 	// Change thinking level via setThinkingLevel
 	await manager.setThinkingLevel("low");
 	await manager.refresh();
-	assert.equal(
-		transport.activities.at(-1)?.details,
-		"Idle · Claude 3.7 Sonnet (low)",
-	);
+	assert.equal(transport.activities.at(-1)?.details, "Idle · Claude 3.7 Sonnet (low)");
 
 	// Change thinking level to off
 	await manager.setThinkingLevel("off");
 	await manager.refresh();
-	assert.equal(
-		transport.activities.at(-1)?.details,
-		"Idle · Claude 3.7 Sonnet (off)",
-	);
+	assert.equal(transport.activities.at(-1)?.details, "Idle · Claude 3.7 Sonnet (off)");
 
 	// Switch model to a model without thinking mode
 	await manager.setModel("openai", "gpt-4o", undefined);
 	await manager.refresh();
-	assert.equal(
-		transport.activities.at(-1)?.details,
-		"Idle · GPT-4o",
-	);
+	assert.equal(transport.activities.at(-1)?.details, "Idle · GPT-4o");
 
 	// Switch model to a reasoning model with thinking level
 	await manager.setModel("openai", "o3-mini", "medium");
 	await manager.refresh();
-	assert.equal(
-		transport.activities.at(-1)?.details,
-		"Idle · o3-mini (medium)",
-	);
+	assert.equal(transport.activities.at(-1)?.details, "Idle · o3-mini (medium)");
 
 	await manager.stop();
 });
@@ -1866,9 +1774,7 @@ test("FilePresenceStateStore serializes and restores activeSubagents", async () 
 });
 
 test("FilePresenceStateStore serializes and restores thinkingLevel", async () => {
-	const directory = await mkdtemp(
-		join(os.tmpdir(), "pi-presence-thinking-test-"),
-	);
+	const directory = await mkdtemp(join(os.tmpdir(), "pi-presence-thinking-test-"));
 	const path = join(directory, "state.json");
 	const store = new FilePresenceStateStore(path);
 
@@ -1881,10 +1787,7 @@ test("FilePresenceStateStore serializes and restores thinkingLevel", async () =>
 
 	await store.upsert(record);
 	const restored = await store.read();
-	assert.equal(
-		restored.sessions["session-with-thinking"]?.thinkingLevel,
-		"high",
-	);
+	assert.equal(restored.sessions["session-with-thinking"]?.thinkingLevel, "high");
 
 	await rm(directory, { recursive: true, force: true });
 });
@@ -1899,10 +1802,7 @@ test("isSubagentEnvironment detects child process flags", () => {
 });
 
 test("isSubagentSession detects worktree and subagent paths", () => {
-	assert.equal(
-		isSubagentSession({ cwd: "/home/user/code/pi-worktree-123-0" }),
-		true,
-	);
+	assert.equal(isSubagentSession({ cwd: "/home/user/code/pi-worktree-123-0" }), true);
 	assert.equal(
 		isSubagentSession({
 			cwd: "/home/user/code/repo",
@@ -2111,13 +2011,19 @@ test("shutdown clear retry yields to a new publisher session", async (t) => {
 		await originalClear();
 	};
 	const first = new DiscordPresenceManager({
-		clientId: CLIENT_ID, projectName: "first", stateStore,
-		createTransport: () => firstTransport, logger: () => {},
+		clientId: CLIENT_ID,
+		projectName: "first",
+		stateStore,
+		createTransport: () => firstTransport,
+		logger: () => {},
 	});
 	const secondTransport = new MockTransport();
 	const second = new DiscordPresenceManager({
-		clientId: CLIENT_ID, projectName: "second", stateStore,
-		createTransport: () => secondTransport, logger: () => {},
+		clientId: CLIENT_ID,
+		projectName: "second",
+		stateStore,
+		createTransport: () => secondTransport,
+		logger: () => {},
 	});
 
 	await first.start();
@@ -2269,9 +2175,7 @@ test("extension does not register when running inside a subagent process", () =>
 	const originalEnv = process.env.PI_SUBAGENT_CHILD;
 	try {
 		process.env.PI_SUBAGENT_CHILD = "1";
-		discordPresenceExtension(
-			dummyPi as unknown as Parameters<typeof discordPresenceExtension>[0],
-		);
+		discordPresenceExtension(dummyPi as unknown as Parameters<typeof discordPresenceExtension>[0]);
 		assert.equal(registeredCommands.length, 0);
 		assert.equal(eventsRegistered.length, 0);
 	} finally {
@@ -2321,11 +2225,15 @@ test("isRegistryLockError detects lock and state file errors", () => {
 });
 
 test("WslDiscordIpcTransport efficiently reassembles fragmented incoming data and frees buffers", async () => {
-	const transport = new WslDiscordIpcTransport({ client: { clientId: CLIENT_ID } as unknown as import("@xhayper/discord-rpc").Client });
+	const transport = new WslDiscordIpcTransport({
+		client: { clientId: CLIENT_ID } as unknown as import("@xhayper/discord-rpc").Client,
+	});
 	const messages: unknown[] = [];
 	transport.on("message", (msg) => messages.push(msg));
 
-	const payload = Buffer.from(JSON.stringify({ cmd: "DISPATCH", evt: "READY", data: { user: { id: "123" } } }));
+	const payload = Buffer.from(
+		JSON.stringify({ cmd: "DISPATCH", evt: "READY", data: { user: { id: "123" } } }),
+	);
 	const packet = Buffer.alloc(8 + payload.length);
 	packet.writeUInt32LE(1, 0);
 	packet.writeUInt32LE(payload.length, 4);
@@ -2367,7 +2275,9 @@ test("SubagentTracker disposal cleans up in-flight RPC reply listeners and timer
 	const tracker = new SubagentTracker({
 		events: bus,
 		sessionId: "clean-test",
-		onCountChange: (c) => { notifiedCount = c; },
+		onCountChange: (c) => {
+			notifiedCount = c;
+		},
 	});
 
 	tracker.queryRpcStatus();
@@ -2421,7 +2331,9 @@ test("SubagentTracker safely rejects non-finite RPC counts", () => {
 	const tracker = new SubagentTracker({
 		events: bus,
 		sessionId: "non-finite",
-		onCountChange: (c) => { lastCount = c; },
+		onCountChange: (c) => {
+			lastCount = c;
+		},
 	});
 
 	tracker.queryRpcStatus();
@@ -2440,15 +2352,27 @@ test("SubagentTracker safely rejects non-finite RPC counts", () => {
 test("DiscordPresenceManager coalesces burst registry updates into minimal disk operations", async () => {
 	let upsertCount = 0;
 	const store = {
-		state: { version: 1 as const, sessions: {} as Record<string, SessionRecord>, updatedAt: 0, publisherGeneration: 1 },
+		state: {
+			version: 1 as const,
+			sessions: {} as Record<string, SessionRecord>,
+			updatedAt: 0,
+			publisherGeneration: 1,
+		},
 		async upsert(record: SessionRecord) {
 			upsertCount++;
 			this.state.sessions[record.sessionId] = record;
 			return structuredClone(this.state);
 		},
-		async read() { return structuredClone(this.state); },
-		async remove(id: string) { delete this.state.sessions[id]; return structuredClone(this.state); },
-		async withPublisherLock<T>() { return undefined as unknown as T; },
+		async read() {
+			return structuredClone(this.state);
+		},
+		async remove(id: string) {
+			delete this.state.sessions[id];
+			return structuredClone(this.state);
+		},
+		async withPublisherLock<T>() {
+			return undefined as unknown as T;
+		},
 	};
 	const manager = new DiscordPresenceManager({
 		clientId: CLIENT_ID,
@@ -2461,7 +2385,9 @@ test("DiscordPresenceManager coalesces burst registry updates into minimal disk 
 	upsertCount = 0;
 
 	// Fire 100 updates concurrently
-	await Promise.all(Array.from({ length: 100 }, (_, i) => manager.setPhase(i % 2 ? "thinking" : "idle")));
+	await Promise.all(
+		Array.from({ length: 100 }, (_, i) => manager.setPhase(i % 2 ? "thinking" : "idle")),
+	);
 	// Should be coalesced into 1 (or at most 2) upserts, not 100!
 	assert.ok(upsertCount <= 2, `expected <= 2 upserts, got ${upsertCount}`);
 	assert.equal(store.state.sessions[manager.getSessionId()].phase, "thinking");
@@ -2493,4 +2419,29 @@ test("DiscordPresenceManager stop cancels pending throttle timer without deadloc
 	// Stop while throttle is pending; stop must resolve promptly and not deadlock!
 	await manager.stop();
 	assert.equal(manager.getStatus(), "stopped");
+});
+
+test("presenceSwitch honours every off spelling and the saved preference", (t) => {
+	const saved = process.env.PI_DISCORD_TEST_SWITCH;
+	t.after(() => {
+		if (saved === undefined) delete process.env.PI_DISCORD_TEST_SWITCH;
+		else process.env.PI_DISCORD_TEST_SWITCH = saved;
+	});
+	delete process.env.PI_DISCORD_TEST_SWITCH;
+	assert.equal(presenceSwitch("PI_DISCORD_TEST_SWITCH", undefined), true);
+	assert.equal(presenceSwitch("PI_DISCORD_TEST_SWITCH", false), false);
+	for (const off of ["off", "false", "0", "no", "OFF"]) {
+		process.env.PI_DISCORD_TEST_SWITCH = off;
+		assert.equal(presenceSwitch("PI_DISCORD_TEST_SWITCH", true), false, off);
+	}
+	process.env.PI_DISCORD_TEST_SWITCH = "on";
+	assert.equal(presenceSwitch("PI_DISCORD_TEST_SWITCH", undefined), true);
+});
+
+test("displayThinkingLevel shows off only for reasoning models", () => {
+	assert.equal(displayThinkingLevel({ reasoning: true }, undefined), "off");
+	assert.equal(displayThinkingLevel({ reasoning: true }, "high"), "high");
+	assert.equal(displayThinkingLevel({ reasoning: false }, "off"), undefined);
+	assert.equal(displayThinkingLevel({ reasoning: false }, "low"), "low");
+	assert.equal(displayThinkingLevel(undefined, undefined), undefined);
 });
