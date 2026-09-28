@@ -8,6 +8,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import subscriptionUsage, {
 	antigravityCfg,
+	claudeCfg,
 	codexCfg,
 	deepseekCfg,
 	MissingCredentialError,
@@ -40,6 +41,9 @@ function harness(t: TestContext, mode = "bars") {
 	// unmocked provider would attempt a real network request.
 	const fetch = t.mock.method(codexCfg, "fetchUsage", async () => ({ windows: { "5h": 12 } }));
 	const providerFetches = {
+		anthropic: t.mock.method(claudeCfg, "fetchUsage", async () => ({
+			windows: { "5h": 20, weekly: 40 },
+		})),
 		"opencode-go": t.mock.method(opencodeCfg, "fetchUsage", async () => ({
 			windows: { rolling: 5 },
 		})),
@@ -253,7 +257,7 @@ test("/usage refresh force-fetches every provider by default", async (t) => {
 		if (id === "openai-codex") continue;
 		assert.equal(mocked.mock.callCount(), 1, id);
 	}
-	assert.match(notices.at(-1)!, /Usage refreshed for all 4 providers/);
+	assert.match(notices.at(-1)!, /Usage refreshed for all 5 providers/);
 });
 
 test("/usage refresh <provider> refreshes only that provider", async (t) => {
@@ -425,4 +429,16 @@ test("concurrent model selections coalesce in-flight fetch without duplicate HTT
 	finish({ windows: { "5h": 25 } });
 	await flush();
 	assert.match(h.statuses.get("openai-codex")!, /25%/);
+});
+
+test("an Anthropic account without a subscription login shows no footer warning", async (t) => {
+	const h = harness(t);
+	h.providerFetches.anthropic.mock.mockImplementation(async () => {
+		throw new MissingCredentialError("no Claude subscription login");
+	});
+	Object.assign(h.ctx, { model: { provider: "anthropic", id: "claude-opus-5" } });
+	await h.event("session_start");
+	assert.equal(h.providerFetches.anthropic.mock.callCount(), 1);
+	assert.equal(h.statuses.get("anthropic"), undefined);
+	assert.equal(h.statuses.get("openai-codex"), undefined);
 });

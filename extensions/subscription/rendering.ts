@@ -107,9 +107,12 @@ const DETAIL_WINDOW_ORDER = [
 	"gemini-5h",
 	"3p-5h",
 	"weekly",
+	"weekly-opus",
+	"weekly-sonnet",
 	"gemini-weekly",
 	"3p-weekly",
 	"monthly",
+	"extra",
 ] as const;
 
 function detailWindowOrder(key: string): number {
