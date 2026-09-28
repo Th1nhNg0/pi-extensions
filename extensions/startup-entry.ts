@@ -8,7 +8,16 @@ export default function registerStartupEntries(pi: ExtensionAPI): void {
 		coreLoad ??= import("./deferred-extension.ts").then(({ registerDeferredCores }) =>
 			registerDeferredCores(pi),
 		);
-		for (const handler of await coreLoad) {
+		let handlers: EventHandler[];
+		try {
+			handlers = await coreLoad;
+		} catch (error) {
+			// Do not cache a failed load: the next session_start retries it.
+			coreLoad = undefined;
+			console.error("[startup-entry] failed to load extensions:", error);
+			return;
+		}
+		for (const handler of handlers) {
 			try {
 				await handler(event, ctx);
 			} catch (error) {

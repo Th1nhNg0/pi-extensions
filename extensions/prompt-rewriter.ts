@@ -12,7 +12,6 @@
  *    - `/rewrite last` shows the previous rewrite, or why it was unavailable.
  *
  * Commands:
- * Commands:
  *   /rewrite <prompt>                  rewrite the given text
  *   /rewrite model [<provider/id>|reset]  choose the rewrite model
  *   /rewrite context [on|off]          include recent conversation context
@@ -520,6 +519,8 @@ export interface RewriteOptions {
 	context?: string | undefined;
 	thinking?: RewriteThinking | "default" | undefined;
 	timeoutMs?: number;
+	/** Cancels the rewrite (e.g. Esc in the TUI); reported as "cancelled". */
+	signal?: AbortSignal;
 }
 
 function assistantText(message: { content: readonly unknown[] }): string {
@@ -552,6 +553,12 @@ export async function rewritePrompt(options: RewriteOptions): Promise<RewriteOut
 		timedOut = true;
 		controller.abort();
 	}, timeoutMs);
+	const cancel = (): void => controller.abort();
+	if (options.signal?.aborted) {
+		controller.abort();
+	} else {
+		options.signal?.addEventListener("abort", cancel, { once: true });
+	}
 
 	const reasoning = options.thinking && options.thinking !== "default" ? options.thinking : undefined;
 	const bridge = registryBridge(options.ctx);
@@ -587,6 +594,8 @@ export async function rewritePrompt(options: RewriteOptions): Promise<RewriteOut
 	const timeoutPromise = new Promise<undefined>((resolve) => {
 		timeoutTimer = setTimeout(() => resolve(undefined), timeoutMs + 1_000);
 		timeoutTimer.unref?.();
+		// A cancel must not wait on a provider that ignores the abort signal.
+		options.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
 	});
 
 	try {
@@ -598,7 +607,11 @@ export async function rewritePrompt(options: RewriteOptions): Promise<RewriteOut
 		const message = await Promise.race([pending, timeoutPromise]);
 		if (!message) {
 			controller.abort();
-			return { status: "unavailable", text: original, reason: "timed out" };
+			return {
+				status: "unavailable",
+				text: original,
+				reason: options.signal?.aborted && !timedOut ? "cancelled" : "timed out",
+			};
 		}
 		if (message.stopReason === "aborted") {
 			return {
@@ -629,6 +642,7 @@ export async function rewritePrompt(options: RewriteOptions): Promise<RewriteOut
 		};
 	} finally {
 		clearTimeout(timer);
+		options.signal?.removeEventListener("abort", cancel);
 		if (timeoutTimer !== undefined) {
 			clearTimeout(timeoutTimer);
 		}
@@ -646,26 +660,41 @@ export type RewriteAction =
 	| { action: "last" }
 	| { action: "help" };
 
+/**
+ * Split `/rewrite` arguments into a subcommand or a prompt.
+ *
+ * A prompt may begin with a subcommand word ("help me fix…", "context menu is
+ * broken", "model the user table…"), and Pi has already cleared the editor, so
+ * misreading it loses the prompt. A word is a subcommand only when what follows
+ * has that subcommand's shape; anything else is a prompt.
+ */
 export function parseRewriteArgs(args: string): RewriteAction {
 	const trimmed = args.trim();
 	if (trimmed.length === 0) {
 		return { action: "improve", text: "" };
 	}
 	const { sub, rest } = parseSubcommand(trimmed);
-	if (sub === "help" || sub === "?") {
+	if ((sub === "help" || sub === "?") && rest.length === 0) {
 		return { action: "help" };
 	}
-	if (sub === "last") {
+	if (sub === "last" && rest.length === 0) {
 		return { action: "last" };
 	}
-	if (sub === "model") {
+	// `model <provider/id>|reset` takes exactly one word; a sentence is a prompt.
+	if (sub === "model" && !/\s/.test(rest)) {
 		if (rest.length === 0) {
 			return { action: "model", value: undefined };
 		}
 		return { action: "model", value: rest.toLowerCase() === "reset" ? "reset" : rest };
 	}
 	if (sub === "context") {
-		return { action: "context", value: parseOnOff(rest.split(/\s+/)[0] ?? "") };
+		if (rest.length === 0) {
+			return { action: "context", value: undefined };
+		}
+		const value = parseOnOff(rest);
+		if (value !== undefined) {
+			return { action: "context", value };
+		}
 	}
 	return { action: "improve", text: trimmed };
 }
@@ -735,20 +764,38 @@ async function runWithStatus(
 	ctx: ExtensionContext,
 	text: string,
 ): Promise<RewriteOutcome> {
+	const controller = new AbortController();
+	let stopListening: (() => void) | undefined;
+	if (ctx.mode === "tui") {
+		// Esc cancels the rewrite; every other key passes through untouched.
+		stopListening = ctx.ui.onTerminalInput((data) => {
+			if (data !== ESCAPE || controller.signal.aborted) return undefined;
+			controller.abort();
+			return { consume: true };
+		});
+	}
 	if (ctx.hasUI) {
-		ctx.ui.setStatus(STATUS_KEY, "✦ rewriting prompt…");
+		ctx.ui.setStatus(
+			STATUS_KEY,
+			stopListening ? "✦ rewriting prompt… (Esc to cancel)" : "✦ rewriting prompt…",
+		);
 	}
 	try {
-		return await runRewrite(state, ctx, text);
+		return await runRewrite(state, ctx, text, controller.signal);
 	} finally {
+		stopListening?.();
 		clearTransientStatus(ctx);
 	}
 }
+
+const ESCAPE = "\x1b";
 
 interface RewriterState {
 	env: RewriteEnv;
 	prefs: RewritePrefs | undefined;
 	last: LastOutcome | undefined;
+	/** True while a rewrite runs; a second /rewrite is refused, not queued. */
+	busy: boolean;
 }
 
 function createState(env: RewriteEnv): RewriterState {
@@ -756,6 +803,7 @@ function createState(env: RewriteEnv): RewriterState {
 		env,
 		prefs: undefined,
 		last: undefined,
+		busy: false,
 	};
 }
 
@@ -787,6 +835,7 @@ async function runRewrite(
 	state: RewriterState,
 	ctx: ExtensionContext,
 	text: string,
+	signal?: AbortSignal,
 ): Promise<RewriteOutcome> {
 	const prefs = currentPrefs(state);
 	const outcome = await rewritePrompt({
@@ -796,6 +845,7 @@ async function runRewrite(
 		context: contextFor(state, ctx),
 		thinking: state.env.thinking,
 		timeoutMs: state.env.timeoutMs,
+		signal,
 	});
 	state.last = {
 		kind: outcome.status,
@@ -817,17 +867,36 @@ async function improveDraft(
 		console.error("[prompt-rewriter] /rewrite requires TUI or RPC mode to review the result.");
 		return;
 	}
-	const outcome = await runWithStatus(state, ctx, text);
+	if (state.busy) {
+		// The draft would otherwise be lost: Pi already cleared the editor.
+		ctx.ui.setEditorText(text);
+		notify(ctx, "A rewrite is already running — your draft is back in the editor.", "warning");
+		return;
+	}
+	state.busy = true;
+	let outcome: RewriteOutcome;
+	try {
+		outcome = await runWithStatus(state, ctx, text);
+	} finally {
+		state.busy = false;
+	}
 	if (outcome.status === "rewritten") {
 		ctx.ui.setEditorText(outcome.text);
 		notify(ctx, "Prompt improved — review it and press Enter to send.", "info");
 		return;
 	}
 	if (outcome.status === "unchanged") {
-		notify(ctx, "Prompt is already clear — left unchanged.", "info");
+		ctx.ui.setEditorText(text);
+		notify(ctx, "Prompt is already clear — left unchanged in the editor.", "info");
 		return;
 	}
-	notify(ctx, `Rewrite unavailable: ${outcome.reason ?? "unknown reason"}.`, "warning");
+	// Give the draft back: Pi cleared the editor before the command ran.
+	ctx.ui.setEditorText(text);
+	if (outcome.reason === "cancelled") {
+		notify(ctx, "Rewrite cancelled — your draft is back in the editor.", "info");
+		return;
+	}
+	notify(ctx, `Rewrite unavailable: ${outcome.reason ?? "unknown reason"}. Your draft is back in the editor.`, "warning");
 }
 
 export default function promptRewriter(pi: ExtensionAPI): void {

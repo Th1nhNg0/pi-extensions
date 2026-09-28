@@ -148,6 +148,7 @@ function harness(t: TestContext, options: HarnessOptions = {}) {
 			callModel(context, streamOptions);
 	}
 
+	const inputHandlers = new Set<(data: string) => { consume?: boolean } | undefined>();
 	const ctx = {
 		mode: options.mode ?? "rpc",
 		hasUI: options.hasUI ?? true,
@@ -170,6 +171,10 @@ function harness(t: TestContext, options: HarnessOptions = {}) {
 				editorText = text;
 			},
 			getEditorText: () => editorText,
+			onTerminalInput: (handler: (data: string) => { consume?: boolean } | undefined) => {
+				inputHandlers.add(handler);
+				return () => inputHandlers.delete(handler);
+			},
 			editor: async (title: string, prefill: string) => {
 				editors.push({ title, prefill });
 				return undefined;
@@ -215,6 +220,17 @@ function harness(t: TestContext, options: HarnessOptions = {}) {
 		commands,
 		setEditorText(text: string) {
 			editorText = text;
+		},
+		/** Simulate raw terminal input; returns whether a listener consumed it. */
+		press(data: string): boolean {
+			let consumed = false;
+			for (const handler of [...inputHandlers]) {
+				if (handler(data)?.consume) consumed = true;
+			}
+			return consumed;
+		},
+		get inputListeners() {
+			return inputHandlers.size;
 		},
 		getEditorText() {
 			return editorText;
@@ -416,6 +432,21 @@ test("command arguments map to actions", () => {
 	assert.deepEqual(parseRewriteArgs("context off"), { action: "context", value: false });
 	assert.deepEqual(parseRewriteArgs("auto on"), { action: "improve", text: "auto on" });
 	assert.deepEqual(parseRewriteArgs("lang en"), { action: "improve", text: "lang en" });
+	assert.deepEqual(parseRewriteArgs("context"), { action: "context", value: undefined });
+	assert.deepEqual(parseRewriteArgs("model gpt-5"), { action: "model", value: "gpt-5" });
+});
+
+test("parseRewriteArgs keeps prompts that start with a subcommand word", () => {
+	for (const prompt of [
+		"help me fix the login bug",
+		"? why does the build fail",
+		"last commit broke tests, find why",
+		"context menu is broken on mobile",
+		"context on the login page is lost after refresh",
+		"model the user table in prisma",
+	]) {
+		assert.deepEqual(parseRewriteArgs(prompt), { action: "improve", text: prompt });
+	}
 });
 
 test("formatters describe the last outcome and current settings", () => {
@@ -506,10 +537,10 @@ test("non-interactive modes reject rewrites before making a model call", async (
 });
 
 
-test("an already-clear prompt is reported and nothing replaces it", async (t) => {
+test("an already-clear prompt is reported and put back exactly as typed", async (t) => {
 	const h = harness(t, { reply: (request) => request });
 	await h.command(ROUGH_PROMPT);
-	assert.deepEqual(h.editorWrites, []);
+	assert.deepEqual(h.editorWrites, [ROUGH_PROMPT]);
 	assert.match(h.lastNotification().text, /already clear/);
 });
 
@@ -517,7 +548,7 @@ test("rewrites report unavailability instead of failing silently", async (t) => 
 	const noCreds = harness(t, { hasAuth: false });
 	await noCreds.command(ROUGH_PROMPT);
 	assert.match(noCreds.lastNotification().text, /Rewrite unavailable: no credentials/);
-	assert.deepEqual(noCreds.editorWrites, []);
+	assert.deepEqual(noCreds.editorWrites, [ROUGH_PROMPT], "the cleared draft is restored");
 
 	const broken = harness(t, {
 		streamResult: async () => {
@@ -539,7 +570,43 @@ test("a hanging rewrite is abandoned at the timeout", async (t) => {
 	t.mock.timers.tick(2000);
 	await pending;
 	assert.match(h.lastNotification().text, /Rewrite unavailable: timed out/);
-	assert.deepEqual(h.editorWrites, []);
+	assert.deepEqual(h.editorWrites, [ROUGH_PROMPT]);
+});
+
+test("Esc cancels a running rewrite in the TUI and restores the draft", async (t) => {
+	const h = harness(t, { mode: "tui", streamResult: () => new Promise(() => undefined) });
+	const pending = h.command(ROUGH_PROMPT);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.match(h.statuses.get("prompt-rewriter") ?? "", /Esc to cancel/);
+	assert.equal(h.press("a"), false, "other keys pass through");
+	assert.equal(h.press("\x1b"), true);
+	await pending;
+	assert.match(h.lastNotification().text, /Rewrite cancelled/);
+	assert.deepEqual(h.editorWrites, [ROUGH_PROMPT]);
+	assert.equal(h.inputListeners, 0, "the Esc listener is removed");
+	assert.equal(h.statuses.get("prompt-rewriter"), undefined);
+});
+
+test("a second /rewrite while one is running is refused without losing its draft", async (t) => {
+	let release: (() => void) | undefined;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const h = harness(t, {
+		streamResult: async () => {
+			await gate;
+			return { stopReason: "stop", content: [{ type: "text", text: "Improve the auth flow." }] };
+		},
+	});
+	const first = h.command(ROUGH_PROMPT);
+	await new Promise((resolve) => setImmediate(resolve));
+	await h.command("second draft");
+	assert.match(h.lastNotification().text, /already running/);
+	assert.deepEqual(h.editorWrites, ["second draft"]);
+	release!();
+	await first;
+	assert.equal(h.requests.length, 1);
+	assert.equal(h.editorWrites.at(-1), "Improve the auth flow.");
 });
 
 test("/rewrite help notifies instead of opening the editor", async (t) => {
