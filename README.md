@@ -379,7 +379,6 @@ My current Pi package setup (`pi list`):
 
 ```text
 npm:pi-web-access
-npm:pi-mcp-adapter
 npm:@juicesharp/rpiv-ask-user-question
 npm:@ff-labs/pi-fff
 npm:pi-antigravity
