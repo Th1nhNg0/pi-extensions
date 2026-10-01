@@ -68,3 +68,26 @@ export function resolveApiKey(
 	if (cred?.type === "api_key" && cred.key) return cred.key;
 	throw new MissingCredentialError(`no API key (${envNames.join(" / ")} or auth.json)`);
 }
+
+/** Whether a usage provider has credentials configured, without making a request. */
+export function hasUsageCredential(providerId: string): boolean {
+	const envNames: Record<string, readonly string[]> = {
+		"opencode-go": ["OPENCODE_API_KEY"],
+		deepseek: ["DEEPSEEK_API_KEY"],
+		"openai-codex": ["OPENAI_CODEX_TOKEN", "CODEX_ACCESS_TOKEN", "CHATGPT_ACCESS_TOKEN"],
+		antigravity: ["ANTIGRAVITY_TOKEN", "ANTIGRAVITY_API_KEY"],
+	};
+	const names = envNames[providerId];
+	if (!names) return false;
+	if (envValue(names)) return true;
+	const credential = readStoredCredential(providerId);
+	if (providerId === "openai-codex" || providerId === "antigravity") {
+		return (
+			credential?.type === "oauth" &&
+			Boolean(
+				credential.access?.trim() || (providerId === "antigravity" && credential.refresh?.trim()),
+			)
+		);
+	}
+	return credential?.type === "api_key" && Boolean(credential.key?.trim());
+}

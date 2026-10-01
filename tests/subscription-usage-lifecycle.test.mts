@@ -8,11 +8,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import subscriptionUsage, {
 	antigravityCfg,
-	claudeCfg,
 	codexCfg,
 	deepseekCfg,
 	MissingCredentialError,
 	opencodeCfg,
+	resolveRefreshTargets,
 	usageProviderCfgs,
 } from "../extensions/subscription-usage.ts";
 
@@ -41,9 +41,6 @@ function harness(t: TestContext, mode = "bars") {
 	// unmocked provider would attempt a real network request.
 	const fetch = t.mock.method(codexCfg, "fetchUsage", async () => ({ windows: { "5h": 12 } }));
 	const providerFetches = {
-		anthropic: t.mock.method(claudeCfg, "fetchUsage", async () => ({
-			windows: { "5h": 20, weekly: 40 },
-		})),
 		"opencode-go": t.mock.method(opencodeCfg, "fetchUsage", async () => ({
 			windows: { rolling: 5 },
 		})),
@@ -98,6 +95,60 @@ function harness(t: TestContext, mode = "bars") {
 		},
 	};
 }
+
+function usageCredentials(t: TestContext, auth: Record<string, unknown> = {}) {
+	const names = [
+		"OPENCODE_API_KEY",
+		"DEEPSEEK_API_KEY",
+		"OPENAI_CODEX_TOKEN",
+		"CODEX_ACCESS_TOKEN",
+		"CHATGPT_ACCESS_TOKEN",
+		"ANTIGRAVITY_TOKEN",
+		"ANTIGRAVITY_API_KEY",
+	];
+	for (const name of names) {
+		const value = process.env[name];
+		delete process.env[name];
+		t.after(() => {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		});
+	}
+	t.mock.method(fs, "readFileSync", () => JSON.stringify(auth));
+}
+
+test("bare usage hides logged-out providers, including stale cached data", async (t) => {
+	const h = harness(t);
+	usageCredentials(t, { "openai-codex": { type: "oauth", access: "token" } });
+	t.mock.method(fs.promises, "readFile", async () =>
+		JSON.stringify({
+			deepseek: {
+				data: { windows: {}, balance: { amount: 99, currency: "USD" } },
+				fetchedAt: Date.now(),
+			},
+		}),
+	);
+	const notify = t.mock.method(h.ctx.ui, "notify", () => {});
+	await h.commands.get("usage")!.handler("", h.ctx);
+	const text = notify.mock.calls.at(-1)!.arguments[0]!;
+	assert.match(text, /openai-codex/);
+	assert.doesNotMatch(text, /deepseek|opencode-go|antigravity/);
+	assert.equal(h.fetch.mock.callCount(), 1);
+});
+
+test("bare usage accepts environment credentials and reflects logout while hidden", async (t) => {
+	const h = harness(t, "off");
+	usageCredentials(t);
+	process.env.DEEPSEEK_API_KEY = "key";
+	const notify = t.mock.method(h.ctx.ui, "notify", () => {});
+	await h.commands.get("usage")!.handler("", h.ctx);
+	assert.match(notify.mock.calls.at(-1)!.arguments[0]!, /deepseek: no usage data yet/);
+	delete process.env.DEEPSEEK_API_KEY;
+	await h.commands.get("usage")!.handler("", h.ctx);
+	assert.match(notify.mock.calls.at(-1)!.arguments[0]!, /No subscription providers logged in/);
+	for (const provider of Object.values(h.providerFetches))
+		assert.equal(provider.mock.callCount(), 0);
+});
 
 test("usage watcher starts only with a session and shutdown removes only its listener", async (t) => {
 	const h = harness(t);
@@ -191,8 +242,13 @@ test("disk sync cannot restore polling after shutdown during a cache read", asyn
 	assert.equal(h.fetch.mock.callCount(), 1);
 });
 
-test("/usage shows all providers", async (t) => {
+test("/usage shows all logged-in providers", async (t) => {
 	const h = harness(t);
+	usageCredentials(t, {
+		"openai-codex": { type: "oauth", access: "token" },
+		"opencode-go": { type: "api_key", key: "key" },
+		antigravity: { type: "oauth", access: "token" },
+	});
 	await h.event("session_start");
 	assert.ok(h.commands.has("usage"));
 	const notices: string[] = [];
@@ -209,13 +265,14 @@ test("/usage shows all providers", async (t) => {
 	assert.match(last, /Subscription usage — openai-codex/);
 	assert.match(last, /• 5h: 12%/);
 	assert.match(last, /• weekly: 34%/);
-	// Default view covers every provider; unconfigured ones report no data.
+	// Configured providers without cached usage still appear.
 	assert.match(last, /opencode-go/);
 	assert.match(last, /antigravity/);
 });
 
 test("/usage works while hidden without fetching", async (t) => {
 	const h = harness(t, "off");
+	usageCredentials(t, { "opencode-go": { type: "api_key", key: "key" } });
 	await h.event("session_start");
 	const notices: string[] = [];
 	(h.ctx.ui as unknown as { notify: (msg: string) => void }).notify = (msg: string) =>
@@ -257,7 +314,7 @@ test("/usage refresh force-fetches every provider by default", async (t) => {
 		if (id === "openai-codex") continue;
 		assert.equal(mocked.mock.callCount(), 1, id);
 	}
-	assert.match(notices.at(-1)!, /Usage refreshed for all 5 providers/);
+	assert.match(notices.at(-1)!, /Usage refreshed for all 4 providers/);
 });
 
 test("/usage refresh <provider> refreshes only that provider", async (t) => {
@@ -431,14 +488,20 @@ test("concurrent model selections coalesce in-flight fetch without duplicate HTT
 	assert.match(h.statuses.get("openai-codex")!, /25%/);
 });
 
-test("an Anthropic account without a subscription login shows no footer warning", async (t) => {
+test("Anthropic models do not trigger subscription usage requests", async (t) => {
 	const h = harness(t);
-	h.providerFetches.anthropic.mock.mockImplementation(async () => {
-		throw new MissingCredentialError("no Claude subscription login");
-	});
 	Object.assign(h.ctx, { model: { provider: "anthropic", id: "claude-opus-5" } });
 	await h.event("session_start");
-	assert.equal(h.providerFetches.anthropic.mock.callCount(), 1);
+	assert.equal(
+		usageProviderCfgs.some((cfg) => cfg.id === "anthropic"),
+		false,
+	);
+	for (const target of ["anthropic", "claude", "claude-code"]) {
+		assert.equal(resolveRefreshTargets(target, usageProviderCfgs), undefined);
+	}
+	for (const provider of Object.values(h.providerFetches)) {
+		assert.equal(provider.mock.callCount(), 0);
+	}
 	assert.equal(h.statuses.get("anthropic"), undefined);
 	assert.equal(h.statuses.get("openai-codex"), undefined);
 });

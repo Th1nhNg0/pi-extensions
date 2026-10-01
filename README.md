@@ -12,7 +12,6 @@ Adds a minimal usage readout to Pi's footer status line — directly below the m
 
 #### Supported Providers
 
-* **Claude Pro/Max** (Claude Code subscription: 5h session and weekly limits, plus the Opus/Sonnet weekly cap for the active model)
 * **Antigravity Pro** (Gemini & 3rd-party/Claude quotas with 5h rolling & weekly buckets)
 * **OpenAI Codex** (Plus/Team/Pro plan 5h rolling & weekly quota windows, plus banked rate-limit resets)
 * **OpenCode Go** (Rolling, Weekly, and Monthly limits, plus DeepSeek peak/off-peak indicator)
@@ -26,7 +25,6 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 
 | Provider | Status Line Output |
 | :--- | :--- |
-| **Claude Pro/Max** (Opus model) | `5h: █░░░░░ 12% ~2h · W: ███░░░ 45% ~3d · Opus: █████░ 80% ~3d` |
 | **Antigravity Pro (Gemini)** | `5h: ░░░░░░ 0% ~4h · W: █████▌░ 79% ~4d` |
 | **Antigravity Pro (Claude/GPT)** | `5h: ░░░░░░ 0% ~4h · W: ████░░░ 61% ~6d` |
 | **OpenAI Codex** | `5h: ░░░░░░ 1% ~4h · W: ███░░░ 51% ~3d · 3 resets left` |
@@ -57,7 +55,7 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 
 All controls live under one `/usage` command:
 
-- `/usage` shows every window for **all** providers as a detailed readout (percents, bars, reset countdowns + absolute reset times, plan, balance, and freshness). Only the active provider is live-fetched; the rest render from cache. It works even while the footer is hidden. For DeepSeek it also lists both peak windows (Monday–Friday UTC days only, so weekends never bill peak) in your local time alongside their canonical UTC ranges.
+- `/usage` shows every window for **logged-in** providers (Pi credentials or environment tokens/API keys; logged-out providers are hidden even if cached usage exists) as a detailed readout (percents, bars, reset countdowns + absolute reset times, plan, balance, and freshness). Only the active provider is live-fetched; the rest render from cache. It works even while the footer is hidden. For DeepSeek it also lists both peak windows (Monday–Friday UTC days only, so weekends never bill peak) in your local time alongside their canonical UTC ranges.
 - `/usage toggle` cycles the status line through bar cells (`bars`), bare percentages (`percent`), and hidden (`off`). Pass a mode to jump straight to it, e.g. `/usage toggle percent`. While hidden, no status is shown and no provider requests are made; toggling back re-renders (or refetches) immediately. The choice persists across sessions in the Pi agent directory.
 - `/usage refresh [all|<provider>|active]` requests fresh usage immediately, bypassing cooldowns. It refreshes **every** configured provider by default; pass `active` for just the provider behind the current model, or a provider id/alias (`opencode-go`, `zen`, `openai-codex`, `codex`, `antigravity`, `deepseek`, …) for a single one. An unknown target warns without issuing any request. Providers with no stored credential are reported as *skipped* rather than failed, and only the provider active at completion owns the footer status and wake timer. When the display is `off`, this command makes no requests; enable it with `/usage toggle` first. Automatic retries recover from temporary provider failures without needing a model switch or reload.
 
@@ -67,13 +65,10 @@ Each provider reads its credential from the first non-empty environment variable
 
 | Provider | Environment variables | `auth.json` entry |
 | :--- | :--- | :--- |
-| Claude Pro/Max | `ANTHROPIC_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` (or an `sk-ant-oat…` token in `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`) | `anthropic` (OAuth, from Pi's `/login`), then Claude Code's `~/.claude/.credentials.json` (honors `CLAUDE_CONFIG_DIR`) |
 | OpenCode Go | `OPENCODE_API_KEY` | `opencode-go` (API key) |
 | DeepSeek API | `DEEPSEEK_API_KEY` | `deepseek` (API key) |
 | OpenAI Codex | `OPENAI_CODEX_TOKEN`, `CODEX_ACCESS_TOKEN`, `CHATGPT_ACCESS_TOKEN` | `openai-codex` (OAuth) |
 | Antigravity | `ANTIGRAVITY_TOKEN`, `ANTIGRAVITY_API_KEY` | `antigravity` (OAuth, auto-refreshed) |
-
-Claude usage comes from the subscription endpoint Claude Code's `/usage` reads (`GET api.anthropic.com/api/oauth/usage`). Only subscription OAuth tokens have usage windows: with a plain Anthropic API key the footer stays empty rather than warning. Tokens are never refreshed by this extension (that would rotate Pi's or Claude Code's refresh token and sign them out); an expired token is reported as *skipped* until Pi or Claude Code refreshes it on its next request. `/usage refresh claude` (or `claude-code`) targets this provider.
 
 The Codex usage endpoint sits behind Cloudflare and needs a browser User-Agent; set `CODEX_USER_AGENT` to replace the built-in one if it starts getting rejected. Antigravity similarly honors `ANTIGRAVITY_USER_AGENT` and `ANTIGRAVITY_BASE_URL`.
 
