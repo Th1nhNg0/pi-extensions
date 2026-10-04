@@ -100,6 +100,7 @@ function usageCredentials(t: TestContext, auth: Record<string, unknown> = {}) {
 	const names = [
 		"OPENCODE_API_KEY",
 		"DEEPSEEK_API_KEY",
+		"OPENAI_API_KEY",
 		"OPENAI_CODEX_TOKEN",
 		"CODEX_ACCESS_TOKEN",
 		"CHATGPT_ACCESS_TOKEN",
@@ -116,6 +117,141 @@ function usageCredentials(t: TestContext, auth: Record<string, unknown> = {}) {
 	}
 	t.mock.method(fs, "readFileSync", () => JSON.stringify(auth));
 }
+
+test("OpenAI credential detection rejects API keys, legacy aliases, and empty access tokens", async (t) => {
+	const { hasUsageCredential } = await import("../extensions/subscription/credentials.ts");
+	const auth: Record<string, unknown> = {};
+	usageCredentials(t, auth);
+	process.env.OPENAI_API_KEY = "api-key";
+	process.env.CHATGPT_ACCESS_TOKEN = "legacy-token";
+	process.env.OPENAI_CODEX_TOKEN = "codex-token";
+	assert.equal(hasUsageCredential("openai"), false);
+	assert.equal(hasUsageCredential("openai-codex"), true);
+	for (const credential of [
+		{ type: "api_key", key: "api-key" },
+		{ type: "oauth", access: "" },
+		{ type: "oauth", access: "   " },
+		{ type: "oauth", access: 42 },
+		{ type: "oauth", refresh: "refresh-only" },
+	]) {
+		auth.openai = credential;
+		usageCredentials(t, auth);
+		assert.equal(hasUsageCredential("openai"), false);
+	}
+	auth.openai = { type: "oauth", access: "direct-token", scopes: ["chatgpt.tokens.use.direct"] };
+	usageCredentials(t, auth);
+	assert.equal(hasUsageCredential("openai"), true);
+});
+
+test("OpenAI ChatGPT OAuth shows a usage link without quota polling or cache writes", async (t) => {
+	const h = harness(t);
+	usageCredentials(t, { openai: { type: "oauth", access: "direct-token" } });
+	h.ctx.model = { provider: "openai", id: "gpt-6.1-sol" } as typeof h.ctx.model;
+	const network = t.mock.method(globalThis, "fetch", async () => {
+		throw new Error("OpenAI usage must not make a network request");
+	});
+	const writes = t.mock.method(fs.promises, "writeFile", async () => {});
+	// Any old cache keyed under openai must not masquerade as the new shared quota.
+	t.mock.method(fs.promises, "readFile", async () =>
+		JSON.stringify({ openai: { data: { windows: { "5h": 99 } }, fetchedAt: Date.now() } }),
+	);
+	const notify = t.mock.method(h.ctx.ui, "notify", () => {});
+	await h.event("session_start");
+	assert.match(h.statuses.get("openai")!, /ChatGPT plan.*https:\/\/chatgpt.com\/settings\/usage/);
+	assert.equal(h.watch.mock.callCount(), 0);
+	await h.commands.get("usage")!.handler("", h.ctx);
+	assert.match(
+		notify.mock.calls.at(-1)!.arguments[0]!,
+		/Subscription usage — openai \(ChatGPT plan\)/,
+	);
+	assert.match(notify.mock.calls.at(-1)!.arguments[0]!, /Quota percentages are not available/);
+	assert.doesNotMatch(notify.mock.calls.at(-1)!.arguments[0]!, /99%|Updated|resets/);
+	for (const target of ["openai", "chatgpt", "active"]) {
+		await h.commands.get("usage")!.handler(`refresh ${target}`, h.ctx);
+		assert.match(notify.mock.calls.at(-1)!.arguments[0]!, /Usage refresh unavailable for openai/);
+	}
+	t.mock.timers.tick(60 * 60 * 1000);
+	await h.event("agent_settled");
+	assert.equal(network.mock.callCount(), 0);
+	assert.equal(writes.mock.callCount(), 0);
+	for (const mocked of Object.values(h.providerFetches)) assert.equal(mocked.mock.callCount(), 0);
+});
+
+test("OpenAI API keys and legacy Codex credentials never count as new ChatGPT OAuth", async (t) => {
+	const h = harness(t);
+	usageCredentials(t, {
+		openai: { type: "api_key", key: "api-key" },
+		"openai-codex": { type: "oauth", access: "legacy-token" },
+	});
+	h.ctx.model = { provider: "openai", id: "gpt-6.1-sol" } as typeof h.ctx.model;
+	const notify = t.mock.method(h.ctx.ui, "notify", () => {});
+	await h.event("session_start");
+	assert.equal(h.statuses.get("openai"), undefined);
+	await h.commands.get("usage")!.handler("", h.ctx);
+	assert.doesNotMatch(
+		notify.mock.calls.at(-1)!.arguments[0]!,
+		/Subscription usage — openai\s|ChatGPT plan/,
+	);
+	await h.commands.get("usage")!.handler("refresh openai", h.ctx);
+	assert.equal(
+		notify.mock.calls.at(-1)!.arguments[0],
+		"Usage refresh skipped for openai (no credentials)",
+	);
+	assert.equal(h.fetch.mock.callCount(), 0);
+	assert.equal(h.watch.mock.callCount(), 0);
+});
+
+test("OpenAI usage link respects hiding, logout, model switches, and shutdown", async (t) => {
+	const h = harness(t);
+	const auth: Record<string, unknown> = { openai: { type: "oauth", access: "direct-token" } };
+	usageCredentials(t, auth);
+	const notify = t.mock.method(h.ctx.ui, "notify", () => {});
+	await h.event("session_start");
+	assert.match(h.statuses.get("openai-codex")!, /12%/);
+	h.ctx.model = { provider: "openai", id: "gpt-6.1-sol" } as typeof h.ctx.model;
+	await h.event("model_select");
+	assert.equal(h.statuses.get("openai-codex"), undefined);
+	assert.match(h.statuses.get("openai")!, /ChatGPT plan/);
+	assert.equal(h.unwatch.mock.callCount(), 1);
+	t.mock.timers.tick(60 * 60 * 1000);
+	await flush();
+	assert.equal(h.fetch.mock.callCount(), 1); // legacy polling was cancelled
+	await h.commands.get("usage")!.handler("toggle off", h.ctx);
+	assert.equal(h.statuses.get("openai"), undefined);
+	await h.commands.get("usage")!.handler("", h.ctx);
+	assert.match(
+		notify.mock.calls.at(-1)!.arguments[0]!,
+		/Manage usage:.*chatgpt.com\/settings\/usage/,
+	);
+	assert.match(notify.mock.calls.at(-1)!.arguments[0]!, /Footer hidden/);
+	await h.commands.get("usage")!.handler("toggle percent", h.ctx);
+	assert.match(h.statuses.get("openai")!, /ChatGPT plan/);
+	delete auth.openai;
+	usageCredentials(t, auth);
+	await h.event("agent_settled");
+	assert.equal(h.statuses.get("openai"), undefined);
+	await h.commands.get("usage")!.handler("", h.ctx);
+	assert.equal(notify.mock.calls.at(-1)!.arguments[0], "No subscription providers logged in");
+	auth.openai = { type: "oauth", access: "direct-token" };
+	usageCredentials(t, auth);
+	await h.event("agent_settled");
+	assert.match(h.statuses.get("openai")!, /ChatGPT plan/);
+	await h.event("session_shutdown");
+	assert.equal(h.statuses.get("openai"), undefined);
+});
+
+test("fan-out refresh reports OpenAI quota unavailability without leaking its footer", async (t) => {
+	const h = harness(t);
+	usageCredentials(t, { openai: { type: "oauth", access: "direct-token" } });
+	const notify = t.mock.method(h.ctx.ui, "notify", () => {});
+	await h.event("session_start");
+	await h.commands.get("usage")!.handler("refresh all", h.ctx);
+	const message = notify.mock.calls.at(-1)!.arguments[0]!;
+	assert.match(message, /quota API unavailable: openai/);
+	assert.doesNotMatch(message, /failed: openai/);
+	assert.equal(h.statuses.get("openai"), undefined);
+	assert.match(h.statuses.get("openai-codex")!, /12%/);
+});
 
 test("bare usage hides logged-out providers, including stale cached data", async (t) => {
 	const h = harness(t);
@@ -314,7 +450,10 @@ test("/usage refresh force-fetches every provider by default", async (t) => {
 		if (id === "openai-codex") continue;
 		assert.equal(mocked.mock.callCount(), 1, id);
 	}
-	assert.match(notices.at(-1)!, /Usage refreshed for all 4 providers/);
+	assert.match(
+		notices.at(-1)!,
+		/Usage refreshed for opencode-go, openai-codex, antigravity, deepseek · no credentials: openai/,
+	);
 });
 
 test("/usage refresh <provider> refreshes only that provider", async (t) => {
@@ -388,7 +527,7 @@ test("a provider without credentials is reported as skipped, not failed", async 
 		notices.push(msg);
 	await h.commands.get("usage")!.handler("refresh", h.ctx);
 	await flush();
-	assert.match(notices.at(-1)!, /no credentials: deepseek/);
+	assert.match(notices.at(-1)!, /no credentials: openai, deepseek/);
 	assert.doesNotMatch(notices.at(-1)!, /failed:/);
 });
 

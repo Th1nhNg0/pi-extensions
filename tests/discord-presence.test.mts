@@ -389,6 +389,7 @@ test("formatDiscordModelLabel normalizes popular and custom model names", () => 
 	assert.equal(formatDiscordModelLabel("custom", "my-custom-assistant"), "My Custom Assistant");
 
 	// Provider-only fallback
+	assert.equal(formatDiscordModelLabel("openai"), "OpenAI");
 	assert.equal(formatDiscordModelLabel("openai-codex"), "OpenAI Codex");
 	assert.equal(formatDiscordModelLabel("anthropic"), "Anthropic");
 	assert.equal(formatDiscordModelLabel(), "Pi");

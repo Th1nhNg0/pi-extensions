@@ -71,6 +71,16 @@ export function resolveApiKey(
 
 /** Whether a usage provider has credentials configured, without making a request. */
 export function hasUsageCredential(providerId: string): boolean {
+	// The unified OpenAI provider also supports API keys, which are not ChatGPT plans.
+	// Its new OAuth grant must stay separate from the legacy Codex token/env aliases.
+	if (providerId === "openai") {
+		const credential = readStoredCredential(providerId);
+		return (
+			credential?.type === "oauth" &&
+			typeof credential.access === "string" &&
+			Boolean(credential.access.trim())
+		);
+	}
 	const envNames: Record<string, readonly string[]> = {
 		"opencode-go": ["OPENCODE_API_KEY"],
 		deepseek: ["DEEPSEEK_API_KEY"],

@@ -1,7 +1,7 @@
 /** Target resolution and user-facing summaries for `/usage refresh`. */
 
-/** Result of one provider refresh: fresh data, reused cache, no credential for the account, or a real fetch failure. */
-export type RefreshOutcome = "fetched" | "cached" | "skipped" | "failed";
+/** Result of one provider refresh: fresh data, reused cache, no credential for the account, an unavailable quota API, or a real fetch failure. */
+export type RefreshOutcome = "fetched" | "cached" | "skipped" | "failed" | "unsupported";
 
 export interface RefreshResult {
 	id: string;
@@ -14,7 +14,7 @@ const PROVIDER_ALIASES: Readonly<Record<string, string>> = {
 	"opencode-zen": "opencode-go",
 	zen: "opencode-go",
 	codex: "openai-codex",
-	openai: "openai-codex",
+	chatgpt: "openai",
 	antigravity: "antigravity",
 	google: "antigravity",
 	deepseek: "deepseek",
@@ -54,6 +54,8 @@ export function formatRefreshNotice(results: readonly RefreshResult[]): string {
 				return `Usage refresh finished from cache for ${id}`;
 			case "skipped":
 				return `Usage refresh skipped for ${id} (no credentials)`;
+			case "unsupported":
+				return `Usage refresh unavailable for ${id}; check https://chatgpt.com/settings/usage`;
 			default:
 				return `Usage refresh failed for ${id}`;
 		}
@@ -64,6 +66,7 @@ export function formatRefreshNotice(results: readonly RefreshResult[]): string {
 	const cached = idsWith("cached");
 	const skipped = idsWith("skipped");
 	const failed = idsWith("failed");
+	const unsupported = idsWith("unsupported");
 	const parts: string[] = [];
 	if (fetched.length === results.length) {
 		parts.push(`Usage refreshed for all ${results.length} providers (${fetched.join(", ")})`);
@@ -75,5 +78,9 @@ export function formatRefreshNotice(results: readonly RefreshResult[]): string {
 	if (cached.length > 0) parts.push(`from cache: ${cached.join(", ")}`);
 	if (skipped.length > 0) parts.push(`no credentials: ${skipped.join(", ")}`);
 	if (failed.length > 0) parts.push(`failed: ${failed.join(", ")}`);
+	if (unsupported.length > 0)
+		parts.push(
+			`quota API unavailable: ${unsupported.join(", ")} (https://chatgpt.com/settings/usage)`,
+		);
 	return parts.join(" · ");
 }

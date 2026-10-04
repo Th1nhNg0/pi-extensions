@@ -647,6 +647,18 @@ test("resolveRefreshTargets defaults to every provider and honours narrowing", (
 		["openai-codex"],
 	);
 	assert.deepEqual(
+		resolveRefreshTargets("openai", usageProviderCfgs)?.map((c) => c.id),
+		["openai"],
+	);
+	assert.deepEqual(
+		resolveRefreshTargets("chatgpt", usageProviderCfgs)?.map((c) => c.id),
+		["openai"],
+	);
+	assert.deepEqual(
+		resolveRefreshTargets("active", usageProviderCfgs, "openai")?.map((c) => c.id),
+		["openai"],
+	);
+	assert.deepEqual(
 		resolveRefreshTargets("zen", usageProviderCfgs)?.map((c) => c.id),
 		["opencode-go"],
 	);
@@ -669,6 +681,10 @@ test("resolveRefreshTargets never yields duplicates", () => {
 
 test("formatRefreshNotice summarises single and fan-out outcomes", () => {
 	assert.equal(formatRefreshNotice([]), "No usage providers to refresh");
+	assert.equal(
+		formatRefreshNotice([{ id: "openai", outcome: "unsupported" }]),
+		"Usage refresh unavailable for openai; check https://chatgpt.com/settings/usage",
+	);
 	assert.equal(
 		formatRefreshNotice([{ id: "openai-codex", outcome: "fetched" }]),
 		"Usage refreshed for openai-codex",
@@ -699,6 +715,13 @@ test("formatRefreshNotice summarises single and fan-out outcomes", () => {
 	assert.match(mixed, /from cache: b/);
 	assert.match(mixed, /no credentials: c/);
 	assert.match(mixed, /failed: d/);
+	assert.match(
+		formatRefreshNotice([
+			{ id: "openai-codex", outcome: "fetched" },
+			{ id: "openai", outcome: "unsupported" },
+		]),
+		/^Usage refreshed for openai-codex · quota API unavailable: openai /,
+	);
 	assert.equal(
 		formatRefreshNotice([
 			{ id: "a", outcome: "cached" },

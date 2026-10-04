@@ -13,7 +13,8 @@ Adds a minimal usage readout to Pi's footer status line — directly below the m
 #### Supported Providers
 
 * **Antigravity Pro** (Gemini & 3rd-party/Claude quotas with 5h rolling & weekly buckets)
-* **OpenAI Codex** (Plus/Team/Pro plan 5h rolling & weekly quota windows, plus banked rate-limit resets)
+* **OpenAI / ChatGPT** (`openai` with ChatGPT OAuth: usage-settings link; API-key accounts are excluded)
+* **OpenAI Codex (legacy, `openai-codex`)** (Plus/Team/Pro plan 5h rolling & weekly quota windows, plus banked rate-limit resets)
 * **OpenCode Go** (Rolling, Weekly, and Monthly limits, plus DeepSeek peak/off-peak indicator)
 * **DeepSeek API** (Account balance from `/user/balance`, plus peak/off-peak billing windows shown in your local time)
 
@@ -27,6 +28,7 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 | :--- | :--- |
 | **Antigravity Pro (Gemini)** | `5h: ░░░░░░ 0% ~4h · W: █████▌░ 79% ~4d` |
 | **Antigravity Pro (Claude/GPT)** | `5h: ░░░░░░ 0% ~4h · W: ████░░░ 61% ~6d` |
+| **OpenAI (ChatGPT OAuth)** | `ChatGPT plan · usage: https://chatgpt.com/settings/usage` |
 | **OpenAI Codex** | `5h: ░░░░░░ 1% ~4h · W: ███░░░ 51% ~3d · 3 resets left` |
 | **OpenCode Go** | `Peak ~2h · R: ░░░░░░ 2% ~3h · W: ██░░░░ 44% ~3d · M: ██████ 98% ~14d` |
 | **DeepSeek API** | `Off-Peak ~5h · $12.34` |
@@ -57,7 +59,7 @@ All controls live under one `/usage` command:
 
 - `/usage` shows every window for **logged-in** providers (Pi credentials or environment tokens/API keys; logged-out providers are hidden even if cached usage exists) as a detailed readout (percents, bars, reset countdowns + absolute reset times, plan, balance, and freshness). Only the active provider is live-fetched; the rest render from cache. It works even while the footer is hidden. For DeepSeek it also lists both peak windows (Monday–Friday UTC days only, so weekends never bill peak) in your local time alongside their canonical UTC ranges.
 - `/usage toggle` cycles the status line through bar cells (`bars`), bare percentages (`percent`), and hidden (`off`). Pass a mode to jump straight to it, e.g. `/usage toggle percent`. While hidden, no status is shown and no provider requests are made; toggling back re-renders (or refetches) immediately. The choice persists across sessions in the Pi agent directory.
-- `/usage refresh [all|<provider>|active]` requests fresh usage immediately, bypassing cooldowns. It refreshes **every** configured provider by default; pass `active` for just the provider behind the current model, or a provider id/alias (`opencode-go`, `zen`, `openai-codex`, `codex`, `antigravity`, `deepseek`, …) for a single one. An unknown target warns without issuing any request. Providers with no stored credential are reported as *skipped* rather than failed, and only the provider active at completion owns the footer status and wake timer. When the display is `off`, this command makes no requests; enable it with `/usage toggle` first. Automatic retries recover from temporary provider failures without needing a model switch or reload.
+- `/usage refresh [all|<provider>|active]` requests fresh usage immediately, bypassing cooldowns. It refreshes **every** configured provider by default; pass `active` for just the provider behind the current model, or a provider id/alias (`opencode-go`, `zen`, `openai`, `chatgpt`, `openai-codex`, `codex`, `antigravity`, `deepseek`, …) for a single one. An unknown target warns without issuing any request. Providers with no stored credential are reported as *skipped* rather than failed, and only the provider active at completion owns the footer status and wake timer. When the display is `off`, this command makes no requests; enable it with `/usage toggle` first. Automatic retries recover from temporary provider failures without needing a model switch or reload.
 
 #### Credentials & Environment Variables
 
@@ -67,8 +69,11 @@ Each provider reads its credential from the first non-empty environment variable
 | :--- | :--- | :--- |
 | OpenCode Go | `OPENCODE_API_KEY` | `opencode-go` (API key) |
 | DeepSeek API | `DEEPSEEK_API_KEY` | `deepseek` (API key) |
-| OpenAI Codex | `OPENAI_CODEX_TOKEN`, `CODEX_ACCESS_TOKEN`, `CHATGPT_ACCESS_TOKEN` | `openai-codex` (OAuth) |
+| OpenAI (ChatGPT subscription) | — | `openai` (OAuth; sign in with ChatGPT via `/login openai`) |
+| OpenAI Codex (legacy) | `OPENAI_CODEX_TOKEN`, `CODEX_ACCESS_TOKEN`, `CHATGPT_ACCESS_TOKEN` | `openai-codex` (OAuth) |
 | Antigravity | `ANTIGRAVITY_TOKEN`, `ANTIGRAVITY_API_KEY` | `antigravity` (OAuth, auto-refreshed) |
+
+`openai` supports both API keys and the new ChatGPT OAuth flow. Only a stored OAuth credential counts as a ChatGPT subscription here; `OPENAI_API_KEY` and legacy Codex tokens do not. The new grant targets `api.openai.com`, not the Codex backend. OpenAI’s [current integration guide](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions) points to [ChatGPT Settings → Usage](https://chatgpt.com/settings/usage) rather than documenting a quota-read API. Consequently, the footer and `/usage` show that link without polling, quota bars, or fabricated reset times. `/usage refresh openai` (or `chatgpt` / `active`) reports quota refresh as unavailable, not failed. Legacy `openai-codex` retains its quota polling and credential aliases.
 
 The Codex usage endpoint sits behind Cloudflare and needs a browser User-Agent; set `CODEX_USER_AGENT` to replace the built-in one if it starts getting rejected. Antigravity similarly honors `ANTIGRAVITY_USER_AGENT` and `ANTIGRAVITY_BASE_URL`.
 

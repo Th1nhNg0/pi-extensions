@@ -184,7 +184,7 @@ export function normalizePrefs(value: unknown): UsagePrefs {
 	};
 }
 
-interface ProviderCfg {
+interface PolledProviderCfg {
 	id: string;
 	fetchUsage: (signal?: AbortSignal) => Promise<UsageData>;
 	render: (
@@ -194,6 +194,19 @@ interface ProviderCfg {
 		style?: UsageStyle,
 	) => string;
 }
+
+/** Subscription providers without a documented quota API use a settings link, never polling. */
+interface LinkedProviderCfg {
+	id: string;
+	usageLink: string;
+}
+
+type ProviderCfg = PolledProviderCfg | LinkedProviderCfg;
+
+export const openaiCfg: LinkedProviderCfg = {
+	id: "openai",
+	usageLink: "https://chatgpt.com/settings/usage",
+};
 
 interface StatusCtx {
 	model?: { provider?: string; id?: string };
@@ -254,7 +267,7 @@ async function fetchJson<T>(
 	return (await res.json()) as T;
 }
 
-export const opencodeCfg: ProviderCfg = {
+export const opencodeCfg: PolledProviderCfg = {
 	id: "opencode-go",
 	async fetchUsage(signal?: AbortSignal) {
 		const key = resolveApiKey("opencode-go", ["OPENCODE_API_KEY"]);
@@ -284,7 +297,7 @@ export const opencodeCfg: ProviderCfg = {
 };
 
 /** DeepSeek API (pay-as-you-go): account balance plus peak/off-peak billing state. */
-export const deepseekCfg: ProviderCfg = {
+export const deepseekCfg: PolledProviderCfg = {
 	id: "deepseek",
 	async fetchUsage(signal?: AbortSignal) {
 		const key = resolveApiKey("deepseek", ["DEEPSEEK_API_KEY"]);
@@ -314,7 +327,7 @@ const CODEX_WINDOW_LABELS: Record<string, string> = {
 const CODEX_BROWSER_USER_AGENT =
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
-export const codexCfg: ProviderCfg = {
+export const codexCfg: PolledProviderCfg = {
 	id: "openai-codex",
 	async fetchUsage(signal?: AbortSignal) {
 		const fromEnv = envValue(["OPENAI_CODEX_TOKEN", "CODEX_ACCESS_TOKEN", "CHATGPT_ACCESS_TOKEN"]);
@@ -432,7 +445,7 @@ async function refreshAntigravityToken(
 }
 
 /** Antigravity (Google Cloud Code Assist): 5h & weekly pools for Gemini and Claude/GPT models. */
-export const antigravityCfg: ProviderCfg = {
+export const antigravityCfg: PolledProviderCfg = {
 	id: "antigravity",
 	async fetchUsage(signal?: AbortSignal) {
 		const fromEnv = process.env.ANTIGRAVITY_TOKEN || process.env.ANTIGRAVITY_API_KEY;
@@ -606,11 +619,12 @@ export const antigravityCfg: ProviderCfg = {
 };
 
 /**
- * Every usage provider this extension can query, in display order. `/usage
+ * Every usage provider this extension supports, in display order. `/usage
  * refresh` fans out over this list unless a narrower target is given.
  */
 export const usageProviderCfgs: readonly ProviderCfg[] = [
 	opencodeCfg,
+	openaiCfg,
 	codexCfg,
 	antigravityCfg,
 	deepseekCfg,
@@ -651,9 +665,18 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	/** New OpenAI OAuth is not a Codex credential; do not send it to backend-api. */
+	function renderLinkedUsage(cfg: LinkedProviderCfg, ctx: StatusCtx): void {
+		const ui = safeUi(ctx);
+		const text = hasUsageCredential(cfg.id)
+			? ui?.theme.fg("dim", `ChatGPT plan · usage: ${cfg.usageLink}`)
+			: undefined;
+		renderUi(ui, cfg.id, text);
+	}
+
 	/** Render `data` for a provider in the current style. */
 	function renderText(
-		cfg: ProviderCfg,
+		cfg: PolledProviderCfg,
 		data: UsageData,
 		ui: StatusCtx["ui"],
 		modelId?: string,
@@ -689,7 +712,7 @@ export default function (pi: ExtensionAPI) {
 		const activeProvider = model?.provider;
 		if (!activeProvider) return;
 		const cfg = cfgs.find((c) => c.id === activeProvider);
-		if (!cfg) return;
+		if (!cfg || "usageLink" in cfg) return;
 
 		const state = cache.get(cfg.id);
 		if (!state) return;
@@ -796,6 +819,11 @@ export default function (pi: ExtensionAPI) {
 		ctx: StatusCtx,
 		{ force = false, hard = false, scheduled = false }: RefreshOptions = {},
 	): Promise<RefreshOutcome> {
+		if ("usageLink" in cfg) {
+			const available = hasUsageCredential(cfg.id);
+			renderLinkedUsage(cfg, ctx);
+			return available ? "unsupported" : "skipped";
+		}
 		const state = cache.get(cfg.id) ?? freshState();
 		cache.set(cfg.id, state);
 		if (state.inFlight && !hard) return state.inFlight;
@@ -905,7 +933,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** (Re)arm the next scheduled fetch with a delay computed from the last outcome. */
-	function arm(cfg: ProviderCfg, ctx: StatusCtx, delayMs: number) {
+	function arm(cfg: PolledProviderCfg, ctx: StatusCtx, delayMs: number) {
 		const state = cache.get(cfg.id) ?? freshState();
 		if (state.timer) clearTimeout(state.timer);
 		cache.set(cfg.id, state);
@@ -925,7 +953,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** Immediate refresh + rearm from the fresh outcome (used by events). */
-	function poke(cfg: ProviderCfg, ctx: StatusCtx, force: boolean) {
+	function poke(cfg: PolledProviderCfg, ctx: StatusCtx, force: boolean) {
 		void (async () => {
 			if (!safeUi(ctx)) return;
 			const outcome = await refresh(cfg, ctx, { force });
@@ -959,7 +987,10 @@ export default function (pi: ExtensionAPI) {
 		for (const c of cfgs) {
 			if (c !== active) clear(ctx, c.id);
 		}
-		if (active) {
+		if (active && "usageLink" in active) {
+			stopDiskCacheWatcher();
+			renderLinkedUsage(active, ctx);
+		} else if (active) {
 			startDiskCacheWatcher();
 			poke(active, ctx, force);
 		} else {
@@ -999,6 +1030,11 @@ export default function (pi: ExtensionAPI) {
 		// Re-render from cached data so the footer updates immediately.
 		const model = safeModel(ctx);
 		const cfg = cfgs.find((c) => c.id === model?.provider);
+		if (cfg && "usageLink" in cfg) {
+			route(ctx, true);
+			ctx.ui.notify(`Subscription usage style: ${next}`, "info");
+			return;
+		}
 		const ui = safeUi(ctx);
 		const state = cfg ? cache.get(cfg.id) : undefined;
 		if (cfg && ui && state?.lastData) {
@@ -1054,7 +1090,7 @@ export default function (pi: ExtensionAPI) {
 		const current = safeModel(ctx);
 		const activeCfg = cfgs.find((c) => c.id === current?.provider);
 		const state = activeCfg ? cache.get(activeCfg.id) : undefined;
-		if (activeCfg && state && safeUi(ctx))
+		if (activeCfg && !("usageLink" in activeCfg) && state && safeUi(ctx))
 			arm(activeCfg, ctx, nextDelay(state, Date.now(), current?.id, activeCfg.id));
 		ctx.ui.notify(formatRefreshNotice(results), "info");
 	}
@@ -1123,7 +1159,7 @@ export default function (pi: ExtensionAPI) {
 			// One live fetch for the active provider; the rest render from cache
 			// so one keystroke never fans out to every API.
 			// While hidden (`off`) there are no fetches at all; render from cache.
-			if (activeCfg && mode !== "off") {
+			if (activeCfg && !("usageLink" in activeCfg) && mode !== "off") {
 				try {
 					await refresh(activeCfg, ctx, { force: true, hard: true });
 				} catch {
@@ -1136,6 +1172,14 @@ export default function (pi: ExtensionAPI) {
 			}
 			const sections: string[] = [];
 			for (const cfg of loggedInCfgs) {
+				if ("usageLink" in cfg) {
+					sections.push(
+						`Subscription usage — ${cfg.id} (ChatGPT plan)\n` +
+							`Quota percentages are not available through a documented API.\n` +
+							`Manage usage: ${cfg.usageLink}`,
+					);
+					continue;
+				}
 				const state = cache.get(cfg.id);
 				let data = state?.lastData;
 				let fetchedAt = state?.lastFetch;
@@ -1165,7 +1209,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 	pi.on("session_start", async (_event, ctx) => {
-		startDiskCacheWatcher();
 		route(ctx, true);
 	});
 
