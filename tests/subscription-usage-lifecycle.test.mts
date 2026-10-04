@@ -143,7 +143,7 @@ test("OpenAI credential detection rejects API keys, legacy aliases, and empty ac
 	assert.equal(hasUsageCredential("openai"), true);
 });
 
-test("OpenAI ChatGPT OAuth shows a usage link without quota polling or cache writes", async (t) => {
+test("OpenAI ChatGPT OAuth provides details without a footer, quota polling, or cache writes", async (t) => {
 	const h = harness(t);
 	usageCredentials(t, { openai: { type: "oauth", access: "direct-token" } });
 	h.ctx.model = { provider: "openai", id: "gpt-6.1-sol" } as typeof h.ctx.model;
@@ -157,7 +157,7 @@ test("OpenAI ChatGPT OAuth shows a usage link without quota polling or cache wri
 	);
 	const notify = t.mock.method(h.ctx.ui, "notify", () => {});
 	await h.event("session_start");
-	assert.match(h.statuses.get("openai")!, /ChatGPT plan.*https:\/\/chatgpt.com\/settings\/usage/);
+	assert.equal(h.statuses.get("openai"), undefined);
 	assert.equal(h.watch.mock.callCount(), 0);
 	await h.commands.get("usage")!.handler("", h.ctx);
 	assert.match(
@@ -201,7 +201,7 @@ test("OpenAI API keys and legacy Codex credentials never count as new ChatGPT OA
 	assert.equal(h.watch.mock.callCount(), 0);
 });
 
-test("OpenAI usage link respects hiding, logout, model switches, and shutdown", async (t) => {
+test("OpenAI footer stays hidden through toggles, logout, model switches, and shutdown", async (t) => {
 	const h = harness(t);
 	const auth: Record<string, unknown> = { openai: { type: "oauth", access: "direct-token" } };
 	usageCredentials(t, auth);
@@ -211,7 +211,7 @@ test("OpenAI usage link respects hiding, logout, model switches, and shutdown", 
 	h.ctx.model = { provider: "openai", id: "gpt-6.1-sol" } as typeof h.ctx.model;
 	await h.event("model_select");
 	assert.equal(h.statuses.get("openai-codex"), undefined);
-	assert.match(h.statuses.get("openai")!, /ChatGPT plan/);
+	assert.equal(h.statuses.get("openai"), undefined);
 	assert.equal(h.unwatch.mock.callCount(), 1);
 	t.mock.timers.tick(60 * 60 * 1000);
 	await flush();
@@ -225,7 +225,7 @@ test("OpenAI usage link respects hiding, logout, model switches, and shutdown", 
 	);
 	assert.match(notify.mock.calls.at(-1)!.arguments[0]!, /Footer hidden/);
 	await h.commands.get("usage")!.handler("toggle percent", h.ctx);
-	assert.match(h.statuses.get("openai")!, /ChatGPT plan/);
+	assert.equal(h.statuses.get("openai"), undefined);
 	delete auth.openai;
 	usageCredentials(t, auth);
 	await h.event("agent_settled");
@@ -235,7 +235,7 @@ test("OpenAI usage link respects hiding, logout, model switches, and shutdown", 
 	auth.openai = { type: "oauth", access: "direct-token" };
 	usageCredentials(t, auth);
 	await h.event("agent_settled");
-	assert.match(h.statuses.get("openai")!, /ChatGPT plan/);
+	assert.equal(h.statuses.get("openai"), undefined);
 	await h.event("session_shutdown");
 	assert.equal(h.statuses.get("openai"), undefined);
 });

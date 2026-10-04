@@ -665,15 +665,6 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	/** New OpenAI OAuth is not a Codex credential; do not send it to backend-api. */
-	function renderLinkedUsage(cfg: LinkedProviderCfg, ctx: StatusCtx): void {
-		const ui = safeUi(ctx);
-		const text = hasUsageCredential(cfg.id)
-			? ui?.theme.fg("dim", `ChatGPT plan · usage: ${cfg.usageLink}`)
-			: undefined;
-		renderUi(ui, cfg.id, text);
-	}
-
 	/** Render `data` for a provider in the current style. */
 	function renderText(
 		cfg: PolledProviderCfg,
@@ -821,7 +812,8 @@ export default function (pi: ExtensionAPI) {
 	): Promise<RefreshOutcome> {
 		if ("usageLink" in cfg) {
 			const available = hasUsageCredential(cfg.id);
-			renderLinkedUsage(cfg, ctx);
+			// Never substitute legacy Codex quotas or an informational footer.
+			renderUi(safeUi(ctx), cfg.id, undefined);
 			return available ? "unsupported" : "skipped";
 		}
 		const state = cache.get(cfg.id) ?? freshState();
@@ -989,7 +981,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (active && "usageLink" in active) {
 			stopDiskCacheWatcher();
-			renderLinkedUsage(active, ctx);
+			clear(ctx, active.id);
 		} else if (active) {
 			startDiskCacheWatcher();
 			poke(active, ctx, force);

@@ -28,7 +28,7 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 | :--- | :--- |
 | **Antigravity Pro (Gemini)** | `5h: ░░░░░░ 0% ~4h · W: █████▌░ 79% ~4d` |
 | **Antigravity Pro (Claude/GPT)** | `5h: ░░░░░░ 0% ~4h · W: ████░░░ 61% ~6d` |
-| **OpenAI (ChatGPT OAuth)** | `ChatGPT plan · usage: https://chatgpt.com/settings/usage` |
+| **OpenAI (ChatGPT OAuth)** | Hidden (no verified quota endpoint) |
 | **OpenAI Codex** | `5h: ░░░░░░ 1% ~4h · W: ███░░░ 51% ~3d · 3 resets left` |
 | **OpenCode Go** | `Peak ~2h · R: ░░░░░░ 2% ~3h · W: ██░░░░ 44% ~3d · M: ██████ 98% ~14d` |
 | **DeepSeek API** | `Off-Peak ~5h · $12.34` |
@@ -73,7 +73,7 @@ Each provider reads its credential from the first non-empty environment variable
 | OpenAI Codex (legacy) | `OPENAI_CODEX_TOKEN`, `CODEX_ACCESS_TOKEN`, `CHATGPT_ACCESS_TOKEN` | `openai-codex` (OAuth) |
 | Antigravity | `ANTIGRAVITY_TOKEN`, `ANTIGRAVITY_API_KEY` | `antigravity` (OAuth, auto-refreshed) |
 
-`openai` supports both API keys and the new ChatGPT OAuth flow. Only a stored OAuth credential counts as a ChatGPT subscription here; `OPENAI_API_KEY` and legacy Codex tokens do not. The new grant targets `api.openai.com`, not the Codex backend. OpenAI’s [current integration guide](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions) points to [ChatGPT Settings → Usage](https://chatgpt.com/settings/usage) rather than documenting a quota-read API. Consequently, the footer and `/usage` show that link without polling, quota bars, or fabricated reset times. `/usage refresh openai` (or `chatgpt` / `active`) reports quota refresh as unavailable, not failed. Legacy `openai-codex` retains its quota polling and credential aliases.
+`openai` supports both API keys and the new ChatGPT OAuth flow. Only a stored OAuth credential counts as a ChatGPT subscription here; `OPENAI_API_KEY` and legacy Codex tokens do not. The new grant targets `api.openai.com`, not the Codex backend. OpenAI’s [current integration guide](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions) points to [ChatGPT Settings → Usage](https://chatgpt.com/settings/usage) rather than documenting a quota-read API. Consequently, the footer is hidden for `openai`, while `/usage` provides the usage-settings link. Neither polls or fabricates quota bars or reset times. `/usage refresh openai` (or `chatgpt` / `active`) reports quota refresh as unavailable, not failed. Legacy `openai-codex` retains its quota polling and credential aliases.
 
 The Codex usage endpoint sits behind Cloudflare and needs a browser User-Agent; set `CODEX_USER_AGENT` to replace the built-in one if it starts getting rejected. Antigravity similarly honors `ANTIGRAVITY_USER_AGENT` and `ANTIGRAVITY_BASE_URL`.
 
