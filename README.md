@@ -57,7 +57,7 @@ Shown on the status line right under `… 12.5%/200k (auto)    kimi-k2 • high`
 
 All controls live under one `/usage` command:
 
-- `/usage` shows every window for **logged-in** providers (Pi credentials or environment tokens/API keys; logged-out providers are hidden even if cached usage exists) as a detailed readout (percents, bars, reset countdowns + absolute reset times, plan, balance, and freshness). Only the active provider is live-fetched; the rest render from cache. It works even while the footer is hidden. For DeepSeek it also lists both peak windows (Monday–Friday UTC days only, so weekends never bill peak) in your local time alongside their canonical UTC ranges.
+- Bare `/usage` opens the same interactive settings menu as `/goal` in the TUI (footer style, refresh, and the detailed readout as menu screens). Outside the TUI it shows every window for **logged-in** providers (Pi credentials or environment tokens/API keys; logged-out providers are hidden even if cached usage exists) as a detailed readout (percents, bars, reset countdowns + absolute reset times, plan, balance, and freshness). Only the active provider is live-fetched; the rest render from cache. It works even while the footer is hidden. For DeepSeek it also lists both peak windows (Monday–Friday UTC days only, so weekends never bill peak) in your local time alongside their canonical UTC ranges.
 - `/usage toggle` cycles the status line through bar cells (`bars`), bare percentages (`percent`), and hidden (`off`). Pass a mode to jump straight to it, e.g. `/usage toggle percent`. While hidden, no status is shown and no provider requests are made; toggling back re-renders (or refetches) immediately. The choice persists across sessions in the Pi agent directory.
 - `/usage refresh [all|<provider>|active]` requests fresh usage immediately, bypassing cooldowns. It refreshes **every** configured provider by default; pass `active` for just the provider behind the current model, or a provider id/alias (`opencode-go`, `zen`, `openai`, `chatgpt`, `openai-codex`, `codex`, `antigravity`, `deepseek`, …) for a single one. An unknown target warns without issuing any request. Providers with no stored credential are reported as *skipped* rather than failed, and only the provider active at completion owns the footer status and wake timer. When the display is `off`, this command makes no requests; enable it with `/usage toggle` first. Automatic retries recover from temporary provider failures without needing a model switch or reload.
 
@@ -161,6 +161,7 @@ All presence controls are consolidated under a single clean `/discord` command:
 
 | Command | Usage | Description |
 | :--- | :--- | :--- |
+| `/discord` | `/discord` | Open the interactive settings menu: presence, privacy, cost, and buttons, plus status and configuration screens. |
 | `/discord status` | `/discord status` | View live connection status, publisher details, active models, token metrics, and per-session diagnostics. |
 | `/discord privacy` | `/discord privacy [strict\|project]` | Cycle or set privacy mode immediately without restarting Pi. Persists across sessions. |
 | `/discord toggle` | `/discord toggle [on\|off]` | Turn Discord Presence publishing on or off on the fly. Persists in preferences. |
@@ -265,7 +266,7 @@ For an OpenAI-compatible local server, Pi requests streaming usage by default. K
 
 | Command | Usage | Description |
 | :--- | :--- | :--- |
-| `/throughput` | `/throughput` | Detailed readout of the last measurement (model, TTFT, input split, decode rate and span, freshness). Works even while the footer line is hidden. |
+| `/throughput` | `/throughput` | Bare `/throughput` opens the settings menu (last measurement and the footer toggle); outside the TUI it is the detailed readout of the last measurement (model, TTFT, input split, decode rate and span, freshness). Works even while the footer line is hidden. |
 | `/throughput toggle` | `/throughput toggle [on\|off]` | Cycle `on` → `off`, or jump straight to a mode. Persists in the Pi agent directory; `off` clears the line and stops all measurement. |
 | `/throughput help` | `/throughput help` | Show the command help. |
 
@@ -321,6 +322,7 @@ One nested model call with its own system prompt, `cacheRetention: "none"`, a fr
 
 | Command | Usage | Description |
 | :--- | :--- | :--- |
+| `/rewrite` | `/rewrite` | Open the interactive settings menu: rewrite model (searchable picker), conversation context, and the last rewrite. |
 | `/rewrite <prompt>` | `/rewrite <prompt>` | Improve the given text and load it into the editor. |
 | `/rewrite model` | `/rewrite model <provider/id>\|reset` | Choose the rewrite model; `reset` returns to the session model. |
 | `/rewrite context` | `/rewrite context [on\|off]` | Include a short recent-conversation excerpt for reference resolution. |
@@ -364,11 +366,20 @@ All four extensions expose one slash command with subcommands, a help screen, an
 
 Behaviour changes that came with it:
 
-* Help is always shown as a notification. Longer readouts (`/discord config`, `/rewrite last`) open in the TUI viewer through `showText()`; RPC keeps the notification because `editor` is a blocking dialog there. The `/usage` and `/throughput` readouts are notifications too, so they stay visible next to the footer they explain.
+* Help is always shown as a notification. Longer readouts (`/discord config`, `/rewrite last`) open in the TUI viewer through `showText()`; RPC keeps the notification because `editor` is a blocking dialog there. The `/usage` and `/throughput` subcommand readouts are notifications too, so they stay visible next to the footer they explain; in the TUI the bare commands open the shared settings menu instead (see below).
 * All extension preferences, the usage cache/auth lookup, and Discord's shared state now use `PI_CODING_AGENT_DIR` when set (otherwise `~/.pi/agent`). Preference/state writes are atomic where supported.
 * Usage lines list every subcommand, including `help`: `/usage | toggle [bars|percent|off] | refresh [all|<provider>|active] | help`.
 
 The kit is helpers only — no domain logic, no module state, and no runtime import from pi (types only), so the extension suite still runs under plain `node --test`.
+
+## 🎛️ Shared settings menus (`extensions/shared/settings-menu.ts`)
+
+Bare `/usage`, `/discord`, `/throughput`, and `/rewrite` open the same interactive TUI menu as bare `/goal`, built from the same `@narumitw/pi-tui-kit` primitives Pi Goal uses: declarative screens, current-value settings rows, standard hints, Esc/Back navigation, and cancellation. Menus open in the TUI only; RPC, print, and JSON keep each command's text readout, exactly like Pi Goal.
+
+* Each menu keeps its domain logic in the extension; the shared module owns the capability check, the lazily cached `@narumitw/pi-tui-kit` import, and the `runMenu` error and unsupported-mode handling.
+* The kit (and the Pi TUI it imports) loads on the first menu open, so sessions and `node --test` never pay for the TUI runtime.
+* Every setting the menu exposes also remains a subcommand, so scripted and interactive use stay in sync.
+
 ---
 
 ## 🧰 My Pi Setup

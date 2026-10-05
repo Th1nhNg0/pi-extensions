@@ -12,6 +12,8 @@
  *
  * A public default Discord application ID is included; PI_DISCORD_CLIENT_ID
  * can override it. Discord Desktop must be running in the background.
+ * Bare `/discord` opens the same interactive settings menu as `/goal`; every
+ * setting is also available as a subcommand.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -31,6 +33,7 @@ import {
 	writeJsonFile,
 	type CommandSpec,
 } from "./shared/command-kit.ts";
+import { menuSupported, showExtensionMenu } from "./shared/settings-menu.ts";
 import { SubagentTracker } from "./discord/subagent-tracker.ts";
 import {
 	createDiscordPresenceTransport,
@@ -244,6 +247,8 @@ export const DISCORD_SPECS: readonly CommandSpec[] = [
 	{ name: "status", description: "view active sessions & diagnostics" },
 	{ name: "privacy", values: PRIVACY_MODES, description: "set privacy mode" },
 	{ name: "toggle", values: ["on", "off"], description: "toggle presence on or off" },
+	{ name: "cost", values: ["on", "off"], description: "show or hide token cost" },
+	{ name: "buttons", values: ["on", "off"], description: "enable or disable Discord buttons" },
 	{ name: "config", description: "show the configuration overview" },
 	{ name: "help", description: "show this help" },
 ];
@@ -330,6 +335,19 @@ export async function resolveProjectName(
 	return basenameForAnyPlatform(cwd);
 }
 
+/** State projected onto the bare-`/discord` menu screens. */
+interface DiscordMenuState {
+	enabled: boolean;
+	privacy: PresencePrivacyMode;
+	showCost: boolean;
+	buttons: boolean;
+	status: string;
+	config: string;
+	diagnostics: string;
+	costOverride: boolean;
+	buttonsOverride: boolean;
+}
+
 export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void {
 	if (isSubagentEnvironment()) {
 		return;
@@ -341,16 +359,24 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 	const activeTools = new Map<string, PresenceAction>();
 	let anonymousToolCounter = 0;
 
-	async function handleStatus(
-		ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1],
-	) {
+	type DiscordCmdCtx = Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1];
+
+	/** Diagnostics text shared by `/discord status` and the settings menu. */
+	async function buildStatusText(): Promise<string> {
 		let text = manager
 			? await manager.getDiagnosticText()
 			: `Discord presence: ${disabledReason ?? "not started"}`;
 		if (subagentTracker?.isInstalled()) {
 			text += `\nSubagents integration: active (${subagentTracker.getTotalActiveCount()} running)`;
 		}
-		ctx.ui.notify(text, manager?.getStatus() === "connected" ? "info" : "warning");
+		return text;
+	}
+
+	async function handleStatus(ctx: DiscordCmdCtx): Promise<void> {
+		ctx.ui.notify(
+			await buildStatusText(),
+			manager?.getStatus() === "connected" ? "info" : "warning",
+		);
 	}
 
 	async function handlePrivacy(
@@ -413,9 +439,8 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 		}
 	}
 
-	async function handleConfig(
-		ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1],
-	) {
+	/** Configuration overview shared by `/discord config` and the settings menu. */
+	async function buildConfigText(): Promise<string> {
 		const prefs = await readPrefs();
 		const configuredClientId = process.env[CLIENT_ID_ENV];
 		const clientId = configuredClientId ?? DEFAULT_CLIENT_ID;
@@ -446,12 +471,177 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 			`subagents: ${subagentTracker?.isInstalled() ? `detected (${subagentTracker.getTotalActiveCount()} running)` : "not detected"}`,
 			`preferences: ${DEFAULT_PREFS_PATH}`,
 		];
-		await showText(ctx, "Discord presence — configuration", lines.join("\n"));
+		return lines.join("\n");
+	}
+
+	async function handleConfig(ctx: DiscordCmdCtx): Promise<void> {
+		await showText(ctx, "Discord presence — configuration", await buildConfigText());
+	}
+
+	/** `/discord cost [on|off]` — show or hide token cost in the presence. */
+	async function handleCost(arg: string, ctx: DiscordCmdCtx): Promise<void> {
+		const prefs = await readPrefs();
+		const normalized = arg.trim().toLowerCase();
+		const parsed = parseOnOff(normalized);
+		if (normalized.length > 0 && parsed === undefined) {
+			ctx.ui.notify(unknownMode(arg, ["on", "off"]), "warning");
+			return;
+		}
+		const next = parsed ?? !presenceSwitch(SHOW_COST_ENV, prefs.showCost);
+		prefs.showCost = next;
+		await writePrefs(prefs);
+		if (manager) await manager.setShowCost(next);
+		ctx.ui.notify(
+			`Discord Presence cost display ${next ? "enabled" : "disabled"} (saved).`,
+			"info",
+		);
+	}
+
+	/** `/discord buttons [on|off]` — enable or disable Discord buttons. */
+	async function handleButtons(arg: string, ctx: DiscordCmdCtx): Promise<void> {
+		const prefs = await readPrefs();
+		const normalized = arg.trim().toLowerCase();
+		const parsed = parseOnOff(normalized);
+		if (normalized.length > 0 && parsed === undefined) {
+			ctx.ui.notify(unknownMode(arg, ["on", "off"]), "warning");
+			return;
+		}
+		const next = parsed ?? !presenceSwitch(BUTTONS_ENV, prefs.buttons);
+		prefs.buttons = next;
+		await writePrefs(prefs);
+		if (manager) await manager.setEnableButtons(next);
+		ctx.ui.notify(`Discord Presence buttons ${next ? "enabled" : "disabled"} (saved).`, "info");
+	}
+
+	/** Bare `/discord`: the /goal-style menu with status, configuration, and settings. */
+	async function showDiscordMenu(ctx: DiscordCmdCtx): Promise<void> {
+		type Screen = "main" | "settings" | "status" | "config";
+		type Action = "set-enabled" | "set-privacy" | "set-cost" | "set-buttons";
+		await showExtensionMenu<DiscordMenuState, Screen, Action>(
+			ctx,
+			(kit) =>
+				kit.defineMenu<DiscordMenuState, Screen, Action>({
+					start: "main",
+					screens: {
+						main: ({ state }) => ({
+							kind: "actions",
+							title: "Discord Rich Presence",
+							lines: [
+								`Status: ${state.status}`,
+								`Privacy: ${state.privacy}`,
+								`Cost: ${state.showCost ? "shown" : "hidden"}`,
+							],
+							items: [
+								{ id: "status", label: "Status & diagnostics", to: "status" },
+								{ id: "config", label: "Configuration", to: "config" },
+								{ id: "settings", label: "Settings", to: "settings" },
+								{ id: "close", label: "Close", close: true },
+							],
+							hint: "close",
+						}),
+						settings: ({ state }) => ({
+							kind: "settings",
+							title: "Discord Rich Presence settings",
+							lines: [`Preferences · ${DEFAULT_PREFS_PATH}`],
+							items: [
+								{
+									id: "enabled",
+									label: "Presence",
+									description: "Publish Rich Presence for active Pi sessions.",
+									currentValue: state.enabled ? "On" : "Off",
+									values: ["On", "Off"],
+									action: "set-enabled",
+								},
+								{
+									id: "privacy",
+									label: "Privacy mode",
+									description:
+										"Strict hides project and usage details; project shows the project name.",
+									currentValue: state.privacy === "strict" ? "Strict" : "Project",
+									values: ["Strict", "Project"],
+									action: "set-privacy",
+								},
+								{
+									id: "cost",
+									label: "Cost display",
+									description: state.costOverride
+										? `Saved preference; ${SHOW_COST_ENV} currently overrides it.`
+										: "Show token cost in the presence.",
+									currentValue: state.showCost ? "Shown" : "Hidden",
+									values: ["Shown", "Hidden"],
+									action: "set-cost",
+								},
+								{
+									id: "buttons",
+									label: "Discord buttons",
+									description: state.buttonsOverride
+										? `Saved preference; ${BUTTONS_ENV} currently overrides it.`
+										: "Add Discord profile buttons to the presence.",
+									currentValue: state.buttons ? "Enabled" : "Disabled",
+									values: ["Enabled", "Disabled"],
+									action: "set-buttons",
+								},
+							],
+						}),
+						status: ({ state }) => ({
+							kind: "detail",
+							title: "Discord Rich Presence — status",
+							lines: state.diagnostics.split("\n"),
+							hint: "back",
+						}),
+						config: ({ state }) => ({
+							kind: "detail",
+							title: "Discord Rich Presence — configuration",
+							lines: state.config.split("\n"),
+							hint: "back",
+						}),
+					},
+					actions: {
+						"set-enabled": async ({ value, ctx: menuCtx }) => {
+							if (value) await handleToggle(value, menuCtx);
+							return { kind: "stay" };
+						},
+						"set-privacy": async ({ value, ctx: menuCtx }) => {
+							if (value) await handlePrivacy(value, menuCtx);
+							return { kind: "stay" };
+						},
+						"set-cost": async ({ value, ctx: menuCtx }) => {
+							await handleCost(value === "Shown" ? "on" : "off", menuCtx);
+							return { kind: "stay" };
+						},
+						"set-buttons": async ({ value, ctx: menuCtx }) => {
+							if (value) await handleButtons(value, menuCtx);
+							return { kind: "stay" };
+						},
+					},
+				}),
+			{
+				getState: async () => {
+					const prefs = await readPrefs();
+					const enabled = prefs.enabled !== false;
+					return {
+						enabled,
+						privacy:
+							manager?.getPrivacyMode() ??
+							prefs.privacyMode ??
+							parsePrivacyMode(process.env[PRIVACY_ENV]),
+						showCost: presenceSwitch(SHOW_COST_ENV, prefs.showCost),
+						buttons: presenceSwitch(BUTTONS_ENV, prefs.buttons),
+						status: manager?.getStatusText() ?? disabledReason ?? (enabled ? "ready" : "disabled"),
+						config: await buildConfigText(),
+						diagnostics: await buildStatusText(),
+						costOverride: parseOnOff(process.env[SHOW_COST_ENV] ?? "") !== undefined,
+						buttonsOverride: parseOnOff(process.env[BUTTONS_ENV] ?? "") !== undefined,
+					};
+				},
+			},
+		);
 	}
 
 	// Unified /discord command
 	pi.registerCommand("discord", {
-		description: "Manage Discord Rich Presence (/discord status | privacy | toggle | config)",
+		description:
+			"Manage Discord Rich Presence (/discord status | privacy | toggle | cost | buttons | config)",
 		getArgumentCompletions: (prefix) => argumentCompletions(DISCORD_SPECS, prefix),
 		handler: async (args, ctx) => {
 			const { sub, rest } = parseSubcommand(args);
@@ -483,6 +673,8 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 									lines: [
 										`privacy: ${manager?.getPrivacyMode() ?? "strict"}`,
 										`enabled: ${helpPrefs.enabled === false ? "no" : "yes"}`,
+										`cost: ${presenceSwitch(SHOW_COST_ENV, helpPrefs.showCost) ? "shown" : "hidden"}`,
+										`buttons: ${presenceSwitch(BUTTONS_ENV, helpPrefs.buttons) ? "enabled" : "disabled"}`,
 										`preferences: ${DEFAULT_PREFS_PATH}`,
 									],
 								},
@@ -492,6 +684,10 @@ export default function registerDiscordPresenceExtension(pi: ExtensionAPI): void
 					break;
 				}
 				case "":
+					if (menuSupported(ctx)) {
+						await showDiscordMenu(ctx);
+						return;
+					}
 					await handleConfig(ctx);
 					break;
 				default:

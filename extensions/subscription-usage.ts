@@ -11,7 +11,8 @@
  *   5h: ░░░░░░ 1% ~4h · W: ░░░░░░ 0% ~6d
  *   Off-Peak ~5h · $12.34                        ← DeepSeek API balance
  *
- * `/usage` shows the detailed readout for logged-in providers;
+ * `/usage` shows the detailed readout for logged-in providers; in interactive
+ * sessions bare `/usage` opens the same TUI settings menu as `/goal`.
  * `/usage toggle [bars|percent|off]` cycles bars → bare percentages →
  * hidden (or jumps straight to the given mode); the choice persists in the
  * Pi agent directory (`~/.pi/agent` by default; honors `PI_CODING_AGENT_DIR`).
@@ -84,6 +85,7 @@ export { bar, detailBar, fetchAgeLabel, formatUsageDetails, windowSegment };
 export type { UsageStyle };
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+	agentFilePath,
 	argumentCompletions,
 	commandHelp,
 	cycleMode,
@@ -97,6 +99,7 @@ import {
 	unknownSubcommand,
 	type CommandSpec,
 } from "./shared/command-kit.ts";
+import { menuSupported, showExtensionMenu } from "./shared/settings-menu.ts";
 import {
 	formatRefreshNotice,
 	resolveRefreshTargets as resolveRefreshTargetsImpl,
@@ -639,6 +642,20 @@ export function resolveRefreshTargets(
 	return resolveRefreshTargetsImpl(arg, cfgs, activeProviderId);
 }
 
+/** State projected onto the bare-`/usage` menu screens. */
+interface UsageMenuState {
+	mode: UsageMode;
+	detail: string;
+	providers: string;
+	active: string;
+}
+
+/** Title-case footer style for the settings row. */
+function formatUsageMode(mode: UsageMode): string {
+	if (mode === "bars") return "Bars";
+	return mode === "percent" ? "Percent" : "Off";
+}
+
 export default function (pi: ExtensionAPI) {
 	const cache = new Map<string, ProviderState>();
 	let currentCtx: StatusCtx | undefined;
@@ -1088,10 +1105,155 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Single `/usage` command: bare `/usage` shows the detailed readout;
-	 * `/usage toggle [bars|percent|off]` cycles the footer style;
-	 * `/usage refresh [all|<provider>|active]` force-refetches every usage
-	 * provider (default) or the named/active one.
+	 * One live fetch for the provider active now; the rest render from cache so
+	 * one command never fans out to every API. Shared by bare `/usage` and the
+	 * menu it opens.
+	 */
+	async function refreshActiveUsage(ctx: UsageCmdCtx): Promise<void> {
+		if (mode === "off") return;
+		const model = safeModel(ctx);
+		const activeCfg = cfgs
+			.filter((cfg) => hasUsageCredential(cfg.id))
+			.find((c) => c.id === model?.provider);
+		if (!activeCfg || "usageLink" in activeCfg) return;
+		try {
+			await refresh(activeCfg, ctx, { force: true, hard: true });
+		} catch {
+			// refresh() already renders footer errors; details fall back to cache below.
+		}
+		const state = cache.get(activeCfg.id);
+		const current = safeModel(ctx);
+		if (state && safeUi(ctx))
+			arm(activeCfg, ctx, nextDelay(state, Date.now(), current?.id, activeCfg.id));
+	}
+
+	/** Detailed readout for every logged-in provider, from cache and disk. */
+	async function buildUsageDetails(ctx: UsageCmdCtx): Promise<string> {
+		const model = safeModel(ctx);
+		const loggedInCfgs = cfgs.filter((cfg) => hasUsageCredential(cfg.id));
+		const activeCfg = loggedInCfgs.find((c) => c.id === model?.provider);
+		const sections: string[] = [];
+		for (const cfg of loggedInCfgs) {
+			if ("usageLink" in cfg) {
+				sections.push(
+					`Subscription usage — ${cfg.id} (ChatGPT plan)\n` +
+						`Quota percentages are not available through a documented API.\n` +
+						`Manage usage: ${cfg.usageLink}`,
+				);
+				continue;
+			}
+			const state = cache.get(cfg.id);
+			let data = state?.lastData;
+			let fetchedAt = state?.lastFetch;
+			if (!data) {
+				try {
+					const disk = (await loadDiskCache())[cfg.id];
+					if (disk?.data) {
+						data = disk.data;
+						fetchedAt = disk.fetchedAt;
+					}
+				} catch {
+					// Disk cache is best-effort; missing data is reported below.
+				}
+			}
+			const modelId = cfg === activeCfg ? model?.id : undefined;
+			sections.push(
+				data
+					? formatUsageDetails(data, cfg.id, { modelId, fetchedAt, now: Date.now() })
+					: `${cfg.id}: no usage data yet`,
+			);
+		}
+		const hiddenHint = mode === "off" ? "\n(Footer hidden — /usage toggle to restore it)" : "";
+		return (sections.join("\n\n") || "No subscription providers logged in") + hiddenHint;
+	}
+
+	/** Bare `/usage`: the /goal-style menu with the readout and settings. */
+	async function showUsageMenu(ctx: UsageCmdCtx): Promise<void> {
+		await showExtensionMenu<
+			UsageMenuState,
+			"main" | "settings" | "details",
+			"set-mode" | "refresh"
+		>(
+			ctx,
+			(kit) =>
+				kit.defineMenu<UsageMenuState, "main" | "settings" | "details", "set-mode" | "refresh">({
+					start: "main",
+					screens: {
+						main: ({ state }) => ({
+							kind: "actions",
+							title: "Subscription usage",
+							lines: [
+								`Footer style: ${formatUsageMode(state.mode)}`,
+								`Providers: ${state.providers}`,
+								`Active provider: ${state.active}`,
+							],
+							items: [
+								{
+									id: "refresh",
+									label: "Refresh now",
+									description: "Force-refresh every usage provider",
+									action: "refresh",
+									busyLabel: "Refreshing",
+								},
+								{ id: "details", label: "Usage details", to: "details" },
+								{ id: "settings", label: "Settings", to: "settings" },
+								{ id: "close", label: "Close", close: true },
+							],
+							hint: "close",
+						}),
+						settings: ({ state }) => ({
+							kind: "settings",
+							title: "Subscription usage settings",
+							lines: [`Preferences · ${agentFilePath(PREFS_FILE)}`],
+							items: [
+								{
+									id: "mode",
+									label: "Footer style",
+									description: "How usage windows are drawn in Pi's status area.",
+									currentValue: formatUsageMode(state.mode),
+									values: ["Bars", "Percent", "Off"],
+									action: "set-mode",
+								},
+							],
+						}),
+						details: ({ state }) => ({
+							kind: "detail",
+							title: "Subscription usage",
+							lines: state.detail.split("\n"),
+							hint: "back",
+						}),
+					},
+					actions: {
+						"set-mode": async ({ value, ctx: menuCtx }) => {
+							const parsed = parseMode(value ?? "", USAGE_MODES);
+							if (parsed) await handleUsageToggle(parsed, menuCtx);
+							return { kind: "stay" };
+						},
+						refresh: async ({ ctx: menuCtx }) => {
+							await handleUsageRefresh("all", menuCtx);
+							return { kind: "stay" };
+						},
+					},
+				}),
+			{
+				getState: async (menuCtx) => {
+					const providers = cfgs.filter((cfg) => hasUsageCredential(cfg.id)).map((cfg) => cfg.id);
+					return {
+						mode,
+						detail: await buildUsageDetails(menuCtx),
+						providers: providers.length > 0 ? providers.join(", ") : "none logged in",
+						active: safeModel(menuCtx)?.provider ?? "none",
+					};
+				},
+			},
+		);
+	}
+
+	/**
+	 * Single `/usage` command: bare `/usage` opens the settings menu in the TUI
+	 * (the detailed readout elsewhere); `/usage toggle [bars|percent|off]` cycles
+	 * the footer style; `/usage refresh [all|<provider>|active]` force-refetches
+	 * every usage provider (default) or the named/active one.
 	 */
 	pi.registerCommand("usage", {
 		description: `Show subscription usage (${usageLine("/usage", USAGE_SPECS).replace("Usage: ", "")})`,
@@ -1144,60 +1306,14 @@ export default function (pi: ExtensionAPI) {
 					return;
 			}
 
-			// Bare `/usage`: only providers with currently configured credentials.
-			const model = safeModel(ctx);
-			const loggedInCfgs = cfgs.filter((cfg) => hasUsageCredential(cfg.id));
-			const activeCfg = loggedInCfgs.find((c) => c.id === model?.provider);
-			// One live fetch for the active provider; the rest render from cache
-			// so one keystroke never fans out to every API.
-			// While hidden (`off`) there are no fetches at all; render from cache.
-			if (activeCfg && !("usageLink" in activeCfg) && mode !== "off") {
-				try {
-					await refresh(activeCfg, ctx, { force: true, hard: true });
-				} catch {
-					// refresh() already renders footer errors; details fall back to cache below.
-				}
-				const s = cache.get(activeCfg.id);
-				const current = safeModel(ctx);
-				if (s && safeUi(ctx))
-					arm(activeCfg, ctx, nextDelay(s, Date.now(), current?.id, activeCfg.id));
+			// Bare `/usage`: the /goal-style menu in the TUI; elsewhere the
+			// detailed readout for currently configured providers.
+			await refreshActiveUsage(ctx);
+			if (menuSupported(ctx)) {
+				await showUsageMenu(ctx);
+				return;
 			}
-			const sections: string[] = [];
-			for (const cfg of loggedInCfgs) {
-				if ("usageLink" in cfg) {
-					sections.push(
-						`Subscription usage — ${cfg.id} (ChatGPT plan)\n` +
-							`Quota percentages are not available through a documented API.\n` +
-							`Manage usage: ${cfg.usageLink}`,
-					);
-					continue;
-				}
-				const state = cache.get(cfg.id);
-				let data = state?.lastData;
-				let fetchedAt = state?.lastFetch;
-				if (!data) {
-					try {
-						const disk = (await loadDiskCache())[cfg.id];
-						if (disk?.data) {
-							data = disk.data;
-							fetchedAt = disk.fetchedAt;
-						}
-					} catch {
-						// Disk cache is best-effort; missing data is reported below.
-					}
-				}
-				const modelId = cfg === activeCfg ? model?.id : undefined;
-				sections.push(
-					data
-						? formatUsageDetails(data, cfg.id, { modelId, fetchedAt, now: Date.now() })
-						: `${cfg.id}: no usage data yet`,
-				);
-			}
-			const hiddenHint = mode === "off" ? "\n(Footer hidden — /usage toggle to restore it)" : "";
-			ctx.ui.notify(
-				(sections.join("\n\n") || "No subscription providers logged in") + hiddenHint,
-				"info",
-			);
+			ctx.ui.notify(await buildUsageDetails(ctx), "info");
 		},
 	});
 	pi.on("session_start", async (_event, ctx) => {

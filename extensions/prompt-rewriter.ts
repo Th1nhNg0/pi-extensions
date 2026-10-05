@@ -17,6 +17,7 @@
  *   /rewrite context [on|off]          include recent conversation context
  *   /rewrite last                      show the last rewrite
  *   /rewrite help                      show help and current settings
+ *   /rewrite                           open the settings menu in the TUI
  *
  * Optional environment settings:
  *   PI_REWRITE_MODEL=provider/id       seed the rewrite model (default: session model)
@@ -35,6 +36,7 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+	agentFilePath,
 	argumentCompletions,
 	commandHelp,
 	loadPrefs,
@@ -46,6 +48,7 @@ import {
 	type CommandSpec,
 } from "./shared/command-kit.ts";
 import { asRecord } from "./shared/record-guards.ts";
+import { menuSupported, showExtensionMenu } from "./shared/settings-menu.ts";
 
 const PREFS_FILE = "prompt-rewriter-prefs.json";
 const STATUS_KEY = "prompt-rewriter";
@@ -924,6 +927,142 @@ async function improveDraft(
 	);
 }
 
+/** State projected onto the bare-`/rewrite` menu screens. */
+interface RewriteMenuState {
+	model: string | null;
+	context: boolean;
+	thinking: string;
+	timeout: string;
+	last: string;
+	models: Array<{ id: string; label: string; description: string }>;
+}
+
+/** Bare `/rewrite`: the /goal-style menu with the rewrite settings. */
+async function showRewriteMenu(state: RewriterState, ctx: ExtensionCommandContext): Promise<void> {
+	type Screen = "main" | "settings" | "model" | "last";
+	type Action = "open-model" | "set-model" | "set-context";
+	await showExtensionMenu<RewriteMenuState, Screen, Action>(
+		ctx,
+		(kit) =>
+			kit.defineMenu<RewriteMenuState, Screen, Action>({
+				start: "main",
+				screens: {
+					main: ({ state: menu }) => ({
+						kind: "actions",
+						title: "Prompt rewriter",
+						lines: [
+							`Model: ${menu.model ?? "session model"}`,
+							`Context: ${menu.context ? "on" : "off"}`,
+							`Thinking: ${menu.thinking} (environment)`,
+							`Timeout: ${menu.timeout} (environment)`,
+						],
+						items: [
+							{
+								id: "model",
+								label: "Rewrite model",
+								description: menu.model ?? "session model",
+								to: "model",
+							},
+							{ id: "last", label: "Last rewrite", to: "last" },
+							{ id: "settings", label: "Settings", to: "settings" },
+							{ id: "close", label: "Close", close: true },
+						],
+						hint: "close",
+					}),
+					settings: ({ state: menu }) => ({
+						kind: "settings",
+						title: "Prompt rewriter settings",
+						lines: [
+							`Preferences · ${agentFilePath(PREFS_FILE)}`,
+							"Thinking and timeout come from the environment.",
+						],
+						items: [
+							{
+								id: "model",
+								label: "Rewrite model",
+								description: "Model used to rewrite prompts before sending.",
+								currentValue: menu.model ?? "session model",
+								action: "open-model",
+							},
+							{
+								id: "context",
+								label: "Conversation context",
+								description: "Include a short recent-conversation excerpt to resolve references.",
+								currentValue: menu.context ? "On" : "Off",
+								values: ["On", "Off"],
+								action: "set-context",
+							},
+						],
+					}),
+					model: ({ state: menu }) => ({
+						kind: "choice",
+						title: "Rewrite model",
+						lines: ["The rewriter uses this model; the session model is the default."],
+						items: [
+							{
+								id: "session",
+								label: "Session model",
+								description: "Use whatever model this session runs (default)",
+							},
+							...menu.models,
+						],
+						currentItemId: menu.model ?? "session",
+						enableSearch: true,
+						action: "set-model",
+						hint: "back",
+					}),
+					last: ({ state: menu }) => ({
+						kind: "detail",
+						title: "Prompt rewriter — last rewrite",
+						lines: menu.last.split("\n"),
+						hint: "back",
+					}),
+				},
+				actions: {
+					"open-model": () => ({ kind: "to", screen: "model" }),
+					"set-model": async ({ itemId, ctx: menuCtx }) => {
+						if (itemId === "session") {
+							state.prefs = { ...currentPrefs(state), model: null };
+							await savePrefs(PREFS_FILE, state.prefs, "[prompt-rewriter]");
+							notify(menuCtx, "Rewrite model reset to the session model.", "info");
+							return { kind: "back" };
+						}
+						const ref = parseModelRef(itemId);
+						if (!ref) {
+							notify(menuCtx, `Invalid model "${itemId}" — expected provider/model.`, "warning");
+							return { kind: "rejected" };
+						}
+						state.prefs = { ...currentPrefs(state), model: `${ref.provider}/${ref.modelId}` };
+						await savePrefs(PREFS_FILE, state.prefs, "[prompt-rewriter]");
+						notify(menuCtx, `Rewrite model set to ${itemId}.`, "info");
+						return { kind: "back" };
+					},
+					"set-context": async ({ value, ctx: menuCtx }) => {
+						const next = value !== "Off";
+						state.prefs = { ...currentPrefs(state), context: next };
+						await savePrefs(PREFS_FILE, state.prefs, "[prompt-rewriter]");
+						notify(menuCtx, `Rewrite context ${next ? "on" : "off"}.`, "info");
+						return { kind: "stay" };
+					},
+				},
+			}),
+		{
+			getState: (menuCtx) => ({
+				model: currentPrefs(state).model,
+				context: currentPrefs(state).context,
+				thinking: state.env.thinking ?? "minimal",
+				timeout: `${state.env.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`,
+				last: formatLastRewrite(state.last),
+				models: menuCtx.modelRegistry.getAvailable().map((model) => ({
+					id: `${model.provider}/${model.id}`,
+					label: `${model.provider}/${model.id}`,
+					description: model.name,
+				})),
+			}),
+		},
+	);
+}
+
 export default function promptRewriter(pi: ExtensionAPI): void {
 	const state = createState(readEnv(process.env));
 
@@ -994,6 +1133,10 @@ async function runRewriteCommand(
 		}
 		case "improve": {
 			if (parsed.text.length === 0) {
+				if (menuSupported(ctx)) {
+					await showRewriteMenu(state, ctx);
+					return;
+				}
 				notify(ctx, "Nothing to rewrite — pass the prompt: /rewrite <prompt>", "info");
 				return;
 			}

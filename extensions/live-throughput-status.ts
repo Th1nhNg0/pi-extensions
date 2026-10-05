@@ -26,8 +26,9 @@
  *
  * Everything is derived from the standard assistant-stream events, so no
  * provider id, model id, or server log is referenced anywhere. `/throughput`
- * shows the last measurement, `/throughput toggle [on|off]` hides or reveals
- * the line, and the choice persists in
+ * shows the last measurement; bare `/throughput` opens an interactive TUI
+ * settings menu (like `/goal`), while `/throughput toggle [on|off]` hides or
+ * reveals the line directly. The choice persists in
  * the Pi agent directory (`~/.pi/agent` by default; honors `PI_CODING_AGENT_DIR`).
  */
 
@@ -37,6 +38,7 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+	agentFilePath,
 	argumentCompletions,
 	commandHelp,
 	cycleMode,
@@ -50,6 +52,7 @@ import {
 	type CommandSpec,
 } from "./shared/command-kit.ts";
 import { asRecord } from "./shared/record-guards.ts";
+import { menuSupported, showExtensionMenu } from "./shared/settings-menu.ts";
 
 const STATUS_KEY = "live-throughput";
 const LABEL = "⚡";
@@ -285,6 +288,22 @@ function modelLabel(ctx: ExtensionContext): { provider?: string; model?: string 
 	};
 }
 
+/** State projected onto the bare-`/throughput` menu screens. */
+interface ThroughputMenuState {
+	mode: ThroughputMode;
+	summary: string;
+	readout: string;
+}
+
+/** One-line status for the menu: model, measured rate, and freshness. */
+function summarizeLastRun(run: ThroughputRun | undefined): string {
+	if (!run) return "No measurement yet — send a prompt first.";
+	const model = run.provider
+		? `${run.provider}${run.model ? ` • ${run.model}` : ""}`
+		: "unknown model";
+	return `${model} · ${finalRateText(run) ?? "rate unavailable"} · measured ${ageLabel(Date.now() - run.at)}`;
+}
+
 export default function registerLiveThroughput(pi: ExtensionAPI): void {
 	let mode: ThroughputMode = loadPrefs(PREFS_FILE, normalizePrefs).mode;
 
@@ -460,6 +479,71 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 		ctx.ui.notify("Live throughput shown", "info");
 	}
 
+	/** Bare `/throughput`: the /goal-style menu with the readout and settings. */
+	async function showThroughputMenu(ctx: ExtensionCommandContext): Promise<void> {
+		await showExtensionMenu<ThroughputMenuState, "main" | "settings" | "details", "set-mode">(
+			ctx,
+			(kit) =>
+				kit.defineMenu<ThroughputMenuState, "main" | "settings" | "details", "set-mode">({
+					start: "main",
+					screens: {
+						main: ({ state }) => ({
+							kind: "actions",
+							title: "Live throughput",
+							lines: [`Footer line: ${state.mode === "on" ? "shown" : "hidden"}`, state.summary],
+							items: [
+								{
+									id: "details",
+									label: "Last measurement",
+									description: state.summary,
+									to: "details",
+								},
+								{ id: "settings", label: "Settings", to: "settings" },
+								{ id: "close", label: "Close", close: true },
+							],
+							hint: "close",
+						}),
+						settings: ({ state }) => ({
+							kind: "settings",
+							title: "Live throughput settings",
+							lines: [`Preferences · ${agentFilePath(PREFS_FILE)}`],
+							items: [
+								{
+									id: "mode",
+									label: "Footer line",
+									description: "Show the live tokens-per-second line in Pi's status area.",
+									currentValue: state.mode === "on" ? "On" : "Off",
+									values: ["On", "Off"],
+									action: "set-mode",
+								},
+							],
+						}),
+						details: ({ state }) => ({
+							kind: "detail",
+							title: "Live throughput — last measurement",
+							lines: state.readout.split("\n"),
+							hint: "back",
+						}),
+					},
+					actions: {
+						"set-mode": async ({ value, ctx: menuCtx }) => {
+							if (value === "On" || value === "Off") {
+								await handleToggle(value.toLowerCase(), menuCtx);
+							}
+							return { kind: "stay" };
+						},
+					},
+				}),
+			{
+				getState: () => ({
+					mode,
+					summary: summarizeLastRun(lastRun),
+					readout: runReadout(lastRun, Date.now()),
+				}),
+			},
+		);
+	}
+
 	pi.registerCommand("throughput", {
 		description: "Show streaming throughput (/throughput | toggle [on|off] | help)",
 		getArgumentCompletions: (prefix) => argumentCompletions(THROUGHPUT_SPECS, prefix),
@@ -468,6 +552,10 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 
 			switch (sub) {
 				case "":
+					if (menuSupported(ctx)) {
+						await showThroughputMenu(ctx);
+						return;
+					}
 					break;
 				case "toggle":
 					await handleToggle(rest, ctx);
