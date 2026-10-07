@@ -3,7 +3,6 @@ import test from "node:test";
 import {
 	bar,
 	antigravityEndpointCandidates,
-	cap,
 	codexCfg,
 	detailBar,
 	fetchAgeLabel,
@@ -38,13 +37,6 @@ const mockTheme = {
 		return text;
 	},
 };
-
-test("cap capitalizes strings", () => {
-	assert.equal(cap("plus"), "Plus");
-	assert.equal(cap("pro"), "Pro");
-	assert.equal(cap("team"), "Team");
-	assert.equal(cap(""), "");
-});
 
 test("usage payload normalization clamps percentages and drops malformed data", () => {
 	assert.deepEqual(

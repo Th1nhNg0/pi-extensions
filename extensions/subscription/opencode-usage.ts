@@ -7,7 +7,7 @@ import { deepSeekPeakTag, usesDeepSeekPeakPricing } from "./usage-windows.ts";
 import { normalizePercent } from "./usage-cache.ts";
 import type { UsageData } from "./usage-cache.ts";
 
-export const OPENCODE_WINDOW_LABELS = {
+const OPENCODE_WINDOW_LABELS = {
 	rolling: "R",
 	weekly: "W",
 	monthly: "M",
@@ -25,7 +25,7 @@ export interface OpenCodeUsageResponse {
 	>;
 }
 
-export function parseOpenCodeUsage(json: OpenCodeUsageResponse): UsageData {
+function parseOpenCodeUsage(json: OpenCodeUsageResponse): UsageData {
 	const windows: Record<string, number> = {};
 	const resets: Record<string, number> = {};
 	for (const key of ["rolling", "weekly", "monthly"] as const) {

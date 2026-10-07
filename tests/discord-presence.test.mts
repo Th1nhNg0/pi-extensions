@@ -27,7 +27,6 @@ import {
 	type PresenceStateStore,
 	type SessionRecord,
 	basenameForAnyPlatform,
-	buildActivity,
 	buildAggregateActivity,
 	buildMultiSessionActivity,
 	buildSingleSessionActivity,
@@ -203,6 +202,25 @@ function makeRecord(
 		usage: emptyUsageTotals(),
 		...overrides,
 	};
+}
+
+/** A lone session's presence: the aggregate builder over a one-record registry. */
+function buildActivity(
+	session: Pick<SessionRecord, "projectName" | "provider" | "modelId" | "phase" | "startedAt">,
+	options?: Parameters<typeof buildAggregateActivity>[1],
+) {
+	return buildAggregateActivity(
+		{
+			version: 1,
+			publisherId: "current",
+			publisherGeneration: 1,
+			sessions: {
+				current: makeRecord("current", session.startedAt, { ...session, action: undefined }),
+			},
+			updatedAt: session.startedAt,
+		},
+		options,
+	);
 }
 
 // ---------------------------------------------------------------------------

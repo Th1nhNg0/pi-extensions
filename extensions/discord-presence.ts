@@ -141,7 +141,6 @@ export {
 	PRIVACY_MODES,
 	SMALL_IMAGES_ENV,
 	attachAssetsAndButtons,
-	buildActivity,
 	buildAggregateActivity,
 	buildMultiSessionActivity,
 	buildSingleSessionActivity,
@@ -159,7 +158,6 @@ export type {
 	ActivityBuildOptions,
 	PresenceActivity,
 	PresencePrivacyMode,
-	PresenceSnapshot,
 } from "./discord/activity.ts";
 export {
 	CLIENT_ID_ENV,
@@ -192,9 +190,6 @@ export { collectUsageFromEntries, extractUsage, formatCost, formatTokenCount, me
 export type { AggregateSummary, UsageDelta };
 
 export const SHOW_COST_ENV = "PI_DISCORD_SHOW_COST";
-
-export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
-export const IS_SUBAGENT_ENV = "PI_IS_SUBAGENT";
 
 /** Detect whether the current process is running inside a subagent child run. */
 export function isSubagentEnvironment(env: NodeJS.ProcessEnv = process.env): boolean {

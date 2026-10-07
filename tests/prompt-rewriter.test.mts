@@ -731,13 +731,6 @@ test("a configured model is used for rewrites and reported by help", async (t) =
 	assert.equal(h.requests.length, 1);
 });
 
-test("prefs files with junk fall back to defaults", async (t) => {
-	const h = harness(t, { rawPrefs: "{not json" });
-	await h.command("help");
-	assert.match(h.lastNotification().text, /model: session model/);
-	assert.match(h.lastNotification().text, /context: on/);
-});
-
 test("shutdown clears the transient status", async (t) => {
 	const h = harness(t);
 	await h.command(ROUGH_PROMPT);

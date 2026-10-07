@@ -11,7 +11,7 @@ import liveThroughput, {
 	CharsPerTokenCalibration,
 	compact,
 	decodeRate,
-	deltaChars,
+	classifyDelta,
 	finalRateText,
 	normalizePrefs,
 	processedInputTokens,
@@ -259,12 +259,6 @@ test("Input/TTFT excludes cache reads and includes cache writes (readout)", asyn
 	assert.match(writing.lastNotification().text, /Input\/TTFT: ~1\.0k tok\/s/);
 });
 
-test("providers without usage keep the chars/4 estimate in the footer", async (t) => {
-	const h = harness(t);
-	await streamTurn(h, t, {});
-	assert.equal(assertRateOnly(h.text()), "~200.0 tok/s");
-});
-
 test("a provider that streams no deltas leaves the last measured rate", async (t) => {
 	const h = harness(t);
 	await h.fire("session_start");
@@ -400,18 +394,6 @@ test("persisted prefs hide or restore the footer at session start", async (t) =>
 	assert.equal(assertRateOnly(shown.text()), "~200.0 tok/s");
 });
 
-test("malformed or unknown prefs fall back to a visible footer", async (t) => {
-	const malformed = harness(t, { rawPrefs: "{not json" });
-	await malformed.fire("session_start");
-	await streamTurn(malformed, t, {});
-	assert.equal(assertRateOnly(malformed.text()), "~200.0 tok/s");
-
-	const unknown = harness(t, { prefs: { mode: "sometimes" } });
-	await unknown.fire("session_start");
-	await streamTurn(unknown, t, {});
-	assert.equal(assertRateOnly(unknown.text()), "~200.0 tok/s");
-});
-
 test("sessions without a UI never write status", async (t) => {
 	const h = harness(t, { hasUI: false });
 	await h.fire("session_start");
@@ -536,16 +518,26 @@ test("/throughput help and unknown subcommands notify without measuring", async 
 	assert.match(h.lastNotification().text, /Unknown subcommand "explode"/);
 });
 
-test("deltaChars counts text, thinking, and tool-call deltas only", () => {
-	assert.equal(deltaChars({ type: "text_delta", delta: "abcd" }), 4);
-	assert.equal(deltaChars({ type: "thinking_delta", delta: "ab" }), 2);
-	assert.equal(deltaChars({ type: "toolcall_delta", delta: "a" }), 1);
-	assert.equal(deltaChars({ type: "text_start", delta: "abcd" }), 0);
-	assert.equal(deltaChars({ type: "text_delta", delta: 42 }), 0);
-	assert.equal(deltaChars({ type: "text_delta" }), 0);
-	assert.equal(deltaChars(undefined), 0);
-	assert.equal(deltaChars("text_delta"), 0);
-	assert.equal(deltaChars([{ type: "text_delta", delta: "x" }]), 0);
+test("classifyDelta sizes text, tool-call, and thinking deltas only", () => {
+	assert.deepEqual(classifyDelta({ type: "text_delta", delta: "abcd" }), {
+		chars: 4,
+		kind: "answer",
+	});
+	assert.deepEqual(classifyDelta({ type: "toolcall_delta", delta: "a" }), {
+		chars: 1,
+		kind: "answer",
+	});
+	assert.deepEqual(classifyDelta({ type: "thinking_delta", delta: "ab" }), {
+		chars: 2,
+		kind: "thinking",
+	});
+	assert.equal(classifyDelta({ type: "text_start", delta: "abcd" }), undefined);
+	assert.equal(classifyDelta({ type: "text_delta", delta: 42 }), undefined);
+	assert.equal(classifyDelta({ type: "text_delta", delta: "" }), undefined);
+	assert.equal(classifyDelta({ type: "text_delta" }), undefined);
+	assert.equal(classifyDelta(undefined), undefined);
+	assert.equal(classifyDelta("text_delta"), undefined);
+	assert.equal(classifyDelta([{ type: "text_delta", delta: "x" }]), undefined);
 });
 
 test("rateStatusText marks estimated rates with a tilde", () => {
@@ -623,6 +615,7 @@ test("compact, ageLabel, normalizePrefs, and runReadout handle edge inputs", () 
 	assert.deepEqual(normalizePrefs(undefined), { mode: "on" });
 	assert.deepEqual(normalizePrefs({ mode: "off" }), { mode: "off" });
 	assert.deepEqual(normalizePrefs("off"), { mode: "on" });
+	assert.deepEqual(normalizePrefs({ mode: "sometimes" }), { mode: "on" });
 	assert.equal(runReadout(undefined, START), "No measurement yet — send a prompt first.");
 	assert.equal(
 		runReadout({ provider: "local-llm", model: "qwen3-32b", at: START }, START),

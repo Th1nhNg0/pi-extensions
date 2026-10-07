@@ -7,7 +7,7 @@ import {
 	type PresencePhase,
 } from "./actions.ts";
 import { formatDiscordModelLabel, truncateText } from "./model-labels.ts";
-import { emptyUsageTotals, isSubagentRecord } from "./session-state.ts";
+import { isSubagentRecord } from "./session-state.ts";
 import type {
 	ContextSnapshot,
 	PresenceState,
@@ -348,32 +348,6 @@ export function buildAggregateActivity(
 	return buildMultiSessionActivity(state, options, records);
 }
 
-export interface PresenceSnapshot {
-	projectName: string;
-	provider?: string;
-	modelId?: string;
-	phase: PresencePhase;
-	action?: PresenceAction;
-	startedAt: number;
-	usage?: UsageTotals;
-	context?: ContextSnapshot;
-}
-
-function snapshotRecord(snapshot: PresenceSnapshot): SessionRecord {
-	return {
-		sessionId: "current",
-		projectName: snapshot.projectName,
-		provider: snapshot.provider,
-		modelId: snapshot.modelId,
-		phase: snapshot.phase,
-		action: snapshot.action,
-		startedAt: snapshot.startedAt,
-		lastSeenAt: snapshot.startedAt,
-		usage: snapshot.usage ?? emptyUsageTotals(),
-		context: snapshot.context,
-	};
-}
-
 function compareSessions(a: SessionRecord, b: SessionRecord): number {
 	return (
 		a.startedAt - b.startedAt ||
@@ -426,20 +400,4 @@ export function orderedSessions(state: PresenceState): SessionRecord[] {
 		}
 		return compareSessions(a, b);
 	});
-}
-
-export function buildActivity(
-	snapshot: PresenceSnapshot,
-	options: ActivityBuildOptions = {},
-): PresenceActivity {
-	return buildAggregateActivity(
-		{
-			version: 1,
-			publisherId: "current",
-			publisherGeneration: 1,
-			sessions: { current: snapshotRecord(snapshot) },
-			updatedAt: snapshot.startedAt,
-		},
-		options,
-	);
 }

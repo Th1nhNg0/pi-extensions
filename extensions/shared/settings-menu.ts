@@ -38,7 +38,7 @@ export function menuSupported(ctx: MenuCapabilityContext): boolean {
 let kitPromise: Promise<MenuKit> | undefined;
 
 /** Load pi-tui-kit once; a failed import is retried on the next menu open. */
-export function loadMenuKit(): Promise<MenuKit> {
+function loadMenuKit(): Promise<MenuKit> {
 	kitPromise ??= import("@narumitw/pi-tui-kit").catch((error: unknown) => {
 		kitPromise = undefined;
 		throw error;
@@ -85,6 +85,6 @@ export async function showExtensionMenu<State, ScreenId extends string, ActionId
 }
 
 /** Human-readable error text for notifications. */
-export function formatError(error: unknown): string {
+function formatError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }

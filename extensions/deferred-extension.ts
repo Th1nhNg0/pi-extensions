@@ -6,7 +6,7 @@ type EventRegistrar = (event: string, handler: EventHandler) => void;
 /** One loader per core, so a core that fails to import cannot take the others down. */
 export type CoreLoader = { name: string; load: () => Promise<CoreModule> };
 
-export const DEFAULT_CORES: readonly CoreLoader[] = [
+const DEFAULT_CORES: readonly CoreLoader[] = [
 	{ name: "subscription-usage", load: () => import("./subscription-usage.ts") },
 	{ name: "discord-presence", load: () => import("./discord-presence.ts") },
 	{ name: "live-throughput-status", load: () => import("./live-throughput-status.ts") },

@@ -2,7 +2,7 @@
 import { earliestReset } from "./usage-windows.ts";
 import type { UsageData } from "./usage-cache.ts";
 
-export const INTERVAL_MS = 5 * 60 * 1000; // idle refresh fallback
+const INTERVAL_MS = 5 * 60 * 1000; // idle refresh fallback
 export const COOLDOWN_MS = 60 * 1000; // min gap between real fetches (event pokes)
 export const MIN_FETCH_GAP_MS = 10_000; // absolute floor between API hits
 const ERROR_BACKOFF_BASE_MS = 20_000; // first failed retry waits 20s…

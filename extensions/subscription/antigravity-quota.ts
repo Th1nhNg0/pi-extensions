@@ -26,7 +26,7 @@ export interface AntigravityQuotaUsage {
 	resets: Record<string, number>;
 }
 
-export function parseAntigravityQuota(quotaJson: AntigravityQuotaSummary): AntigravityQuotaUsage {
+function parseAntigravityQuota(quotaJson: AntigravityQuotaSummary): AntigravityQuotaUsage {
 	const windows: Record<string, number> = {};
 	const resets: Record<string, number> = {};
 	for (const group of quotaJson.groups || []) {

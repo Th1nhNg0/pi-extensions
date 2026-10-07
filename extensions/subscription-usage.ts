@@ -209,10 +209,6 @@ interface ProviderState {
 	abortController?: AbortController;
 }
 
-export function cap(s: string): string {
-	return s ? s[0].toUpperCase() + s.slice(1) : s;
-}
-
 /**
  * Every usage provider this extension supports, in display order. `/usage
  * refresh` fans out over this list unless a narrower target is given.

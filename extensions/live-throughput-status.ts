@@ -112,15 +112,10 @@ const DELTA_KINDS: Readonly<Record<string, "answer" | "thinking">> = {
 };
 
 /**
- * Characters carried by one streaming delta. Thinking and tool-call deltas
- * count too: those are generated tokens, so ignoring them would understate
- * reasoning-heavy and tool-calling turns.
+ * A generated-output delta's size and kind, or undefined for any other event.
+ * Thinking and tool-call deltas count too: those are generated tokens, so
+ * ignoring them would understate reasoning-heavy and tool-calling turns.
  */
-export function deltaChars(event: unknown): number {
-	return classifyDelta(event)?.chars ?? 0;
-}
-
-/** A generated-output delta's size and kind, or undefined for any other event. */
 export function classifyDelta(
 	event: unknown,
 ): { chars: number; kind: "answer" | "thinking" } | undefined {
