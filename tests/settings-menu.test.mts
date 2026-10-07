@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import test, { type TestContext } from "node:test";
+import test, { before, type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import discordPresenceExtension from "../extensions/discord-presence.ts";
 import liveThroughput from "../extensions/live-throughput-status.ts";
@@ -32,6 +32,13 @@ async function recordedMenuRuns(): Promise<StubMenuRun[]> {
 	const kit = (await import("@narumitw/pi-tui-kit")) as unknown as { menuRuns: StubMenuRun[] };
 	return kit.menuRuns;
 }
+
+// Load the menu kit before any test mocks fs.readFileSync: some Node builds
+// read ESM sources through it, so a first import inside a test fails with the
+// mocked ENOENT. Later imports, including the extensions' lazy one, hit the cache.
+before(async () => {
+	await recordedMenuRuns();
+});
 
 /** Prefs and credentials read as absent, so nothing touches the real agent dir. */
 function noStoredFiles(t: TestContext): void {
