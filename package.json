@@ -26,7 +26,8 @@
     "typecheck": "tsc --noEmit",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "check": "npm run format:check && npm run typecheck && npm test"
+    "lint": "biome lint .",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test"
   },
   "pi": {
     "extensions": [

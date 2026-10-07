@@ -8,7 +8,7 @@ export const SUBAGENT_RPC_READY_EVENT = "subagents:rpc:v1:ready";
 export const SUBAGENT_RPC_REPLY_EVENT_PREFIX = "subagents:rpc:v1:reply:";
 
 export interface SubagentTrackerEventBus {
-	on(event: string, handler: (data: unknown) => void): (() => void) | void;
+	on(event: string, handler: (data: unknown) => void): (() => void) | undefined;
 	emit(event: string, data: unknown): void;
 }
 

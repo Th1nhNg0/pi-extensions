@@ -27,7 +27,8 @@ type DiskCache = Record<string, DiskCacheRecord>;
 
 let cacheFile: string | undefined;
 export function getCacheFile(): string {
-	return (cacheFile ??= agentFilePath("subscription-usage-cache.json"));
+	cacheFile ??= agentFilePath("subscription-usage-cache.json");
+	return cacheFile;
 }
 
 function finiteNumber(value: unknown): number | undefined {

@@ -22,7 +22,7 @@ export function resetLabel(resetMs: number, now = Date.now()): string {
 export function utcStamp(ms: number): string {
 	if (!Number.isFinite(ms)) return "unknown time";
 	try {
-		return new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC";
+		return `${new Date(ms).toISOString().replace("T", " ").slice(0, 16)} UTC`;
 	} catch {
 		return "unknown time";
 	}

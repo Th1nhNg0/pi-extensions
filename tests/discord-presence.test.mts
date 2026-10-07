@@ -732,8 +732,10 @@ test("presence text strips control characters before publishing", () => {
 		phase: "idle",
 		startedAt: 1_700_000_000_000,
 	});
-	assert.doesNotMatch(activity.details, /[\u0000-\u001f\u007f]/);
-	assert.doesNotMatch(activity.state, /[\u0000-\u001f\u007f]/);
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: asserts control characters were stripped
+	const controlCharacters = /[\u0000-\u001f\u007f]/;
+	assert.doesNotMatch(activity.details, controlCharacters);
+	assert.doesNotMatch(activity.state, controlCharacters);
 });
 
 test("presence activity respects 128 character limit", () => {
@@ -1377,9 +1379,12 @@ test("/discord config opens concise, accurate settings in the TUI viewer", async
 		else process.env[SHOW_COST_ENV] = previousShowCost;
 	});
 
-	let command: { handler: Function } | undefined;
+	let command: { handler: (args: string, ctx: unknown) => unknown } | undefined;
 	const dummyPi = {
-		registerCommand: (_name: string, definition: { handler: Function }) => {
+		registerCommand: (
+			_name: string,
+			definition: { handler: (args: string, ctx: unknown) => unknown },
+		) => {
 			command = definition;
 		},
 		on: () => {},
@@ -1408,10 +1413,10 @@ test("/discord config opens concise, accurate settings in the TUI viewer", async
 
 test("extension registers thinking_level_select and model_select event handlers", () => {
 	const registeredEvents: string[] = [];
-	const handlers: Record<string, Function> = {};
+	const handlers: Record<string, (...args: never[]) => unknown> = {};
 	const dummyPi = {
 		registerCommand: () => {},
-		on: (event: string, handler: Function) => {
+		on: (event: string, handler: (...args: never[]) => unknown) => {
 			registeredEvents.push(event);
 			handlers[event] = handler;
 		},
@@ -1419,8 +1424,8 @@ test("extension registers thinking_level_select and model_select event handlers"
 	discordPresenceExtension(dummyPi as unknown as Parameters<typeof discordPresenceExtension>[0]);
 	assert.ok(registeredEvents.includes("thinking_level_select"));
 	assert.ok(registeredEvents.includes("model_select"));
-	assert.ok(typeof handlers["thinking_level_select"] === "function");
-	assert.ok(typeof handlers["model_select"] === "function");
+	assert.ok(typeof handlers.thinking_level_select === "function");
+	assert.ok(typeof handlers.model_select === "function");
 });
 
 test("presence can restart after a completed stop", async (t) => {

@@ -445,8 +445,9 @@ To reload extensions during an active Pi session:
 
 ```bash
 npm ci
-npm run check        # format:check + typecheck + tests (what CI runs)
+npm run check        # format:check + lint + typecheck + tests (what CI runs)
 npm run format       # apply Biome formatting
+npm run lint         # Biome lint (`npx biome lint --write .` applies safe fixes)
 ```
 
 Each extension is loaded independently at `session_start`: if one fails to import or register, it is logged and skipped while the others keep working.

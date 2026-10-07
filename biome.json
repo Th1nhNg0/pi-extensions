@@ -10,6 +10,11 @@
 	"javascript": {
 		"formatter": { "quoteStyle": "double", "trailingCommas": "all", "semicolons": "always" }
 	},
-	"linter": { "enabled": false },
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"style": { "noNonNullAssertion": "off" }
+		}
+	},
 	"assist": { "enabled": false }
 }

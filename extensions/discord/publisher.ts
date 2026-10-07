@@ -666,7 +666,7 @@ export class DiscordPresenceManager {
 		if (!(await this.ensureConnected())) return;
 		if (!this.started || this.disposed || !this.publisher) return;
 		const transport = this.transport;
-		if (!transport || !transport.isConnected()) return;
+		if (!transport?.isConnected()) return;
 
 		let didPublish: boolean | undefined;
 		let transportFailed = false;

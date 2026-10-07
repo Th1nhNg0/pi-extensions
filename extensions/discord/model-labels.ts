@@ -3,6 +3,7 @@
 const MAX_ACTIVITY_TEXT_LENGTH = 128;
 export function truncateText(value: string, maxLength = MAX_ACTIVITY_TEXT_LENGTH): string {
 	const safeValue = value
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: strips control characters from activity text
 		.replace(/[\u0000-\u001f\u007f]/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();

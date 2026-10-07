@@ -206,7 +206,7 @@ export function resolvePrefs(fileValue: unknown, env: RewriteEnv): RewritePrefs 
 	const prefs = normalizePrefs(fileValue);
 	const hasModelPref = Boolean(
 		record &&
-			Object.prototype.hasOwnProperty.call(record, "model") &&
+			Object.hasOwn(record, "model") &&
 			(record.model === null || normalizeModelRef(record.model) !== undefined),
 	);
 	const hasContextPref = typeof record?.context === "boolean";
