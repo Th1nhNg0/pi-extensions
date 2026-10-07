@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Node 20 does not execute .mts files directly. Compile the tests and sources
-# into a temporary ESM-scoped tree, then run the emitted JavaScript.
+# Compile the tests and sources into a temporary ESM-scoped tree, then run the
+# emitted JavaScript. Running from that tree (rather than stripping types in
+# place) lets the stub below stand in for the real TUI kit package.
 check_dir="$(mktemp -d "${TMPDIR:-/tmp}/pi-ext-test.XXXXXX")"
 trap 'rm -rf "$check_dir"' EXIT
 printf '{"type":"module"}\n' >"$check_dir/package.json"
@@ -31,28 +32,6 @@ export async function runMenu(ctx, definition, options) {
 }
 STUB
 
-./node_modules/.bin/tsc \
-	--ignoreConfig \
-	--target ES2022 \
-	--module NodeNext \
-	--moduleResolution NodeNext \
-	--lib ES2022 \
-	--strict \
-	--esModuleInterop \
-	--skipLibCheck \
-	--outDir "$check_dir" \
-	--noEmit false \
-	--allowImportingTsExtensions \
-	--rewriteRelativeImportExtensions \
-	--rootDir . \
-	extensions/startup-entry.ts \
-	extensions/deferred-extension.ts \
-	extensions/subscription-usage.ts \
-	extensions/discord-presence.ts \
-	extensions/live-throughput-status.ts \
-	extensions/prompt-rewriter.ts \
-	extensions/shared/command-kit.ts \
-	extensions/shared/settings-menu.ts \
-	tests/*.mts
+./node_modules/.bin/tsc -p tsconfig.test.json --outDir "$check_dir"
 
 node --test "$check_dir"/tests/*.mjs
