@@ -1,4 +1,13 @@
-/** Codex subscription API response contracts and normalization. */
+/** Codex subscription API response contracts, normalization, and the provider config. */
+import {
+	MissingCredentialError,
+	USAGE_CREDENTIAL_ENV,
+	envValue,
+	readStoredCredential,
+} from "./credentials.ts";
+import { fetchJson } from "./http.ts";
+import type { PolledProviderCfg } from "./provider-config.ts";
+import { joinParts, labeledWindow } from "./rendering.ts";
 import { normalizePercent, normalizeUsageData } from "./usage-cache.ts";
 import type { UsageData } from "./usage-cache.ts";
 
@@ -71,3 +80,67 @@ export function parseCodexUsage(json: CodexUsageResponse): UsageData {
 	if (!normalized) throw new Error("no usage data");
 	return normalized;
 }
+
+/** OpenAI Codex (ChatGPT subscription): 5h rolling & weekly primary/secondary windows + plan type. */
+const CODEX_WINDOW_LABELS: Record<string, string> = {
+	"5h": "5h",
+	weekly: "W",
+	monthly: "M",
+	daily: "1d",
+};
+
+const CODEX_BROWSER_USER_AGENT =
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+export const codexCfg: PolledProviderCfg = {
+	id: "openai-codex",
+	async fetchUsage(signal?: AbortSignal) {
+		const fromEnv = envValue(USAGE_CREDENTIAL_ENV["openai-codex"]);
+		const cred = fromEnv ? undefined : readStoredCredential("openai-codex");
+		const access = fromEnv ?? (cred?.type === "oauth" ? cred.access : undefined);
+		if (!access) throw new MissingCredentialError("no OAuth token for openai-codex");
+
+		const json = await fetchJson<CodexUsageResponse>(
+			"https://chatgpt.com/backend-api/codex/usage",
+			{
+				headers: {
+					Authorization: `Bearer ${access}`,
+					// Cloudflare rejects non-browser agents; override when this one goes stale.
+					"User-Agent": envValue(["CODEX_USER_AGENT"]) ?? CODEX_BROWSER_USER_AGENT,
+					Accept: "application/json",
+				},
+			},
+			signal,
+		);
+		return parseCodexUsage(json);
+	},
+	render(data, theme, _modelId, style = "bars") {
+		const w = data.windows;
+		const parts: string[] = [];
+
+		const orderedKeys = ["5h", "daily", "weekly", "monthly"];
+		const seen = new Set<string>();
+
+		for (const k of orderedKeys) {
+			if (typeof w[k] === "number") {
+				seen.add(k);
+				const label = CODEX_WINDOW_LABELS[k] ?? k;
+				parts.push(labeledWindow(label, w[k], data.resets, k, theme, style));
+			}
+		}
+
+		for (const [k, v] of Object.entries(w)) {
+			if (!seen.has(k) && typeof v === "number") {
+				parts.push(labeledWindow(k, v, data.resets, k, theme, style));
+			}
+		}
+
+		if (typeof data.resetsLeft === "number" && data.resetsLeft > 0) {
+			const label = `${data.resetsLeft} reset${data.resetsLeft === 1 ? "" : "s"} left`;
+			parts.push(theme.fg("dim", label));
+		}
+
+		if (parts.length === 0) return "";
+		return joinParts(parts, theme);
+	},
+};
