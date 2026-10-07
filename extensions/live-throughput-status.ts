@@ -4,17 +4,20 @@
  * Adds a model-neutral streaming-throughput line to Pi's footer status area,
  * directly below the model/thinking indicator and the subscription-usage line:
  *
- *   ⚡ ~42.1 tok/s        ← during a stream (characters / 4 estimate)
+ *   ⚡ ~42.1 tok/s        ← during a stream (characters-per-token estimate)
  *   ⚡ 39.8 tok/s         ← once the message settles (reported output tokens)
  *
  * The footer carries one number only: decode throughput. Live TPS is a
- * `characters / 4` estimate — hence the `~` — because most providers do not
- * report a cumulative token count on every stream chunk. The `~` disappears
- * when the provider reports token usage on `message_end`: the reported
- * output-token count is then spread over the client-observed first-to-last
- * delta interval, with the first token excluded because it defines the start
- * boundary. A provider that streams no deltas, or reports no usage, has no
- * rate to show and simply leaves the most recent one in place.
+ * characters-per-token estimate — hence the `~` — because most providers do
+ * not report a cumulative token count on every stream chunk; it starts at 4
+ * and is calibrated per model from every exact turn. The `~` disappears when
+ * the provider reports token usage on `message_end`: the reported output
+ * tokens are then spread over the client-observed first-to-last delta
+ * interval, minus the share of the chunk that opened it. When usage breaks
+ * out reasoning tokens, the answer tokens are timed over the answer deltas
+ * instead, because hidden or summarized reasoning was generated outside the
+ * observed stream. A provider that streams no deltas, or reports no usage,
+ * has no rate to show and simply leaves the most recent one in place.
  *
  * Everything else lives in `/throughput` instead of the footer: TTFT (from
  * Pi's `before_provider_request` hook to the first observed output delta), the
@@ -101,30 +104,35 @@ export function positiveNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
+/** Stream deltas that carry generated output, and whether they belong to the answer. */
+const DELTA_KINDS: Readonly<Record<string, "answer" | "thinking">> = {
+	text_delta: "answer",
+	toolcall_delta: "answer",
+	thinking_delta: "thinking",
+};
+
 /**
  * Characters carried by one streaming delta. Thinking and tool-call deltas
  * count too: those are generated tokens, so ignoring them would understate
  * reasoning-heavy and tool-calling turns.
  */
 export function deltaChars(event: unknown): number {
+	return classifyDelta(event)?.chars ?? 0;
+}
+
+/** A generated-output delta's size and kind, or undefined for any other event. */
+export function classifyDelta(
+	event: unknown,
+): { chars: number; kind: "answer" | "thinking" } | undefined {
 	const streamEvent = asRecord(event);
-	if (streamEvent === undefined) return 0;
-	if (
-		streamEvent.type !== "text_delta" &&
-		streamEvent.type !== "thinking_delta" &&
-		streamEvent.type !== "toolcall_delta"
-	) {
-		return 0;
-	}
-	return typeof streamEvent.delta === "string" ? streamEvent.delta.length : 0;
+	const kind = typeof streamEvent?.type === "string" ? DELTA_KINDS[streamEvent.type] : undefined;
+	if (kind === undefined || typeof streamEvent?.delta !== "string") return undefined;
+	const chars = streamEvent.delta.length;
+	return chars > 0 ? { chars, kind } : undefined;
 }
 
 function seconds(milliseconds: number): number {
 	return Math.max(0, milliseconds) / 1000;
-}
-
-function rate(value: number, durationSeconds: number): string {
-	return (value / Math.max(0.001, durationSeconds)).toFixed(1);
 }
 
 /** Compact token/rate magnitude: 842, 1.9k, 50k, 1.2M. */
@@ -151,15 +159,98 @@ export function rateStatusText(tokensPerSecond: number, approximate: boolean): s
 	return `${approximate ? "~" : ""}${Math.max(0, tokensPerSecond).toFixed(1)} tok/s`;
 }
 
+/**
+ * The client-timed stretch of one message's deltas. The first chunk opens the
+ * window, so its characters were generated before it and are not part of the
+ * timed span — however many tokens a provider batched into it.
+ */
+export interface DeltaSpan {
+	chars: number;
+	firstChunkChars: number;
+	seconds: number;
+}
+
+/** Share of a span's output generated inside its timed window (0 when nothing was). */
+function timedShare(span: DeltaSpan | undefined): number {
+	if (span === undefined || span.seconds <= 0 || span.chars <= 0) return 0;
+	return Math.max(0, span.chars - span.firstChunkChars) / span.chars;
+}
+
 /** Settled-measurement inputs derived from the provider's usage payload. */
 export interface SettledMeasurement {
 	/** Uncached input tokens; Pi normalizes `usage.input` to uncached input. */
 	uncachedInputTokens?: number;
 	cacheWriteTokens?: number;
 	outputTokens?: number;
-	/** Client-observed first-to-last output delta span, in seconds. */
-	decodeSeconds?: number;
-	streamedChars: number;
+	/** Reasoning tokens, already counted in `outputTokens` (Pi's `usage.reasoning`). */
+	reasoningTokens?: number;
+	/** Every output delta: answer, tool-call, and thinking. */
+	all?: DeltaSpan;
+	/** Answer deltas only (text and tool calls). */
+	answer?: DeltaSpan;
+	/** Calibrated characters per token for the live estimate; defaults to 4. */
+	charsPerToken?: number;
+}
+
+/** A settled decode rate and the token/time sample behind it. */
+export interface DecodeRate {
+	tokensPerSecond: number;
+	approximate: boolean;
+	/** Tokens attributed to the timed window. */
+	tokens: number;
+	seconds: number;
+	/** Characters per token the estimate used (estimates only). */
+	charsPerToken?: number;
+	/** Reasoning tokens left out because they were timed on the answer stream instead. */
+	excludedReasoningTokens?: number;
+}
+
+/**
+ * Rate shown once a message settles.
+ *
+ * With reported usage the rate is exact. Reasoning tokens are part of the
+ * output count, but providers that hide reasoning (or stream only a summary)
+ * generate them outside the observed deltas, so dividing them by the delta
+ * window would inflate the rate by orders of magnitude. When usage breaks
+ * reasoning out, the answer tokens are timed over the answer deltas instead —
+ * a valid sample whether the reasoning streamed in full or not.
+ *
+ * Without usage the rate is a characters-per-token estimate. Without a timed
+ * window there is no rate (e.g. a provider that buffers output).
+ */
+export function decodeRate(input: SettledMeasurement): DecodeRate | undefined {
+	const { outputTokens, reasoningTokens } = input;
+	if (outputTokens !== undefined) {
+		const split = reasoningTokens !== undefined && reasoningTokens > 0;
+		const span = split ? input.answer : input.all;
+		const tokens = (split ? outputTokens - reasoningTokens : outputTokens) * timedShare(span);
+		if (span !== undefined && tokens > 0) {
+			return {
+				tokensPerSecond: tokens / span.seconds,
+				approximate: false,
+				tokens,
+				seconds: span.seconds,
+				...(split ? { excludedReasoningTokens: reasoningTokens } : {}),
+			};
+		}
+	}
+	const share = timedShare(input.all);
+	if (input.all === undefined || share <= 0) return undefined;
+	const charsPerToken = input.charsPerToken ?? CHARS_PER_TOKEN;
+	const tokens = (input.all.chars * share) / charsPerToken;
+	return {
+		tokensPerSecond: tokens / input.all.seconds,
+		approximate: true,
+		tokens,
+		seconds: input.all.seconds,
+		charsPerToken,
+	};
+}
+
+/** Footer text for a settled message, or undefined when nothing was timed. */
+export function finalRateText(input: SettledMeasurement): string | undefined {
+	const result = decodeRate(input);
+	return result && rateStatusText(result.tokensPerSecond, result.approximate);
 }
 
 /** Tokens the model actually had to read up front (cache reads excluded). */
@@ -169,28 +260,39 @@ export function processedInputTokens(
 	return (input.uncachedInputTokens ?? 0) + (input.cacheWriteTokens ?? 0);
 }
 
+/** Exact samples smaller than this are too noisy to calibrate chars/token from. */
+const MIN_CALIBRATION_TOKENS = 16;
+/** Weight kept by older samples each time a new one is folded in. */
+const CALIBRATION_DECAY = 0.7;
+const MIN_CHARS_PER_TOKEN = 0.5;
+const MAX_CHARS_PER_TOKEN = 8;
+
 /**
- * Rate shown once a message settles: exact when the provider reported usage,
- * the chars/4 estimate when it streamed without usage, and nothing at all when
- * there was no client-timed decode window (e.g. a provider that buffers output
- * and emits no deltas).
+ * Per-model characters-per-token, learned from settled messages that reported
+ * exact usage, so the live `~` estimate converges on the exact rate instead of
+ * assuming English prose (code, JSON tool arguments, CJK text, and summarized
+ * thinking all tokenize differently).
  */
-export function finalRateText(input: SettledMeasurement): string | undefined {
-	const { outputTokens, decodeSeconds, streamedChars } = input;
-	if (
-		outputTokens !== undefined &&
-		outputTokens > 1 &&
-		decodeSeconds !== undefined &&
-		decodeSeconds > 0
-	) {
-		// The first token defines the start boundary, so it is not part of the
-		// decoded span; counting it would inflate short responses the most.
-		return rateStatusText((outputTokens - 1) / decodeSeconds, false);
+export class CharsPerTokenCalibration {
+	private readonly samples = new Map<string, { chars: number; tokens: number }>();
+
+	/** Learned chars/token for a model, or undefined before the first usable sample. */
+	get(key: string): number | undefined {
+		const sample = this.samples.get(key);
+		if (sample === undefined) return undefined;
+		const ratio = sample.chars / sample.tokens;
+		return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, ratio));
 	}
-	if (streamedChars > 0 && decodeSeconds !== undefined && decodeSeconds > 0) {
-		return rateStatusText(streamedChars / CHARS_PER_TOKEN / decodeSeconds, true);
+
+	/** Fold in one settled message's streamed characters and reported tokens. */
+	record(key: string, chars: number, tokens: number): void {
+		if (!(chars > 0) || !(tokens >= MIN_CALIBRATION_TOKENS)) return;
+		const previous = this.samples.get(key);
+		this.samples.set(key, {
+			chars: (previous?.chars ?? 0) * CALIBRATION_DECAY + chars,
+			tokens: (previous?.tokens ?? 0) * CALIBRATION_DECAY + tokens,
+		});
 	}
-	return undefined;
 }
 
 /** Snapshot of the last settled measurement, rendered by `/throughput`. */
@@ -202,8 +304,10 @@ export interface ThroughputRun {
 	cacheReadTokens?: number;
 	cacheWriteTokens?: number;
 	outputTokens?: number;
-	decodeSeconds?: number;
-	streamedChars: number;
+	reasoningTokens?: number;
+	all?: DeltaSpan;
+	answer?: DeltaSpan;
+	charsPerToken?: number;
 	at: number;
 }
 
@@ -238,21 +342,27 @@ export function runReadout(run: ThroughputRun | undefined, now: number): string 
 		lines.push(`• input: ${compact(processed)} tok ${suffix.join(" ")}`.trimEnd());
 	}
 
-	if (
-		run.outputTokens !== undefined &&
-		run.outputTokens > 1 &&
-		run.decodeSeconds !== undefined &&
-		run.decodeSeconds > 0
-	) {
+	const result = decodeRate(run);
+	if (result !== undefined && !result.approximate) {
+		const timed = `${Math.round(result.tokens)} tok timed over ${result.seconds.toFixed(2)}s`;
 		lines.push(
-			`• decode: ${rate(run.outputTokens - 1, run.decodeSeconds)} tok/s · ${run.outputTokens} tok over ${run.decodeSeconds.toFixed(2)}s`,
+			`• decode: ${result.tokensPerSecond.toFixed(1)} tok/s · ${run.outputTokens} output tok · ${timed}`,
 		);
+		if (result.excludedReasoningTokens !== undefined) {
+			lines.push(
+				`• reasoning: ${compact(result.excludedReasoningTokens)} tok, excluded — the rate is timed on the answer stream`,
+			);
+		}
 	} else if (run.outputTokens !== undefined) {
 		lines.push(`• decode: ${run.outputTokens} tok · rate unavailable`);
-	} else if (run.streamedChars > 0 && run.decodeSeconds !== undefined && run.decodeSeconds > 0) {
-		const estimatedTokens = run.streamedChars / CHARS_PER_TOKEN;
+	} else if (result !== undefined) {
+		const ratio = result.charsPerToken ?? CHARS_PER_TOKEN;
+		const basis =
+			run.charsPerToken === undefined
+				? `chars/${CHARS_PER_TOKEN} estimate`
+				: `${ratio.toFixed(1)} chars/tok, calibrated`;
 		lines.push(
-			`• decode: ~${rate(estimatedTokens, run.decodeSeconds)} tok/s · ~${Math.round(estimatedTokens)} tok (chars/4 estimate)`,
+			`• decode: ~${result.tokensPerSecond.toFixed(1)} tok/s · ~${Math.round(result.tokens)} tok timed (${basis})`,
 		);
 	} else {
 		lines.push("• decode: no output tokens");
@@ -304,21 +414,59 @@ function summarizeLastRun(run: ThroughputRun | undefined): string {
 	return `${model} · ${finalRateText(run) ?? "rate unavailable"} · measured ${ageLabel(Date.now() - run.at)}`;
 }
 
-export default function registerLiveThroughput(pi: ExtensionAPI): void {
+/** Accumulates one kind of delta into a span as it streams. */
+class SpanTracker {
+	firstAt: number | undefined;
+	lastAt: number | undefined;
+	chars = 0;
+	firstChunkChars = 0;
+
+	add(chars: number, at: number): void {
+		if (this.firstAt === undefined) {
+			this.firstAt = at;
+			this.firstChunkChars = chars;
+		}
+		this.lastAt = at;
+		this.chars += chars;
+	}
+
+	/** The settled span, or undefined when nothing streamed. */
+	span(): DeltaSpan | undefined {
+		if (this.firstAt === undefined || this.lastAt === undefined) return undefined;
+		return {
+			chars: this.chars,
+			firstChunkChars: this.firstChunkChars,
+			seconds: seconds(this.lastAt - this.firstAt),
+		};
+	}
+}
+
+/**
+ * @param clock Monotonic milliseconds for interval timing; wall-clock time
+ *   can jump (NTP, sleep) mid-stream. Injectable for tests.
+ */
+export default function registerLiveThroughput(
+	pi: ExtensionAPI,
+	clock: () => number = () => performance.now(),
+): void {
 	let mode: ThroughputMode = loadPrefs(PREFS_FILE, normalizePrefs).mode;
+	const calibration = new CharsPerTokenCalibration();
 
 	// Per-message measurement state.
 	let requestStartedAt: number | undefined;
-	let firstOutputAt: number | undefined;
-	let lastOutputAt: number | undefined;
 	let ttftSeconds: number | undefined;
-	let streamedChars = 0;
+	let all = new SpanTracker();
+	let answer = new SpanTracker();
 	let lastDisplayAt = 0;
 	let startedLabel: { provider?: string; model?: string } = {};
 	let lastRun: ThroughputRun | undefined;
 
 	function enabled(): boolean {
 		return mode === "on";
+	}
+
+	function calibrationKey(label: { provider?: string; model?: string }): string {
+		return `${label.provider ?? ""}/${label.model ?? ""}`;
 	}
 
 	function render(ctx: StatusCtx, text: string | undefined): void {
@@ -335,10 +483,9 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 	}
 
 	function resetMeasurement(): void {
-		firstOutputAt = undefined;
-		lastOutputAt = undefined;
+		all = new SpanTracker();
+		answer = new SpanTracker();
 		ttftSeconds = undefined;
-		streamedChars = 0;
 		lastDisplayAt = 0;
 	}
 
@@ -365,7 +512,7 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 	// observes time only and deliberately returns no payload rewrite.
 	pi.on("before_provider_request", async (_event, _ctx) => {
 		if (!enabled()) return;
-		requestStartedAt = Date.now();
+		requestStartedAt = clock();
 	});
 
 	pi.on("message_start", async (event, ctx) => {
@@ -375,7 +522,7 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 		// real TTFT start. The fallback covers providers that do not emit it.
 		resetMeasurement();
 		startedLabel = modelLabel(ctx);
-		requestStartedAt ??= Date.now();
+		requestStartedAt ??= clock();
 		// Deliberately no placeholder line: the footer keeps showing the previous
 		// rate until a fresh one is measurable.
 	});
@@ -383,25 +530,28 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 	pi.on("message_update", async (event, ctx) => {
 		if (!enabled()) return;
 		if (event.message.role !== "assistant") return;
-		const chars = deltaChars(event.assistantMessageEvent);
-		if (chars <= 0) return;
+		const delta = classifyDelta(event.assistantMessageEvent);
+		if (delta === undefined) return;
 
-		const now = Date.now();
-		if (firstOutputAt === undefined) {
-			firstOutputAt = now;
+		const now = clock();
+		if (all.firstAt === undefined) {
 			ttftSeconds = seconds(now - (requestStartedAt ?? now));
 		}
-		lastOutputAt = now;
-		streamedChars += chars;
+		all.add(delta.chars, now);
+		if (delta.kind === "answer") answer.add(delta.chars, now);
 
 		// No rate is meaningful before a real decode window exists, and chunks
 		// arrive far faster than the TUI needs to repaint; both guards keep the
 		// footer to one honest write per window.
-		const decodeSeconds = seconds(now - firstOutputAt);
-		if (decodeSeconds < MIN_LIVE_RATE_SECONDS) return;
+		const span = all.span();
+		if (span === undefined || span.seconds < MIN_LIVE_RATE_SECONDS) return;
 		if (now - lastDisplayAt < UPDATE_INTERVAL_MS) return;
 		lastDisplayAt = now;
-		render(ctx, rateStatusText(streamedChars / CHARS_PER_TOKEN / decodeSeconds, true));
+		const live = decodeRate({
+			all: span,
+			charsPerToken: calibration.get(calibrationKey(startedLabel)),
+		});
+		if (live !== undefined) render(ctx, rateStatusText(live.tokensPerSecond, true));
 	});
 
 	pi.on("message_end", async (event, ctx) => {
@@ -415,39 +565,53 @@ export default function registerLiveThroughput(pi: ExtensionAPI): void {
 		const cacheWriteTokens = positiveNumber(usage?.cacheWrite) ?? 0;
 		const cacheReadTokens = positiveNumber(usage?.cacheRead);
 		const outputTokens = positiveNumber(usage?.output);
-
-		const observedTtft = ttftSeconds;
-		const decodeSeconds =
-			firstOutputAt !== undefined && lastOutputAt !== undefined
-				? seconds(lastOutputAt - firstOutputAt)
+		// A subset of output; only meaningful when it leaves answer tokens over.
+		const reportedReasoning = positiveNumber(usage?.reasoning);
+		const reasoningTokens =
+			reportedReasoning !== undefined &&
+			outputTokens !== undefined &&
+			reportedReasoning < outputTokens
+				? reportedReasoning
 				: undefined;
+
+		const allSpan = all.span();
+		const answerSpan = answer.span();
 
 		// A message Pi finalized without any observed stream or usage (for
 		// example a restored transcript entry) measured nothing; keep the
 		// previous line rather than replacing it with an empty one.
-		if (observedTtft === undefined && outputTokens === undefined && streamedChars === 0) {
+		if (ttftSeconds === undefined && outputTokens === undefined && allSpan === undefined) {
 			return;
 		}
 
-		const rateText = finalRateText({
+		const key = calibrationKey(startedLabel);
+		const measurement: SettledMeasurement = {
 			uncachedInputTokens,
 			cacheWriteTokens,
 			outputTokens,
-			decodeSeconds,
-			streamedChars,
-		});
+			reasoningTokens,
+			all: allSpan,
+			answer: answerSpan,
+			charsPerToken: calibration.get(key),
+		};
+		const result = decodeRate(measurement);
 		// A provider that streamed no deltas (or reported no usage) has no rate to
 		// show; the previous line stands rather than flickering away.
-		if (rateText !== undefined) render(ctx, rateText);
+		if (result !== undefined)
+			render(ctx, rateStatusText(result.tokensPerSecond, result.approximate));
+		if (result !== undefined && !result.approximate && outputTokens !== undefined) {
+			// Learn chars/token from the same sample the exact rate used.
+			if (reasoningTokens !== undefined) {
+				calibration.record(key, answerSpan?.chars ?? 0, outputTokens - reasoningTokens);
+			} else {
+				calibration.record(key, allSpan?.chars ?? 0, outputTokens);
+			}
+		}
 		lastRun = {
 			...startedLabel,
-			ttftSeconds: observedTtft,
-			uncachedInputTokens,
+			...measurement,
+			ttftSeconds,
 			cacheReadTokens,
-			cacheWriteTokens,
-			outputTokens,
-			decodeSeconds,
-			streamedChars,
 			at: Date.now(),
 		};
 		requestStartedAt = undefined;

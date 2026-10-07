@@ -236,7 +236,7 @@ The footer deliberately carries **one short number**; everything else is availab
 
 | Phase | Status Line Output |
 | :--- | :--- |
-| Streaming (`characters / 4` estimate) | `⚡ ~42.1 tok/s` |
+| Streaming (characters-per-token estimate) | `⚡ ~42.1 tok/s` |
 | Settled, provider reported usage | `⚡ 39.8 tok/s` |
 | Settled, provider reported no usage | `⚡ ~42.1 tok/s` |
 | No rate yet (first 200 ms) | previous rate stays; nothing new is printed |
@@ -247,8 +247,10 @@ The line is cleared on session start, on model switch, by `/throughput toggle of
 #### What the Numbers Mean
 
 * **Decode rate** — the footer value: tokens generated per second, the one figure that stays comparable across models and providers.
-* **`~` prefix** — the rate is a `characters / 4` estimate, because most providers do not report a cumulative token count on every stream chunk. Thinking and tool-call deltas count as generated output, not just visible text.
-* **Exact rate** — when the provider reports token usage on `message_end`, the reported output-token count is spread over the client-observed first-to-last delta interval, with the first token excluded because it defines the start boundary. The `~` disappears. This matches the common OpenAI-compatible pattern of sending usage once, in a final chunk.
+* **`~` prefix** — the rate is a characters-per-token estimate, because most providers do not report a cumulative token count on every stream chunk. It starts at `characters / 4` and is calibrated per model from every exact turn, so code, JSON tool arguments, CJK text, and summarized thinking converge on the exact rate instead of jumping when it lands. Thinking and tool-call deltas count as generated output, not just visible text.
+* **Exact rate** — when the provider reports token usage on `message_end`, the reported output-token count is spread over the client-observed first-to-last delta interval. The chunk that opens the window was generated before it, so its share of the output (by characters) is excluded — however many tokens a provider batched into that first chunk. The `~` disappears. This matches the common OpenAI-compatible pattern of sending usage once, in a final chunk.
+* **Reasoning tokens** — when usage breaks out reasoning tokens (OpenAI Responses and Chat Completions, Gemini), the rate times the answer tokens over the answer deltas (text and tool calls) instead. Those providers hide reasoning or stream only a summary, so spreading thousands of reasoning tokens over the visible stream would report a rate orders of magnitude too high. `/throughput` names the excluded reasoning count.
+* **Monotonic timing** — intervals use `performance.now()`, so a wall-clock adjustment mid-stream cannot skew a rate.
 * **No invented numbers** — a rate needs at least 200 ms of stream time, so the first moments of a response keep the previous value instead of printing a divide-by-near-zero spike.
 * **Everything else** — TTFT (measured from Pi's `before_provider_request` hook to the first observed output delta), the uncached/cached input split, and the decode window — is in `/throughput`. TTFT also contains network, queue, scheduling, and stream-start overhead, so the `Input/TTFT` estimate it feeds is a client-side prompt-rate comparison, **not** authoritative server prefill throughput; cache reads are excluded because the model never re-read them.
 
@@ -257,10 +259,11 @@ The line is cleared on session start, on model switch, by `/throughput toggle of
 | Provider Behavior | Live Footer | Final Footer |
 | :--- | :--- | :--- |
 | Reports final output usage | `~42.1 tok/s` estimate | `39.8 tok/s` exact |
+| Reports reasoning usage (hidden or summarized thinking) | `~42.1 tok/s` estimate | `39.8 tok/s` exact, answer tokens over the answer stream |
 | Reports no output usage | `~42.1 tok/s` estimate | `~42.1 tok/s` estimate |
 | Buffers output instead of streaming deltas | nothing measurable | previous rate stays; `/throughput` shows tokens with no rate |
 
-For an OpenAI-compatible local server, Pi requests streaming usage by default. Keep `supportsUsageInStreaming` enabled only when the server accepts `stream_options: { "include_usage": true }`; otherwise set it to `false` and the extension keeps using its explicit `chars / 4` fallback.
+For an OpenAI-compatible local server, Pi requests streaming usage by default. Keep `supportsUsageInStreaming` enabled only when the server accepts `stream_options: { "include_usage": true }`; otherwise set it to `false` and the extension keeps using its explicit characters-per-token estimate (`chars / 4` until a turn with usage calibrates it).
 
 #### Commands
 
@@ -274,13 +277,14 @@ For an OpenAI-compatible local server, Pi requests streaming usage by default. K
 Live throughput — openai-codex • gpt-5
 • TTFT: 1.24s · Input/TTFT: ~1.5k tok/s
 • input: 1.9k tok (1.9k uncached + 62 cache write) · 50k cache read
-• decode: 841.0 tok/s · 842 tok over 1.00s
+• decode: 800.0 tok/s · 804 output tok · 800 tok timed over 1.00s
 Measured just now
 ```
 
 #### Limitations
 
-* The live `characters / 4` estimate varies with prose, code, JSON, and CJK.
+* The live estimate varies with prose, code, JSON, and CJK until an exact turn calibrates it, and calibration resets when Pi restarts.
+* Providers that bill hidden or summarized thinking without reporting a reasoning breakdown (e.g. Anthropic's summarized thinking) cannot be separated; their exact rate counts those tokens over the streamed window.
 * Even with an exact final token count, client timing is affected by stream buffering and network jitter.
 * Short outputs do not have enough first-to-last span for a stable rate; during the first 200 ms of a stream the previous rate stays on screen.
 * `Input/TTFT` in `/throughput` divides by TTFT, which also contains network/queue/scheduling overhead; use inference-server metrics for true prefill throughput.
