@@ -69,6 +69,7 @@ import {
 	hasUsageCredential,
 	readStoredCredential,
 	resolveApiKey,
+	USAGE_CREDENTIAL_ENV,
 } from "./subscription/credentials.ts";
 export { MissingCredentialError };
 import {
@@ -273,7 +274,7 @@ async function fetchJson<T>(
 export const opencodeCfg: PolledProviderCfg = {
 	id: "opencode-go",
 	async fetchUsage(signal?: AbortSignal) {
-		const key = resolveApiKey("opencode-go", ["OPENCODE_API_KEY"]);
+		const key = resolveApiKey("opencode-go", USAGE_CREDENTIAL_ENV["opencode-go"]);
 		const json = await fetchJson<OpenCodeUsageResponse>(
 			"https://opencode.ai/zen/go/v1/usage",
 			{ headers: { Authorization: `Bearer ${key}` } },
@@ -303,7 +304,7 @@ export const opencodeCfg: PolledProviderCfg = {
 export const deepseekCfg: PolledProviderCfg = {
 	id: "deepseek",
 	async fetchUsage(signal?: AbortSignal) {
-		const key = resolveApiKey("deepseek", ["DEEPSEEK_API_KEY"]);
+		const key = resolveApiKey("deepseek", USAGE_CREDENTIAL_ENV.deepseek);
 		const json = await fetchJson<DeepSeekBalanceResponse>(
 			"https://api.deepseek.com/user/balance",
 			{ headers: { Authorization: `Bearer ${key}`, Accept: "application/json" } },
@@ -333,7 +334,7 @@ const CODEX_BROWSER_USER_AGENT =
 export const codexCfg: PolledProviderCfg = {
 	id: "openai-codex",
 	async fetchUsage(signal?: AbortSignal) {
-		const fromEnv = envValue(["OPENAI_CODEX_TOKEN", "CODEX_ACCESS_TOKEN", "CHATGPT_ACCESS_TOKEN"]);
+		const fromEnv = envValue(USAGE_CREDENTIAL_ENV["openai-codex"]);
 		const cred = fromEnv ? undefined : readStoredCredential("openai-codex");
 		const access = fromEnv ?? (cred?.type === "oauth" ? cred.access : undefined);
 		if (!access) throw new MissingCredentialError("no OAuth token for openai-codex");
@@ -451,8 +452,7 @@ async function refreshAntigravityToken(
 export const antigravityCfg: PolledProviderCfg = {
 	id: "antigravity",
 	async fetchUsage(signal?: AbortSignal) {
-		const fromEnv = process.env.ANTIGRAVITY_TOKEN || process.env.ANTIGRAVITY_API_KEY;
-		let access = fromEnv?.trim();
+		let access = envValue(USAGE_CREDENTIAL_ENV.antigravity);
 		let refreshToken: string | undefined;
 		let expires = 0;
 

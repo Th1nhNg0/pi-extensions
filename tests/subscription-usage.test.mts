@@ -748,3 +748,35 @@ test("resolveApiKey prefers the environment and names every variable when missin
 			error instanceof MissingCredentialError && /KEY_A \/ KEY_B or auth\.json/.test(error.message),
 	);
 });
+
+test("antigravity fetch skips a blank ANTIGRAVITY_TOKEN like the credential check does", async () => {
+	const { antigravityCfg } = await import("../extensions/subscription-usage.ts");
+	const { hasUsageCredential } = await import("../extensions/subscription/credentials.ts");
+	const saved = {
+		token: process.env.ANTIGRAVITY_TOKEN,
+		key: process.env.ANTIGRAVITY_API_KEY,
+		fetch: globalThis.fetch,
+	};
+	const authorizations: (string | null)[] = [];
+	process.env.ANTIGRAVITY_TOKEN = "  ";
+	process.env.ANTIGRAVITY_API_KEY = " real-key ";
+	globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+		authorizations.push(new Headers(init?.headers).get("Authorization"));
+		throw new Error("stop after capturing headers");
+	}) as typeof fetch;
+	try {
+		assert.equal(hasUsageCredential("antigravity"), true);
+		await assert.rejects(antigravityCfg.fetchUsage());
+		assert.ok(authorizations.length > 0);
+		assert.ok(authorizations.every((value) => value === "Bearer real-key"));
+	} finally {
+		globalThis.fetch = saved.fetch;
+		for (const [name, value] of [
+			["ANTIGRAVITY_TOKEN", saved.token],
+			["ANTIGRAVITY_API_KEY", saved.key],
+		] as const) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	}
+});

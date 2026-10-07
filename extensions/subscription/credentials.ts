@@ -69,6 +69,14 @@ export function resolveApiKey(
 	throw new MissingCredentialError(`no API key (${envNames.join(" / ")} or auth.json)`);
 }
 
+/** Environment variables each usage provider reads its credential from, in priority order. */
+export const USAGE_CREDENTIAL_ENV = {
+	"opencode-go": ["OPENCODE_API_KEY"],
+	deepseek: ["DEEPSEEK_API_KEY"],
+	"openai-codex": ["OPENAI_CODEX_TOKEN", "CODEX_ACCESS_TOKEN", "CHATGPT_ACCESS_TOKEN"],
+	antigravity: ["ANTIGRAVITY_TOKEN", "ANTIGRAVITY_API_KEY"],
+} as const satisfies Record<string, readonly string[]>;
+
 /** Whether a usage provider has credentials configured, without making a request. */
 export function hasUsageCredential(providerId: string): boolean {
 	// The unified OpenAI provider also supports API keys, which are not ChatGPT plans.
@@ -81,12 +89,7 @@ export function hasUsageCredential(providerId: string): boolean {
 			Boolean(credential.access.trim())
 		);
 	}
-	const envNames: Record<string, readonly string[]> = {
-		"opencode-go": ["OPENCODE_API_KEY"],
-		deepseek: ["DEEPSEEK_API_KEY"],
-		"openai-codex": ["OPENAI_CODEX_TOKEN", "CODEX_ACCESS_TOKEN", "CHATGPT_ACCESS_TOKEN"],
-		antigravity: ["ANTIGRAVITY_TOKEN", "ANTIGRAVITY_API_KEY"],
-	};
+	const envNames: Record<string, readonly string[]> = USAGE_CREDENTIAL_ENV;
 	const names = envNames[providerId];
 	if (!names) return false;
 	if (envValue(names)) return true;
