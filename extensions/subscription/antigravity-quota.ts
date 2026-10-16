@@ -1,8 +1,10 @@
 /** Antigravity: quota-summary decoding, OAuth token refresh, and the provider config. */
 import {
+	DEFAULT_ANTIGRAVITY_PROJECT_ID,
 	MissingCredentialError,
-	USAGE_CREDENTIAL_ENV,
+	envAntigravityCredential,
 	envValue,
+	parseAntigravityCredential,
 	readStoredCredential,
 } from "./credentials.ts";
 import { fetchJson, requestSignal } from "./http.ts";
@@ -26,7 +28,7 @@ export interface AntigravityQuotaUsage {
 	resets: Record<string, number>;
 }
 
-function parseAntigravityQuota(quotaJson: AntigravityQuotaSummary): AntigravityQuotaUsage {
+export function parseAntigravityQuota(quotaJson: AntigravityQuotaSummary): AntigravityQuotaUsage {
 	const windows: Record<string, number> = {};
 	const resets: Record<string, number> = {};
 	for (const group of quotaJson.groups || []) {
@@ -60,6 +62,9 @@ const ANTIGRAVITY_CLIENT_SECRET = Buffer.from(
 	"base64",
 ).toString("utf8");
 
+export const DEFAULT_ANTIGRAVITY_USER_AGENT =
+	"antigravity/cli/1.3.6 (aidev_client; os_type=linux; arch=amd64; cl=999748552; auth_method=consumer)";
+
 const ANTIGRAVITY_ENDPOINTS = [
 	"https://daily-cloudcode-pa.googleapis.com",
 	"https://daily-cloudcode-pa.sandbox.googleapis.com",
@@ -67,13 +72,14 @@ const ANTIGRAVITY_ENDPOINTS = [
 ] as const;
 const RETRYABLE_ANTIGRAVITY_STATUSES = new Set([403, 404, 429, 500, 502, 503, 504]);
 
-/** Match pi-antigravity's endpoint order so quota reads use the same pool. */
+/** Match pi-provider-antigravity's primary daily endpoint with fallback candidates. */
 export function antigravityEndpointCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
 	const explicit = env.ANTIGRAVITY_BASE_URL?.trim();
 	return explicit ? [explicit] : [...ANTIGRAVITY_ENDPOINTS];
 }
 
 interface CachedAntigravityToken {
+	refreshToken: string;
 	token: string;
 	expiresAt: number;
 }
@@ -85,7 +91,11 @@ async function refreshAntigravityToken(
 	refreshToken: string,
 	signal?: AbortSignal,
 ): Promise<string> {
-	if (cachedAntigravityToken && Date.now() < cachedAntigravityToken.expiresAt) {
+	if (
+		cachedAntigravityToken &&
+		cachedAntigravityToken.refreshToken === refreshToken &&
+		Date.now() < cachedAntigravityToken.expiresAt
+	) {
 		return cachedAntigravityToken.token;
 	}
 	const data = await fetchJson<{ access_token?: unknown; expires_in?: unknown }>(
@@ -108,25 +118,66 @@ async function refreshAntigravityToken(
 	}
 	const expiresInSec = typeof data.expires_in === "number" ? data.expires_in : 3600;
 	cachedAntigravityToken = {
+		refreshToken,
 		token: data.access_token,
 		expiresAt: Date.now() + Math.max(60_000, (expiresInSec - 60) * 1000),
 	};
 	return data.access_token;
 }
 
-/** Antigravity (Google Cloud Code Assist): 5h & weekly pools for Gemini and Claude/GPT models. */
+type AntigravityPool = "gemini" | "argon" | "3p";
+
+function bucketPool(key: string): AntigravityPool {
+	const lower = key.toLowerCase();
+	if (lower.includes("argon")) return "argon";
+	if (lower.includes("gemini")) return "gemini";
+	return "3p";
+}
+
+function bucketWindowKind(key: string): "5h" | "weekly" | undefined {
+	if (/(?:^|[-_])(5h|five-?hour)$/i.test(key)) return "5h";
+	if (/(?:^|[-_])weekly$/i.test(key)) return "weekly";
+	return undefined;
+}
+
+function poolBucketKeys(
+	windows: Record<string, number>,
+	pool: AntigravityPool,
+	prefix = "",
+): Array<[string, string]> {
+	const keys = Object.keys(windows).filter(
+		(k) => typeof windows[k] === "number" && bucketPool(k) === pool,
+	);
+	const fiveHour = keys.find((k) => bucketWindowKind(k) === "5h");
+	const weekly = keys.find((k) => bucketWindowKind(k) === "weekly");
+	const pairs: Array<[string, string]> = [];
+	if (fiveHour) pairs.push([fiveHour, `${prefix}5h`]);
+	if (weekly) pairs.push([weekly, `${prefix}W`]);
+	for (const k of keys) {
+		if (k !== fiveHour && k !== weekly) {
+			pairs.push([k, prefix ? `${prefix}${k}` : k]);
+		}
+	}
+	return pairs;
+}
+
+/** Antigravity (Google Cloud Code Assist): 5h & weekly pools for Gemini, Argon, and Claude/GPT models. */
 export const antigravityCfg: PolledProviderCfg = {
 	id: "antigravity",
 	async fetchUsage(signal?: AbortSignal) {
-		let access = envValue(USAGE_CREDENTIAL_ENV.antigravity);
+		const fromEnv = envAntigravityCredential();
+		let access = fromEnv?.token;
+		let projectId = fromEnv?.projectId ?? DEFAULT_ANTIGRAVITY_PROJECT_ID;
 		let refreshToken: string | undefined;
 		let expires = 0;
 
 		if (!access) {
 			const cred = readStoredCredential("antigravity");
 			if (cred && cred.type === "oauth") {
-				access = cred.access;
-				refreshToken = cred.refresh;
+				const parsed = parseAntigravityCredential(cred.access);
+				access = parsed.token;
+				projectId = parsed.projectId;
+				refreshToken = cred.refresh?.trim() || undefined;
 				expires = typeof cred.expires === "number" ? cred.expires : 0;
 			}
 		}
@@ -148,13 +199,7 @@ export const antigravityCfg: PolledProviderCfg = {
 			Authorization: `Bearer ${access}`,
 			"Content-Type": "application/json",
 			Accept: "application/json",
-			"User-Agent": process.env.ANTIGRAVITY_USER_AGENT || "antigravity/1.15.8 windows/amd64",
-			"X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-			"Client-Metadata": JSON.stringify({
-				ideType: "ANTIGRAVITY",
-				platform: "PLATFORM_UNSPECIFIED",
-				pluginType: "GEMINI",
-			}),
+			"User-Agent": envValue(["ANTIGRAVITY_USER_AGENT"]) ?? DEFAULT_ANTIGRAVITY_USER_AGENT,
 		};
 
 		async function queryQuota(token: string): Promise<{ response: Response; endpoint: string }> {
@@ -166,7 +211,7 @@ export const antigravityCfg: PolledProviderCfg = {
 					const response = await fetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
 						method: "POST",
 						headers: { ...headers, Authorization: `Bearer ${token}` },
-						body: JSON.stringify({}),
+						body: JSON.stringify({ project: projectId }),
 						signal: requestSignal(signal),
 					});
 					lastResponse = response;
@@ -248,29 +293,26 @@ export const antigravityCfg: PolledProviderCfg = {
 		const isClaude = modelId ? /claude/i.test(modelId) : false;
 		const isGpt = modelId ? /gpt/i.test(modelId) : false;
 		const is3p = isClaude || isGpt || (modelId ? /3p/i.test(modelId) : false);
+		const isArgon = !is3p && Boolean(modelId && /argon/i.test(modelId));
 
 		let bucketKeys: Array<[string, string]>;
 
 		if (is3p) {
-			bucketKeys = [
-				["3p-5h", "5h"],
-				["3p-weekly", "W"],
-			];
+			bucketKeys = poolBucketKeys(w, "3p");
+		} else if (isArgon) {
+			// Pro plans expose a separate Argon bucket; Ultra plans share the Gemini pool.
+			const argonKeys = poolBucketKeys(w, "argon");
+			bucketKeys = argonKeys.length > 0 ? argonKeys : poolBucketKeys(w, "gemini");
 		} else {
-			bucketKeys = [
-				["gemini-5h", "5h"],
-				["gemini-weekly", "W"],
-			];
+			bucketKeys = poolBucketKeys(w, "gemini");
 		}
 
-		const hasSelectedData = bucketKeys.some(([k]) => typeof w[k] === "number");
-		if (!hasSelectedData) {
+		if (bucketKeys.length === 0) {
 			// Model's pool is unknown — show every bucket with disambiguating labels.
 			bucketKeys = [
-				["gemini-5h", "G-5h"],
-				["gemini-weekly", "G-W"],
-				["3p-5h", "3P-5h"],
-				["3p-weekly", "3P-W"],
+				...poolBucketKeys(w, "gemini", "G-"),
+				...poolBucketKeys(w, "argon", "A-"),
+				...poolBucketKeys(w, "3p", "3P-"),
 			];
 		}
 

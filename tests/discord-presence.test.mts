@@ -385,6 +385,8 @@ test("formatDiscordModelLabel normalizes popular and custom model names", () => 
 	// Google Gemini models
 	assert.equal(formatDiscordModelLabel("google", "gemini-3.7-pro"), "Gemini 3.7 Pro");
 	assert.equal(formatDiscordModelLabel("google", "gemini-2.5-flash"), "Gemini 2.5 Flash");
+	assert.equal(formatDiscordModelLabel("antigravity", "gemini-4-argon"), "Gemini 4 Argon");
+	assert.equal(formatDiscordModelLabel("antigravity", "gpt-oss-120b"), "GPT-OSS 120B");
 
 	// Other known architectures
 	assert.equal(formatDiscordModelLabel("zhipu", "glm-5"), "GLM-5");

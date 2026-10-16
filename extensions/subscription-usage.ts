@@ -56,7 +56,12 @@ import type { CodexUsageResponse, RateLimitWindowSnapshot } from "./subscription
 export { codexCfg, codexWindowKey, parseCodexUsage };
 export type { CodexUsageResponse, RateLimitWindowSnapshot };
 import { COOLDOWN_MS, MIN_FETCH_GAP_MS, nextDelay } from "./subscription/refresh-schedule.ts";
-import { antigravityCfg, antigravityEndpointCandidates } from "./subscription/antigravity-quota.ts";
+import {
+	antigravityCfg,
+	antigravityEndpointCandidates,
+	parseAntigravityQuota,
+} from "./subscription/antigravity-quota.ts";
+import type { AntigravityQuotaSummary } from "./subscription/antigravity-quota.ts";
 import { opencodeCfg } from "./subscription/opencode-usage.ts";
 import { deepseekCfg } from "./subscription/deepseek-usage.ts";
 import { formatBalance } from "./subscription/balance.ts";
@@ -65,7 +70,15 @@ import type {
 	PolledProviderCfg,
 	ProviderCfg,
 } from "./subscription/provider-config.ts";
-export { antigravityCfg, antigravityEndpointCandidates, deepseekCfg, formatBalance, opencodeCfg };
+export {
+	antigravityCfg,
+	antigravityEndpointCandidates,
+	deepseekCfg,
+	formatBalance,
+	opencodeCfg,
+	parseAntigravityQuota,
+};
+export type { AntigravityQuotaSummary };
 import { MissingCredentialError, hasUsageCredential } from "./subscription/credentials.ts";
 export { MissingCredentialError };
 import {

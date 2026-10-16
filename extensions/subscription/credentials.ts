@@ -1,6 +1,7 @@
 /** Stored provider credential reading and missing-credential classification. */
 import fs from "node:fs";
 import { agentFilePath } from "../shared/command-kit.ts";
+import { asRecord } from "../shared/record-guards.ts";
 
 interface ApiKeyCredential {
 	type: "api_key";
@@ -76,6 +77,50 @@ export const USAGE_CREDENTIAL_ENV = {
 	"openai-codex": ["OPENAI_CODEX_TOKEN", "CODEX_ACCESS_TOKEN", "CHATGPT_ACCESS_TOKEN"],
 	antigravity: ["ANTIGRAVITY_TOKEN", "ANTIGRAVITY_API_KEY"],
 } as const satisfies Record<string, readonly string[]>;
+export const DEFAULT_ANTIGRAVITY_PROJECT_ID = "aicode-consumers";
+
+export interface AntigravityCredential {
+	token?: string;
+	projectId: string;
+}
+
+/**
+ * Unpack an Antigravity credential string. `pi-provider-antigravity` stores
+ * `auth.json` `access` as `JSON.stringify({ token, projectId })`; env vars and
+ * older setups may supply a bare token string.
+ */
+export function parseAntigravityCredential(raw: string | undefined): AntigravityCredential {
+	const trimmed = raw?.trim();
+	if (!trimmed) return { projectId: DEFAULT_ANTIGRAVITY_PROJECT_ID };
+	if (trimmed.startsWith("{")) {
+		try {
+			const record = asRecord(JSON.parse(trimmed));
+			if (record) {
+				const token =
+					typeof record.token === "string" && record.token.trim() ? record.token.trim() : undefined;
+				const projectId =
+					typeof record.projectId === "string" && record.projectId.trim()
+						? record.projectId.trim()
+						: DEFAULT_ANTIGRAVITY_PROJECT_ID;
+				return { token, projectId };
+			}
+		} catch {
+			// Fall through and treat malformed text as a bare token string.
+		}
+	}
+	return { token: trimmed, projectId: DEFAULT_ANTIGRAVITY_PROJECT_ID };
+}
+
+/** First Antigravity env credential with a non-empty token. */
+export function envAntigravityCredential(
+	env: NodeJS.ProcessEnv = process.env,
+): { token: string; projectId: string } | undefined {
+	for (const name of USAGE_CREDENTIAL_ENV.antigravity) {
+		const parsed = parseAntigravityCredential(env[name]);
+		if (parsed.token) return { token: parsed.token, projectId: parsed.projectId };
+	}
+	return undefined;
+}
 
 /** Whether a usage provider has credentials configured, without making a request. */
 export function hasUsageCredential(providerId: string): boolean {
@@ -89,18 +134,21 @@ export function hasUsageCredential(providerId: string): boolean {
 			Boolean(credential.access.trim())
 		);
 	}
+	if (providerId === "antigravity") {
+		if (envAntigravityCredential()) return true;
+		const credential = readStoredCredential(providerId);
+		return (
+			credential?.type === "oauth" &&
+			Boolean(parseAntigravityCredential(credential.access).token || credential.refresh?.trim())
+		);
+	}
 	const envNames: Record<string, readonly string[]> = USAGE_CREDENTIAL_ENV;
 	const names = envNames[providerId];
 	if (!names) return false;
 	if (envValue(names)) return true;
 	const credential = readStoredCredential(providerId);
-	if (providerId === "openai-codex" || providerId === "antigravity") {
-		return (
-			credential?.type === "oauth" &&
-			Boolean(
-				credential.access?.trim() || (providerId === "antigravity" && credential.refresh?.trim()),
-			)
-		);
+	if (providerId === "openai-codex") {
+		return credential?.type === "oauth" && Boolean(credential.access?.trim());
 	}
 	return credential?.type === "api_key" && Boolean(credential.key?.trim());
 }

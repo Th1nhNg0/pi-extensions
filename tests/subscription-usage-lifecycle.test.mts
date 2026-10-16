@@ -383,7 +383,10 @@ test("/usage shows all logged-in providers", async (t) => {
 	usageCredentials(t, {
 		"openai-codex": { type: "oauth", access: "token" },
 		"opencode-go": { type: "api_key", key: "key" },
-		antigravity: { type: "oauth", access: "token" },
+		antigravity: {
+			type: "oauth",
+			access: JSON.stringify({ token: "token", projectId: "aicode-consumers" }),
+		},
 	});
 	await h.event("session_start");
 	assert.ok(h.commands.has("usage"));

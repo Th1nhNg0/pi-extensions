@@ -67,6 +67,7 @@ const KNOWN_PREFIXES: Array<[RegExp, string]> = [
 
 const KNOWN_WORDS: Record<string, string> = {
 	gpt: "GPT",
+	oss: "OSS",
 	glm: "GLM",
 	r1: "R1",
 	v3: "V3",

@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	bar,
+	antigravityCfg,
 	antigravityEndpointCandidates,
+	parseAntigravityQuota,
 	codexCfg,
 	detailBar,
 	fetchAgeLabel,
@@ -771,4 +773,196 @@ test("antigravity fetch skips a blank ANTIGRAVITY_TOKEN like the credential chec
 			else process.env[name] = value;
 		}
 	}
+});
+
+test("parseAntigravityCredential unpacks pi-provider-antigravity JSON and bare tokens", async () => {
+	const { DEFAULT_ANTIGRAVITY_PROJECT_ID, envAntigravityCredential, parseAntigravityCredential } =
+		await import("../extensions/subscription/credentials.ts");
+
+	assert.deepEqual(
+		parseAntigravityCredential(
+			JSON.stringify({ token: " ya29.live ", projectId: " custom-project " }),
+		),
+		{ token: "ya29.live", projectId: "custom-project" },
+	);
+	assert.deepEqual(parseAntigravityCredential(JSON.stringify({ token: "ya29.live" })), {
+		token: "ya29.live",
+		projectId: DEFAULT_ANTIGRAVITY_PROJECT_ID,
+	});
+	assert.deepEqual(
+		parseAntigravityCredential(JSON.stringify({ token: "   ", projectId: "custom-project" })),
+		{ token: undefined, projectId: "custom-project" },
+	);
+	assert.deepEqual(parseAntigravityCredential("  bare-token  "), {
+		token: "bare-token",
+		projectId: DEFAULT_ANTIGRAVITY_PROJECT_ID,
+	});
+	assert.deepEqual(parseAntigravityCredential("   "), {
+		projectId: DEFAULT_ANTIGRAVITY_PROJECT_ID,
+	});
+
+	assert.deepEqual(
+		envAntigravityCredential({
+			ANTIGRAVITY_TOKEN: JSON.stringify({ token: "  " }),
+			ANTIGRAVITY_API_KEY: JSON.stringify({ token: "env-tok", projectId: "proj-1" }),
+		}),
+		{ token: "env-tok", projectId: "proj-1" },
+	);
+});
+
+test("antigravityCfg.fetchUsage sends unpacked token, projectId, and CLI user-agent", async () => {
+	const { DEFAULT_ANTIGRAVITY_USER_AGENT } = await import(
+		"../extensions/subscription/antigravity-quota.ts"
+	);
+	const saved = {
+		token: process.env.ANTIGRAVITY_TOKEN,
+		key: process.env.ANTIGRAVITY_API_KEY,
+		ua: process.env.ANTIGRAVITY_USER_AGENT,
+		fetch: globalThis.fetch,
+	};
+	const requests: Array<{ url: string; auth: string | null; ua: string | null; body: string }> = [];
+	process.env.ANTIGRAVITY_TOKEN = JSON.stringify({
+		token: "ya29.packed-token",
+		projectId: "my-code-assist-project",
+	});
+	delete process.env.ANTIGRAVITY_API_KEY;
+	delete process.env.ANTIGRAVITY_USER_AGENT;
+	globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+		const headers = new Headers(init?.headers);
+		requests.push({
+			url: String(url),
+			auth: headers.get("Authorization"),
+			ua: headers.get("User-Agent"),
+			body: typeof init?.body === "string" ? init.body : "",
+		});
+		if (String(url).includes("retrieveUserQuotaSummary")) {
+			return new Response(
+				JSON.stringify({
+					groups: [
+						{
+							displayName: "Gemini Models",
+							buckets: [
+								{
+									bucketId: "gemini-5h",
+									window: "5h",
+									remainingFraction: 0.8,
+									resetTime: "2026-10-16T09:00:00Z",
+								},
+							],
+						},
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		}
+		return new Response(JSON.stringify({ paidTier: { name: "Google AI Pro" } }), {
+			status: 200,
+			headers: { "Content-Type": "application/json" },
+		});
+	}) as typeof fetch;
+	try {
+		const usage = await antigravityCfg.fetchUsage();
+		assert.equal(usage.windows["gemini-5h"], 20);
+		assert.equal(requests[0]?.auth, "Bearer ya29.packed-token");
+		assert.equal(requests[0]?.ua, DEFAULT_ANTIGRAVITY_USER_AGENT);
+		assert.deepEqual(JSON.parse(requests[0]?.body ?? "{}"), {
+			project: "my-code-assist-project",
+		});
+	} finally {
+		globalThis.fetch = saved.fetch;
+		for (const [name, value] of [
+			["ANTIGRAVITY_TOKEN", saved.token],
+			["ANTIGRAVITY_API_KEY", saved.key],
+			["ANTIGRAVITY_USER_AGENT", saved.ua],
+		] as const) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	}
+});
+
+test("parseAntigravityQuota and antigravityCfg.render route Gemini, Argon, and 3P pools", () => {
+	const summary = parseAntigravityQuota({
+		groups: [
+			{
+				displayName: "Gemini Models",
+				buckets: [
+					{
+						bucketId: "gemini-weekly",
+						window: "weekly",
+						remainingFraction: 0.75,
+						resetTime: "2020-01-08T00:00:00Z",
+					},
+					{
+						bucketId: "gemini-5h",
+						window: "5h",
+						remainingFraction: 1,
+						resetTime: "2020-01-01T05:00:00Z",
+					},
+				],
+			},
+			{
+				displayName: "Claude and GPT models",
+				buckets: [
+					{
+						bucketId: "3p-weekly",
+						window: "weekly",
+						remainingFraction: 0,
+						resetTime: "2020-01-08T00:00:00Z",
+					},
+					{
+						bucketId: "3p-5h",
+						window: "5h",
+						remainingFraction: 0.5,
+						resetTime: "2020-01-01T05:00:00Z",
+					},
+				],
+			},
+			{
+				displayName: "Gemini 4 Argon",
+				buckets: [
+					{
+						bucketId: "gemini-argon-wtu-weekly",
+						window: "weekly",
+						remainingFraction: 0.61,
+						resetTime: "2020-01-08T00:00:00Z",
+					},
+				],
+			},
+		],
+	});
+
+	assert.deepEqual(summary.windows, {
+		"gemini-5h": 0,
+		"gemini-weekly": 25,
+		"3p-5h": 50,
+		"3p-weekly": 100,
+		"gemini-argon-wtu-weekly": 39,
+	});
+
+	assert.equal(
+		antigravityCfg.render(summary, mockTheme, "gemini-3.8-flash", "percent"),
+		"5h 0% ~<1m · W 25% ~<1m",
+	);
+	assert.equal(
+		antigravityCfg.render(summary, mockTheme, "gemini-4-argon", "percent"),
+		"W 39% ~<1m",
+	);
+	assert.equal(
+		antigravityCfg.render(summary, mockTheme, "claude-opus-5-5", "percent"),
+		"5h 50% ~<1m · W 100% ~<1m",
+	);
+	assert.equal(
+		antigravityCfg.render(summary, mockTheme, "gpt-oss-120b", "percent"),
+		"5h 50% ~<1m · W 100% ~<1m",
+	);
+
+	// Ultra plans omit the separate Argon bucket and share the Gemini pool.
+	const ultraData: UsageData = {
+		windows: { "gemini-5h": 10, "gemini-weekly": 20 },
+	};
+	assert.equal(
+		antigravityCfg.render(ultraData, mockTheme, "gemini-4-argon", "percent"),
+		"5h 10% · W 20%",
+	);
 });

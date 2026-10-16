@@ -12,7 +12,7 @@ Adds a minimal usage readout to Pi's footer status line — directly below the m
 
 #### Supported Providers
 
-* **Antigravity Pro** (Gemini & 3rd-party/Claude quotas with 5h rolling & weekly buckets)
+* **Antigravity Pro** (Gemini, Gemini Argon & 3rd-party Claude/GPT quotas with 5h rolling & weekly buckets)
 * **OpenAI / ChatGPT** (`openai` with ChatGPT OAuth: usage-settings link; API-key accounts are excluded)
 * **OpenAI Codex (legacy, `openai-codex`)** (Plus/Team/Pro plan 5h rolling & weekly quota windows, plus banked rate-limit resets)
 * **OpenCode Go** (Rolling, Weekly, and Monthly limits, plus DeepSeek peak/off-peak indicator)
@@ -396,7 +396,7 @@ My current Pi package setup (`pi list`):
 npm:pi-web-access
 npm:@juicesharp/rpiv-ask-user-question
 npm:@ff-labs/pi-fff
-npm:pi-antigravity
+npm:pi-provider-antigravity
 npm:pi-background-tasks
 npm:pi-hashline-edit-pro@latest
 git:github.com/Th1nhNg0/pi-extensions
