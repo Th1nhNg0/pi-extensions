@@ -113,3 +113,58 @@ test("a core that fails to load or register does not disable the others", async 
 		"[startup-entry] failed to register broken-register:",
 	]);
 });
+
+test("deferred cores preserve ordinary and session_start unsubscribe functions", async () => {
+	const handlers = new Map<string, Set<(event: unknown, ctx: ExtensionContext) => unknown>>();
+	const pi = {
+		on(event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) {
+			const list = handlers.get(event) ?? new Set();
+			list.add(handler);
+			handlers.set(event, list);
+			return () => {
+				list.delete(handler);
+			};
+		},
+	} as unknown as ExtensionAPI;
+	const calls: string[] = [];
+	let unsubscribeStart: () => void = () => {};
+	const errors: unknown[] = [];
+	const starts = await registerDeferredCores(
+		pi,
+		[
+			{
+				name: "disposable",
+				load: async () => ({
+					default: (api: ExtensionAPI) => {
+						const unsubscribe = api.on("agent_start", () => {
+							calls.push("agent");
+						});
+						assert.equal(typeof unsubscribe, "function");
+						unsubscribe();
+						unsubscribe();
+						const cancelBeforeReplay = api.on("session_start", () => {
+							calls.push("cancelled");
+						});
+						assert.equal(typeof cancelBeforeReplay, "function");
+						cancelBeforeReplay();
+						cancelBeforeReplay();
+						unsubscribeStart = api.on("session_start", () => {
+							calls.push("start");
+						});
+					},
+				}),
+			},
+		],
+		(_message, error) => {
+			errors.push(error);
+		},
+	);
+	assert.deepEqual(errors, []);
+	assert.equal(handlers.get("agent_start")?.size, 0);
+	for (const start of starts) await start({}, {} as ExtensionContext);
+	assert.deepEqual(calls, ["start"]);
+	unsubscribeStart();
+	unsubscribeStart();
+	for (const start of starts) await start({}, {} as ExtensionContext);
+	assert.deepEqual(calls, ["start"]);
+});

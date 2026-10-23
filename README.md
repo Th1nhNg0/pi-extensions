@@ -351,6 +351,7 @@ Preferences persist in the Pi agent directory (`~/.pi/agent` by default; honors 
 * Each rewrite makes one extra model call only when requested; `/rewrite model` can use a cheaper model.
 * Pass the prompt as command arguments because Pi clears the editor before a command handler runs; the rewrite is loaded into the editor for review and is not sent automatically.
 * Validation catches structural damage (lost tokens, mangled fences, bloat, assistant chatter) but not subtle changes of meaning. `/rewrite last` shows the original next to the rewrite so you can compare before sending.
+* If you edit the TUI draft or submit another `/rewrite` while a rewrite is running, the older result will not overwrite that newer draft. `/rewrite last` retains the full original and result for recovery. RPC clients cannot expose remote typing through Pi's `getEditorText()`, so only newer rewrite commands can be detected there.
 
 ---
 
@@ -447,9 +448,13 @@ To reload extensions during an active Pi session:
 
 ## 🛠️ Development
 
+Requires Node.js 22.19+; development checks target Pi 1.4.0. Pi remains a host-provided peer dependency.
+
 ```bash
 npm ci
 npm run check        # format:check + lint + typecheck + tests (what CI runs)
+npm audit            # check the locked dependency tree for known vulnerabilities
+npm outdated         # check for newer dependency releases
 npm run format       # apply Biome formatting
 npm run lint         # Biome lint (`npx biome lint --write .` applies safe fixes)
 ```

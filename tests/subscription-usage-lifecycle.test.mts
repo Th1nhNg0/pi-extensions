@@ -630,6 +630,52 @@ test("concurrent model selections coalesce in-flight fetch without duplicate HTT
 	assert.match(h.statuses.get("openai-codex")!, /25%/);
 });
 
+test("an in-flight quota fetch renders the newly selected model's pool", async (t) => {
+	const h = harness(t);
+	h.ctx.model = { provider: "antigravity", id: "gemini-3-pro" } as typeof h.ctx.model;
+	let finish!: (data: { windows: Record<string, number> }) => void;
+	h.providerFetches.antigravity.mock.mockImplementation(
+		async () =>
+			new Promise<{ windows: Record<string, number> }>((resolve) => {
+				finish = resolve;
+			}),
+	);
+	await h.event("session_start");
+	h.ctx.model = { provider: "antigravity", id: "claude-sonnet-4-5" } as typeof h.ctx.model;
+	await h.event("model_select");
+	assert.equal(h.providerFetches.antigravity.mock.callCount(), 1);
+	finish({ windows: { "gemini-5h": 10, "3p-5h": 90 } });
+	await flush();
+	assert.match(h.statuses.get("antigravity")!, /90%/);
+	assert.doesNotMatch(h.statuses.get("antigravity")!, /10%/);
+});
+
+for (const initialMode of ["bars", "off"]) {
+	test(`enabling usage from ${initialMode} restarts shared-cache watching`, async (t) => {
+		const h = harness(t, initialMode);
+		await h.event("session_start");
+		const previousWatches = h.watch.mock.callCount();
+		if (initialMode === "bars") {
+			await h.commands.get("usage")!.handler("toggle off", h.ctx);
+			assert.equal(h.unwatch.mock.callCount(), 1);
+		}
+		await h.commands.get("usage")!.handler("toggle bars", h.ctx);
+		await flush();
+		assert.equal(h.watch.mock.callCount(), previousWatches + 1);
+		const previousFetches = h.fetch.mock.callCount();
+		t.mock.method(fs.promises, "readFile", async () =>
+			JSON.stringify({
+				"openai-codex": { data: { windows: { "5h": 77 } }, fetchedAt: Date.now() + 1 },
+			}),
+		);
+		h.watchListener({ mtimeMs: 2 } as fs.Stats, { mtimeMs: 1 } as fs.Stats);
+		t.mock.timers.tick(100);
+		await flush();
+		assert.match(h.statuses.get("openai-codex")!, /77%/);
+		assert.equal(h.fetch.mock.callCount(), previousFetches);
+	});
+}
+
 test("Anthropic models do not trigger subscription usage requests", async (t) => {
 	const h = harness(t);
 	Object.assign(h.ctx, { model: { provider: "anthropic", id: "claude-opus-5" } });

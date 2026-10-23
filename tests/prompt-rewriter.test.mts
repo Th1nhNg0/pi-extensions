@@ -650,6 +650,7 @@ test("a second /rewrite while one is running is refused without losing its draft
 			return { stopReason: "stop", content: [{ type: "text", text: "Improve the auth flow." }] };
 		},
 	});
+	t.mock.method(h.ctx.ui, "getEditorText", () => "");
 	const first = h.command(ROUGH_PROMPT);
 	await new Promise((resolve) => setImmediate(resolve));
 	await h.command("second draft");
@@ -657,8 +658,60 @@ test("a second /rewrite while one is running is refused without losing its draft
 	assert.deepEqual(h.editorWrites, ["second draft"]);
 	release!();
 	await first;
+	// RPC getEditorText cannot observe remote edits; the command generation still protects them.
 	assert.equal(h.requests.length, 1);
-	assert.equal(h.editorWrites.at(-1), "Improve the auth flow.");
+	assert.deepEqual(h.editorWrites, ["second draft"]);
+	assert.equal(h.getEditorText(), "second draft");
+	assert.match(h.lastNotification().text, /editor changed.*\/rewrite last/);
+	await h.command("last");
+	assert.match(h.lastNotification().text, /Improve the auth flow\./);
+});
+
+for (const result of ["rewritten", "unchanged", "failed", "cancelled", "timed out"] as const) {
+	test(`a ${result} rewrite preserves text typed while it was running`, async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"], now: START });
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const h = harness(t, {
+			mode: "tui",
+			env: { PI_REWRITE_TIMEOUT_MS: "1000" },
+			streamResult: async () => {
+				await gate;
+				if (result === "failed") throw new Error("provider failed");
+				return {
+					stopReason: "stop",
+					content: [
+						{
+							type: "text",
+							text: result === "unchanged" ? ROUGH_PROMPT : "Improve the auth flow.",
+						},
+					],
+				};
+			},
+		});
+		const pending = h.command(ROUGH_PROMPT);
+		h.setEditorText("my newer draft");
+		if (result === "cancelled") h.press("\x1b");
+		else if (result === "timed out") t.mock.timers.tick(2000);
+		else release();
+		await pending;
+		assert.equal(h.getEditorText(), "my newer draft");
+		assert.deepEqual(h.editorWrites, []);
+		assert.match(h.lastNotification().text, /editor changed.*\/rewrite last/);
+		assert.equal(h.inputListeners, 0);
+		assert.equal(h.statuses.get("prompt-rewriter"), undefined);
+		release();
+	});
+}
+
+test("the last rewrite retains the full text for recovery without replacing the editor", () => {
+	const original = "make the auth flow better. ".repeat(30);
+	const rewritten = "Improve the auth flow. ".repeat(30);
+	const formatted = formatLastRewrite({ kind: "rewritten", original, text: rewritten, at: START });
+	assert.ok(formatted.includes(original));
+	assert.ok(formatted.includes(rewritten));
 });
 
 test("/rewrite help notifies instead of opening the editor", async (t) => {
@@ -744,9 +797,12 @@ test("shutdown clears the transient status", async (t) => {
 // ---------------------------------------------------------------------------
 
 test("a missing stream API is reported instead of throwing", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"], now: START });
+	const timeout = t.mock.method(globalThis, "setTimeout");
 	const h = harness(t, { streamApi: "none" });
 	await h.command(ROUGH_PROMPT);
 	assert.match(h.lastNotification().text, /cannot run requests/);
+	assert.equal(timeout.mock.callCount(), 0, "unsupported registries must not leave a timer behind");
 });
 
 test("the registry bridge prefers streamSimple and falls back to complete", async (t) => {

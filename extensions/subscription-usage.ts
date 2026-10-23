@@ -336,9 +336,9 @@ export default function (pi: ExtensionAPI) {
 			state.lastData = disk.data;
 			state.failStreak = 0;
 			cache.set(cfg.id, state);
-			state.lastText = renderText(cfg, disk.data, ui, model?.id);
+			state.lastText = renderText(cfg, disk.data, ui, currentModelId(cfg.id, ctx));
 			renderUi(ui, cfg.id, state.lastText);
-			arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
+			arm(cfg, ctx, nextDelay(state, Date.now(), currentModelId(cfg.id, ctx), cfg.id));
 		}
 	}
 
@@ -413,6 +413,12 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	/** A coalesced provider fetch may finish after switching quota pools. */
+	function currentModelId(providerId: string, ctx: StatusCtx): string | undefined {
+		const model = safeModel(currentCtx ?? ctx);
+		return model?.provider === providerId ? model.id : undefined;
+	}
+
 	interface RefreshOptions {
 		/** Skip the event cooldown (session start, model switch, manual refresh). */
 		force?: boolean;
@@ -448,7 +454,6 @@ export default function (pi: ExtensionAPI) {
 
 		const request = (async (): Promise<RefreshOutcome> => {
 			const now = Date.now();
-			const model = safeModel(ctx);
 
 			// Sync with disk cache if another session fetched newer data.
 			const disk = (await loadDiskCache())[cfg.id];
@@ -464,7 +469,7 @@ export default function (pi: ExtensionAPI) {
 			// Event pokes (agent_settled) skip when we fetched moments ago, or
 			// while the API is failing and no reset is about to flip. Forced
 			// refetches (session start, model switch) always hit the API.
-			const reset = earliestReset(state.lastData, model?.id, cfg.id, now);
+			const reset = earliestReset(state.lastData, currentModelId(cfg.id, ctx), cfg.id, now);
 			const resetSoon = reset !== undefined && reset - now < COOLDOWN_MS;
 			if (
 				!force &&
@@ -474,7 +479,7 @@ export default function (pi: ExtensionAPI) {
 			) {
 				const ui = safeUi(ctx);
 				if (ui && state.lastData) {
-					state.lastText = renderText(cfg, state.lastData, ui, model?.id);
+					state.lastText = renderText(cfg, state.lastData, ui, currentModelId(cfg.id, ctx));
 				}
 				renderUi(ui, cfg.id, state.lastText);
 				return "cached";
@@ -486,7 +491,7 @@ export default function (pi: ExtensionAPI) {
 			if (!hard && now - state.lastFetch < MIN_FETCH_GAP_MS && state.lastData) {
 				const ui = safeUi(ctx);
 				if (ui) {
-					state.lastText = renderText(cfg, state.lastData, ui, model?.id);
+					state.lastText = renderText(cfg, state.lastData, ui, currentModelId(cfg.id, ctx));
 					renderUi(ui, cfg.id, state.lastText);
 				}
 				return "cached";
@@ -501,7 +506,7 @@ export default function (pi: ExtensionAPI) {
 				state.lastFetch = now;
 				state.failStreak = 0;
 				state.lastData = data;
-				state.lastText = renderText(cfg, data, ui, model?.id);
+				state.lastText = renderText(cfg, data, ui, currentModelId(cfg.id, ctx));
 				renderUi(ui, cfg.id, state.lastText);
 				await saveDiskCache(cfg.id, data);
 				return "fetched";
@@ -512,7 +517,7 @@ export default function (pi: ExtensionAPI) {
 					// No credential for this account: nothing was sent to the API, so
 					// this is availability, not failure — no backoff, no error log.
 					state.lastText = state.lastData
-						? renderText(cfg, state.lastData, ui, model?.id)
+						? renderText(cfg, state.lastData, ui, currentModelId(cfg.id, ctx))
 						: ui.theme.fg("warning", `${cfg.id}: no key`);
 					renderUi(ui, cfg.id, state.lastText);
 					return "skipped";
@@ -523,7 +528,7 @@ export default function (pi: ExtensionAPI) {
 						(err instanceof Error ? err.message : String(err)),
 				);
 				if (state.lastData) {
-					const base = renderText(cfg, state.lastData, ui, model?.id);
+					const base = renderText(cfg, state.lastData, ui, currentModelId(cfg.id, ctx));
 					state.lastText = ui.theme.fg("warning", `${base} ⚠`);
 					renderUi(ui, cfg.id, state.lastText);
 				} else {
@@ -555,8 +560,7 @@ export default function (pi: ExtensionAPI) {
 				if (!safeUi(ctx) || cache.get(cfg.id) !== state) return;
 				await refresh(cfg, ctx, { scheduled: true });
 				if (!safeUi(ctx) || cache.get(cfg.id) !== state) return;
-				const model = safeModel(ctx);
-				arm(cfg, ctx, nextDelay(state, Date.now(), model?.id, cfg.id));
+				arm(cfg, ctx, nextDelay(state, Date.now(), currentModelId(cfg.id, ctx), cfg.id));
 			})();
 		}, delayMs);
 		state.timer.unref?.();
@@ -568,10 +572,9 @@ export default function (pi: ExtensionAPI) {
 			if (!safeUi(ctx)) return;
 			const outcome = await refresh(cfg, ctx, { force });
 			const s = cache.get(cfg.id);
-			const model = safeModel(ctx);
 			if (s && safeUi(ctx)) {
 				if (outcome === "fetched" || !s.timer) {
-					arm(cfg, ctx, nextDelay(s, Date.now(), model?.id, cfg.id));
+					arm(cfg, ctx, nextDelay(s, Date.now(), currentModelId(cfg.id, ctx), cfg.id));
 				}
 			}
 		})();
@@ -637,6 +640,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		currentCtx = ctx;
 		// Re-render from cached data so the footer updates immediately.
 		const model = safeModel(ctx);
 		const cfg = cfgs.find((c) => c.id === model?.provider);
@@ -645,6 +649,8 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`Subscription usage style: ${next}`, "info");
 			return;
 		}
+		if (cfg) startDiskCacheWatcher();
+		else stopDiskCacheWatcher();
 		const ui = safeUi(ctx);
 		const state = cfg ? cache.get(cfg.id) : undefined;
 		if (cfg && ui && state?.lastData) {

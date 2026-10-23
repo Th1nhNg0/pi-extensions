@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 type EventHandler = (event: unknown, ctx: ExtensionContext) => unknown;
 type CoreModule = { default: (pi: ExtensionAPI) => void | Promise<void> };
-type EventRegistrar = (event: string, handler: EventHandler) => void;
+type EventRegistrar = (event: string, handler: EventHandler) => () => void;
 /** One loader per core, so a core that fails to import cannot take the others down. */
 export type CoreLoader = { name: string; load: () => Promise<CoreModule> };
 
@@ -39,12 +39,15 @@ export async function registerDeferredCores(
 		const deferredPi = new Proxy(pi, {
 			get(target, property) {
 				if (property === "on") {
-					return (event: string, handler: EventHandler): void => {
+					return (event: string, handler: EventHandler): (() => void) => {
 						if (event === "session_start") {
-							coreStarts.push(handler);
-							return;
+							let active = true;
+							coreStarts.push((event, ctx) => (active ? handler(event, ctx) : undefined));
+							return () => {
+								active = false;
+							};
 						}
-						registerEvent(event, handler);
+						return registerEvent(event, handler);
 					};
 				}
 				const value = Reflect.get(target, property, target);

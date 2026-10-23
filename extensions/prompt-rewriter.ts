@@ -76,7 +76,6 @@ export const REWRITE_SPECS: readonly CommandSpec[] = [
 const DEFAULT_TIMEOUT_MS = 15_000;
 const CONTEXT_MESSAGES = 3;
 const CONTEXT_CHARS_PER_MESSAGE = 600;
-const LIST_TRUNCATE_CHARS = 400;
 
 /** The meta-prompt. Keep the rewrite cheap, faithful, and commentary-free. */
 export const REWRITER_SYSTEM_PROMPT = `You rewrite a developer's rough request into a precise prompt for a coding agent that will act on it.
@@ -564,6 +563,12 @@ export async function rewritePrompt(options: RewriteOptions): Promise<RewriteOut
 		return { status: "unavailable", text: original, reason: resolved.error ?? "no model" };
 	}
 
+	const bridge = registryBridge(options.ctx);
+	const useStream = typeof bridge.streamSimple === "function";
+	if (!useStream && typeof bridge.complete !== "function") {
+		return { status: "unavailable", text: original, reason: "model registry cannot run requests" };
+	}
+
 	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const controller = new AbortController();
 	let timedOut = false;
@@ -580,7 +585,6 @@ export async function rewritePrompt(options: RewriteOptions): Promise<RewriteOut
 
 	const reasoning =
 		options.thinking && options.thinking !== "default" ? options.thinking : undefined;
-	const bridge = registryBridge(options.ctx);
 	const baseOptions: Record<string, unknown> = {
 		signal: controller.signal,
 		maxTokens: Math.min(2400, Math.max(512, Math.ceil(trimmed.length / 3) + 512)),
@@ -604,10 +608,6 @@ export async function rewritePrompt(options: RewriteOptions): Promise<RewriteOut
 			},
 		],
 	};
-	const useStream = typeof bridge.streamSimple === "function";
-	if (!useStream && typeof bridge.complete !== "function") {
-		return { status: "unavailable", text: original, reason: "model registry cannot run requests" };
-	}
 
 	let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 	const timeoutPromise = new Promise<undefined>((resolve) => {
@@ -734,9 +734,9 @@ export function formatLastRewrite(last: LastOutcome | undefined): string {
 	}
 	const when = new Date(last.at).toISOString().replace("T", " ").slice(0, 19);
 	const lines = [`${last.kind} · ${when} UTC`];
-	lines.push("", "Original:", truncate(last.original, LIST_TRUNCATE_CHARS));
+	lines.push("", "Original:", last.original);
 	if (last.text !== undefined) {
-		lines.push("", "Rewritten:", truncate(last.text, LIST_TRUNCATE_CHARS));
+		lines.push("", "Rewritten:", last.text);
 	}
 	if (last.reason) {
 		lines.push("", `Reason: ${last.reason}`);
@@ -816,6 +816,8 @@ interface RewriterState {
 	last: LastOutcome | undefined;
 	/** True while a rewrite runs; a second /rewrite is refused, not queued. */
 	busy: boolean;
+	/** A newer rewrite command revokes the previous command's editor write. */
+	draftVersion: number;
 }
 
 function createState(env: RewriteEnv): RewriterState {
@@ -824,6 +826,7 @@ function createState(env: RewriteEnv): RewriterState {
 		prefs: undefined,
 		last: undefined,
 		busy: false,
+		draftVersion: 0,
 	};
 }
 
@@ -891,18 +894,30 @@ async function improveDraft(
 		console.error("[prompt-rewriter] /rewrite requires TUI or RPC mode to review the result.");
 		return;
 	}
+	const draftVersion = ++state.draftVersion;
 	if (state.busy) {
 		// The draft would otherwise be lost: Pi already cleared the editor.
 		ctx.ui.setEditorText(text);
 		notify(ctx, "A rewrite is already running — your draft is back in the editor.", "warning");
 		return;
 	}
+	const editorBefore = ctx.ui.getEditorText();
 	state.busy = true;
 	let outcome: RewriteOutcome;
 	try {
 		outcome = await runWithStatus(state, ctx, text);
 	} finally {
 		state.busy = false;
+	}
+	// TUI typing is observable; RPC cannot read remote editor text, but a newer
+	// /rewrite still invalidates this write even when getEditorText() is empty.
+	if (state.draftVersion !== draftVersion || ctx.ui.getEditorText() !== editorBefore) {
+		notify(
+			ctx,
+			"Your editor changed — kept it untouched. See /rewrite last for the result.",
+			"info",
+		);
+		return;
 	}
 	if (outcome.status === "rewritten") {
 		ctx.ui.setEditorText(outcome.text);
