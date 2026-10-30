@@ -172,6 +172,15 @@ export class WslDiscordIpcTransport extends EventEmitter {
 		return this.connected;
 	}
 
+	/**
+	 * The bundled RPC client gates `Client.isConnected` and the transport teardown
+	 * inside `Client.destroy()` on `isOpen`. Without this getter every WSL relay is
+	 * reported as disconnected and its npiperelay process survives the cleanup.
+	 */
+	get isOpen(): boolean {
+		return this.connected;
+	}
+
 	async connect(): Promise<void> {
 		if (this.connected) return;
 
